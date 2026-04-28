@@ -309,7 +309,7 @@ Track progress by checking off items as they land. Effort estimates and notes fo
 - [ ] **T5 encoder → CoreML** (1-2 weeks) — Model conversion + Swift wrapper
 - [x] **K-means clustering** (1 week) — Standard algorithm, use Accelerate
 - [x] **4-bit residual codec** (1 week) — ~200 lines, bit-level packing; round-trip property tests
-- [ ] **LSM-tree index structure** (1 week) — Cascading merge logic
+- [x] **LSM-tree index structure** (1 week) — Cascading merge logic
 - [ ] **Search pipeline** (1-2 weeks) — Centroid match → residual decode → MaxSim scoring
 - [ ] **RRF + FTS5 hybrid** (3-4 days) — Adapt Witchcraft's hybrid fusion
 - [ ] **Async Swift API** (3-4 days) — `SwitchcraftStore` actor wrapper
