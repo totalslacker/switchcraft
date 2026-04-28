@@ -307,7 +307,7 @@ Track progress by checking off items as they land. Effort estimates and notes fo
 - [x] **SQLite backend** (1-2 weeks) — reference implementation of the storage protocol; native sqlite3
 - [ ] **BPE tokenizer** (1-2 weeks) — Port from HuggingFace tokenizer.json; identical token IDs vs Rust
 - [ ] **T5 encoder → CoreML** (1-2 weeks) — Model conversion + Swift wrapper
-- [ ] **K-means clustering** (1 week) — Standard algorithm, use Accelerate
+- [x] **K-means clustering** (1 week) — Standard algorithm, use Accelerate
 - [x] **4-bit residual codec** (1 week) — ~200 lines, bit-level packing; round-trip property tests
 - [ ] **LSM-tree index structure** (1 week) — Cascading merge logic
 - [ ] **Search pipeline** (1-2 weeks) — Centroid match → residual decode → MaxSim scoring
