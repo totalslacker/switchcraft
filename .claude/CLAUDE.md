@@ -84,11 +84,20 @@ swift test -c release
 
 Performance-sensitive tests should be run in release configuration. CoreML inference tests are marked as integration tests and require model assets present locally.
 
-### Before Committing Code
+### Before Committing Code — Hard Rule
 
-- `swift test` must pass.
+**Always run the full test suite before every commit. No exceptions.**
+
+This is non-negotiable, even for small changes. "It's just a one-line fix" is exactly when bugs slip through.
+
+- Run `swift test` and wait for it to finish green before staging the commit.
 - Performance regression tests must not regress beyond their thresholds (see `docs/Plan.md` performance section).
-- Do not commit code with failing tests. Fix the tests or fix the code.
+- If tests fail, **do not commit**. Fix the tests or fix the code. Do not stash, do not commit "WIP and fix later", do not skip with `--no-verify`.
+- Documentation-only commits (markdown/comment-only edits with no code or build changes) may skip the suite, but err on the side of running it.
+
+### Before Merging — Hard Rule
+
+**Always run the full test suite before merging to main.** Even if CI ran on the branch, re-run locally on the merge result so a bad merge can't sneak in.
 
 ## Storage Layer
 
