@@ -1,0 +1,32 @@
+# .fabrik/config.yaml — project-level configuration for Fabrik
+# Commit this file to git so project settings travel with the repo.
+# Keep secrets (FABRIK_TOKEN, GITHUB_TOKEN) in .env (gitignored).
+#
+# Precedence: CLI flag > shell env var > .env > .fabrik/config.yaml > built-in default
+
+# Required: GitHub repository owner (org or username)
+owner: totalslacker
+
+# Required: GitHub repository name
+repo: switchcraft
+
+# Required: GitHub project number (the number in the project URL)
+project: 5
+
+# Required: Your GitHub username (Fabrik only processes issues assigned to you)
+user: totalslacker
+
+# Optional settings (defaults shown):
+# owner_type: organization         # Owner type parsed from project URL: "user" or "organization".
+# stages: ./.fabrik/stages      # Path to stage YAML configs directory.
+# poll: 30                      # Polling interval in seconds. Lower = more responsive, higher = fewer API calls.
+# max_concurrent: 5             # Max parallel Claude sessions. Tune based on your API tier capacity.
+# max_retries: 3                # Max stage failures before pausing an issue (0 = unlimited retries).
+# yolo: false                   # Auto-advance issues through stages without human card moves.
+# auto_upgrade: false           # Self-upgrade from origin/main when idle (self-evolving workflow).
+# git_ssh: false                # Use SSH clone URLs (git@github.com) instead of HTTPS. Also: --ssh flag or FABRIK_GIT_SSH env var.
+# tui: false                    # Disable the interactive TUI dashboard (enabled by default when a real terminal is detected).
+# terminal: ""                  # Terminal for TUI log viewer: terminal, iterm2, ghostty, kitty, alacritty, warp.
+#                               # Auto-detected from TERM_PROGRAM if not set; set explicitly for kitty.
+# debug_output: false           # Save raw Claude output to .fabrik/debug/ for diagnosing prompt issues.
+# version: ""                   # Project version shown in TUI footer. Auto-inferred from package.json/go.mod if not set.
