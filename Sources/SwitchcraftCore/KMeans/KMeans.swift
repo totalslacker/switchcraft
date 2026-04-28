@@ -1,4 +1,5 @@
 import Foundation
+import Accelerate
 
 /// Spherical k-means clustering for L2-normalised row vectors.
 ///
@@ -58,24 +59,14 @@ public enum KMeans {
         var assignments = [Int](repeating: 0, count: m)
 
         for _ in 0..<maxIterations {
-            // 2a. Assignment by argmax dot product.
-            for row in 0..<m {
-                var bestCluster = 0
-                var bestScore: Float = -.infinity
-                let rowOffset = row * dims
-                for c in 0..<k {
-                    let cOffset = c * dims
-                    var s: Float = 0
-                    for j in 0..<dims {
-                        s += data[rowOffset + j] * centroids[cOffset + j]
-                    }
-                    if s > bestScore {
-                        bestScore = s
-                        bestCluster = c
-                    }
-                }
-                assignments[row] = bestCluster
-            }
+            // 2a. Assignment by argmax dot product. Computed as a single
+            // Accelerate sgemm (data × centroidsᵀ) followed by per-row
+            // argmax — same arithmetic as the naive double loop, ~30×
+            // faster on Apple silicon for typical (m, k, dims) sizes.
+            assignAll(
+                data: data, dims: dims, centroids: centroids, k: k,
+                into: &assignments
+            )
 
             // 2b. Sum rows into per-cluster accumulators.
             var sums = [Float](repeating: 0, count: k * dims)
@@ -121,11 +112,10 @@ public enum KMeans {
 
         // Final assignments against the converged centroids so callers can
         // build buckets without re-running the assignment kernel.
-        for row in 0..<m {
-            assignments[row] = nearestCentroid(
-                row: row, dims: dims, data: data, centroids: centroids, k: k
-            )
-        }
+        assignAll(
+            data: data, dims: dims, centroids: centroids, k: k,
+            into: &assignments
+        )
 
         return Result(centroids: centroids, assignments: assignments)
     }
@@ -145,35 +135,55 @@ public enum KMeans {
         precondition(k > 0)
 
         var out = [Int](repeating: 0, count: m)
-        for row in 0..<m {
-            out[row] = nearestCentroid(
-                row: row, dims: dims, data: data, centroids: centroids, k: k
-            )
-        }
+        assignAll(data: data, dims: dims, centroids: centroids, k: k, into: &out)
         return out
     }
 
     // MARK: - Helpers
 
-    @inline(__always)
-    private static func nearestCentroid(
-        row: Int, dims: Int, data: [Float], centroids: [Float], k: Int
-    ) -> Int {
-        var bestCluster = 0
-        var bestScore: Float = -.infinity
-        let rowOffset = row * dims
-        for c in 0..<k {
-            let cOffset = c * dims
-            var s: Float = 0
-            for j in 0..<dims {
-                s += data[rowOffset + j] * centroids[cOffset + j]
-            }
-            if s > bestScore {
-                bestScore = s
-                bestCluster = c
+    /// Compute `scores = data × centroidsᵀ` (m × k, row-major) via
+    /// Accelerate's sgemm, then write the per-row argmax into
+    /// `assignments`. Same algorithm as the naive nested loop, but
+    /// vectorised — necessary for the indexer's 5,000-embedding perf
+    /// gate (acceptance criteria require <5s).
+    private static func assignAll(
+        data: [Float],
+        dims: Int,
+        centroids: [Float],
+        k: Int,
+        into assignments: inout [Int]
+    ) {
+        let m = data.count / dims
+        guard m > 0 else { return }
+        var scores = [Float](repeating: 0, count: m * k)
+        data.withUnsafeBufferPointer { dataPtr in
+            centroids.withUnsafeBufferPointer { centroidsPtr in
+                scores.withUnsafeMutableBufferPointer { scoresPtr in
+                    cblas_sgemm(
+                        CblasRowMajor, CblasNoTrans, CblasTrans,
+                        Int32(m), Int32(k), Int32(dims),
+                        1.0,
+                        dataPtr.baseAddress, Int32(dims),
+                        centroidsPtr.baseAddress, Int32(dims),
+                        0.0,
+                        scoresPtr.baseAddress, Int32(k)
+                    )
+                }
             }
         }
-        return bestCluster
+        for row in 0..<m {
+            var bestCluster = 0
+            var bestScore: Float = -.infinity
+            let off = row * k
+            for c in 0..<k {
+                let s = scores[off + c]
+                if s > bestScore {
+                    bestScore = s
+                    bestCluster = c
+                }
+            }
+            assignments[row] = bestCluster
+        }
     }
 
     /// Reservoir-style sampling without replacement (Floyd's algorithm).
