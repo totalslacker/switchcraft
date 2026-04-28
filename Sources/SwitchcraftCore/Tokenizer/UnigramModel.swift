@@ -109,6 +109,9 @@ struct UnigramModel: Sendable {
         return result
     }
 
+    /// Number of entries in the vocabulary.
+    var vocabCount: Int { vocab.count }
+
     /// Vocab ID for an exact-match token string, or nil.
     func id(for token: String) -> Int32? {
         for (i, e) in vocab.enumerated() where e.token == token {

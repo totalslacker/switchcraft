@@ -32,7 +32,10 @@ struct DoubleArrayTrie: Sendable {
     /// `matchLength` is the number of bytes consumed; `stringBlobOffset` indexes into `stringBlob`.
     func commonPrefixSearch(_ bytes: ArraySlice<UInt8>) -> [(length: Int, value: Int)] {
         var results: [(length: Int, value: Int)] = []
+        guard !nodes.isEmpty else { return results }
         var nodePos = 0
+        // Initial root-offset XOR (matches spm_precompiled Rust exactly).
+        nodePos ^= Int(Self.offset(nodes[nodePos]))
         for (i, c) in bytes.enumerated() {
             if c == 0 { break }
             nodePos ^= Int(c)
