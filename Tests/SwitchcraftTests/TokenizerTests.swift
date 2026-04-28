@@ -162,6 +162,23 @@ struct TokenizerDecodeTests {
         let text = try FixtureLoader.tokenizer.decode([])
         #expect(text == "")
     }
+
+    @Test("decode skips added-token IDs (xtr-base-en added tokens look like <…>)")
+    func decodeSkipsAddedTokens() throws {
+        // <extra_id_5> = 32094, <extra_id_42> = 32057. The decode loop drops
+        // tokens shaped like <…>; both vocab and added entries match the
+        // pattern so injecting added entries into idToToken must not change
+        // observable decode output.
+        let ids = try FixtureLoader.tokenizer.encode(
+            "prefix <extra_id_5> middle <extra_id_42> suffix",
+            addSpecialTokens: false
+        )
+        let text = try FixtureLoader.tokenizer.decode(ids)
+        // Each text span gets its own leading ▁ from metaspace; the metaspace
+        // decoder emits one space per ▁, and dropped added tokens leave no
+        // gap — so adjacent words appear with a single space between them.
+        #expect(text == "prefix middle suffix")
+    }
 }
 
 // MARK: - DoubleArrayTrie unit tests
