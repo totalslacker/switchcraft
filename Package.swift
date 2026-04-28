@@ -41,7 +41,8 @@ let package = Package(
                 "SwitchcraftCore",
                 "SwitchcraftStorageTesting",
             ],
-            path: "Tests/SwitchcraftTests"
+            path: "Tests/SwitchcraftTests",
+            resources: [.copy("../Fixtures")]
         ),
     ]
 )
