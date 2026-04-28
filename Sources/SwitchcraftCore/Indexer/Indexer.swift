@@ -30,6 +30,20 @@ import Foundation
 /// reading source embeddings from `storage.chunk(id:)`.
 public actor Indexer {
 
+    /// Errors thrown by `Indexer` when the in-memory ledger cannot
+    /// satisfy a flush — typically because the indexer was created
+    /// over a storage that already contains generations whose source
+    /// embeddings were never `add`-ed in this session.
+    public enum Error: Swift.Error, Sendable, Equatable {
+        /// The cascade walk computed a row count that does not match the
+        /// number of embeddings the in-memory ledger holds for the chunk
+        /// range being merged. Almost always means the ledger has been
+        /// reset (actor restart) while storage retained generations from
+        /// a prior session. Call `clearIndex()` and rebuild, or recreate
+        /// the indexer over an empty storage.
+        case ledgerOutOfSync(ledgerRows: Int, expected: Int)
+    }
+
     // MARK: - State
 
     private let storage: any SwitchcraftStorage
@@ -160,8 +174,9 @@ public actor Indexer {
             }
         }
         let m = allRows.count
-        precondition(m == total,
-                     "ledger row count (\(m)) must equal cascade total (\(total))")
+        if m != total {
+            throw Error.ledgerOutOfSync(ledgerRows: m, expected: total)
+        }
 
         // 4. Build the per-chunk sqrt-sample training set, matching
         // Witchcraft's `sample_embeddings_for_kmeans`.
@@ -328,15 +343,13 @@ public actor Indexer {
     }
 
     /// Floyd's algorithm for sampling `count` distinct integers from
-    /// `[0, population)`. Mirrors `KMeans.sampleDistinct` so the
-    /// indexer's RNG advances at the same rate as the k-means kernel.
+    /// `[0, population)`. Mirrors `KMeans.sampleDistinct` byte-for-byte
+    /// (including RNG consumption when `count == population`) so two
+    /// builds with the same seed produce identical training-set selections.
     private static func sampleDistinct<R: RandomNumberGenerator>(
         count: Int, from population: Int, rng: inout R
     ) -> [Int] {
         precondition(count <= population)
-        if count == population {
-            return Array(0..<population)
-        }
         var picked = Set<Int>()
         picked.reserveCapacity(count)
         var ordered = [Int]()

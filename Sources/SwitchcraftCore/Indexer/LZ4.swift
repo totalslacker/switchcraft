@@ -29,6 +29,10 @@ public enum LZ4 {
     ///
     ///     [u32 LE uncompressed size][raw LZ4 block]
     public static func compressPrependSize(_ input: Data) -> Data {
+        precondition(
+            input.count <= Int(UInt32.max),
+            "LZ4.compressPrependSize cannot frame inputs larger than UInt32.max bytes (got \(input.count))"
+        )
         var out = Data()
         out.reserveCapacity(4 + input.count)
 
@@ -111,6 +115,13 @@ public enum LZ4 {
         let expected = Int(expectedSize)
 
         if expected == 0 {
+            // Intentionally lenient: `lz4_flex::compress_prepend_size`
+            // can emit a trailing zero-byte token after the 4-byte size
+            // header for empty inputs (see committed parity fixture
+            // `Tests/Fixtures/indices/sample-pairs.json` "empty" case).
+            // Tightening to `blob.count == 4` would break decode-side
+            // parity, which is this codec's primary contract. Any
+            // trailing bytes are ignored when the declared size is 0.
             return Data()
         }
 
