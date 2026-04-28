@@ -13,6 +13,13 @@ public struct Tokenizer: Sendable {
     private let postProcessor: TemplatePostProcessor
     private let metaspaceDecoder: MetaspaceDecoder
     private let idToToken: [Int32: String]
+    /// All `added_tokens` entries from the source `tokenizer.json`. Exposed at
+    /// internal visibility so the test target's `@testable import` can iterate
+    /// them for the parity guard test (every entry must round-trip to its own
+    /// declared id with `addSpecialTokens: false`).
+    let addedTokens: [AddedToken]
+    private let preNormMatcher: AddedTokenMatcher
+    private let postNormMatcher: AddedTokenMatcher
 
     public init(contentsOf path: String) throws {
         let url = URL(fileURLWithPath: path)
@@ -72,18 +79,38 @@ public struct Tokenizer: Sendable {
         let unigram = try UnigramModel(modelJSON: modelJSON)
         model = unigram
 
-        // Added tokens → name → ID lookup (special tokens like </s>, <pad>, <extra_id_N>).
-        // The Unigram vocab already contains these at their canonical IDs, but
-        // post-processor templates reference them by string name.
+        // Parse the full `added_tokens` array, including all per-entry flags.
+        // These drive (a) the post-processor's name→id template lookup,
+        // (b) pre-segmentation matching during encode, and (c) the decode-side
+        // id→string map. PR #7 only kept `content → id`; that was correct for
+        // xtr-base-en by coincidence (every added-token id also lives in the
+        // Unigram vocab at the same id). Issue #8 makes the priority match
+        // explicit so any future tokenizer behaves correctly without relying
+        // on that coincidence.
+        var addedTokens: [AddedToken] = []
         var addedTokenIDs: [String: Int32] = [:]
         if let added = root["added_tokens"] as? [[String: Any]] {
             for entry in added {
-                if let name = entry["content"] as? String,
-                   let id = entry["id"] as? Int {
-                    addedTokenIDs[name] = Int32(id)
+                guard let name = entry["content"] as? String,
+                      let idInt = entry["id"] as? Int else {
+                    continue
                 }
+                let id = Int32(idInt)
+                addedTokenIDs[name] = id
+                addedTokens.append(AddedToken(
+                    id: id,
+                    content: name,
+                    normalized: entry["normalized"] as? Bool ?? false,
+                    singleWord: entry["single_word"] as? Bool ?? false,
+                    lstrip: entry["lstrip"] as? Bool ?? false,
+                    rstrip: entry["rstrip"] as? Bool ?? false,
+                    special: entry["special"] as? Bool ?? false
+                ))
             }
         }
+        self.addedTokens = addedTokens
+        self.preNormMatcher = AddedTokenMatcher(entries: addedTokens.filter { !$0.normalized })
+        self.postNormMatcher = AddedTokenMatcher(entries: addedTokens.filter { $0.normalized })
 
         // PostProcessor (TemplateProcessing)
         guard let postJSON = root["post_processor"] as? [String: Any] else {
@@ -103,14 +130,23 @@ public struct Tokenizer: Sendable {
         }
         metaspaceDecoder = MetaspaceDecoder(from: decJSON)
 
-        // Build ID → token map for decoding.
+        // Build ID → token map for decoding from the union of vocab + added
+        // tokens, so future tokenizers whose added-token IDs fall outside the
+        // Unigram vocab range still round-trip through `decode`. For
+        // xtr-base-en every added-token id already exists in the vocab with
+        // the same content; the union is identity here, but added entries
+        // take precedence on collision because they are the public canonical
+        // form.
         var reverse: [Int32: String] = [:]
-        reverse.reserveCapacity(unigram.vocabCount)
+        reverse.reserveCapacity(unigram.vocabCount + addedTokens.count)
         for i in 0..<unigram.vocabCount {
             let id = Int32(i)
             if let tok = unigram.token(for: id) {
                 reverse[id] = tok
             }
+        }
+        for entry in addedTokens {
+            reverse[entry.id] = entry.content
         }
         idToToken = reverse
     }
@@ -118,10 +154,39 @@ public struct Tokenizer: Sendable {
     /// Encode `text` to token IDs via the full pipeline. When `addSpecialTokens` is
     /// `true` (default), the post-processor template is applied, appending `</s>` for
     /// xtr-base-en. Set to `false` for raw token streams.
+    ///
+    /// Pipeline (per HuggingFace `added_vocabulary.rs`):
+    ///   1. Pre-normalization split on `normalized: false` added tokens.
+    ///      Matching spans are emitted as their declared id directly,
+    ///      bypassing normalization and Viterbi.
+    ///   2. Each surviving raw text span is normalized.
+    ///   3. Post-normalization split on `normalized: true` added tokens (no-op
+    ///      for xtr-base-en, where every entry has `normalized: false`).
+    ///   4. Each surviving normalized span is metaspace pre-tokenized and
+    ///      Viterbi-encoded.
+    ///   5. The post-processor template wraps the full id stream.
+    ///
+    /// When neither matcher fires (no added-token substrings in the input)
+    /// the path is byte-identical to `normalize → metaspace → Viterbi → post`.
     public func encode(_ text: String, addSpecialTokens: Bool = true) throws -> [Int32] {
-        let normalized = normalizer.normalize(text)
-        let preTokens = preTokenizer.tokenize(normalized)
-        let modelIDs = model.encode(preTokens)
+        var modelIDs: [Int32] = []
+        for preNormSpan in preNormMatcher.split(text) {
+            switch preNormSpan {
+            case .added(let id):
+                modelIDs.append(id)
+            case .text(let raw):
+                let normalized = normalizer.normalize(raw)
+                for postNormSpan in postNormMatcher.split(normalized) {
+                    switch postNormSpan {
+                    case .added(let id):
+                        modelIDs.append(id)
+                    case .text(let segment):
+                        let preTokens = preTokenizer.tokenize(segment)
+                        modelIDs.append(contentsOf: model.encode(preTokens))
+                    }
+                }
+            }
+        }
         return postProcessor.process(modelIDs, addSpecialTokens: addSpecialTokens)
     }
 
