@@ -13,7 +13,10 @@ struct DoubleArrayTrie: Sendable {
         guard data.count >= 4 else {
             throw TokenizerError.malformedJSON(underlying: DoubleArrayError.truncatedHeader)
         }
-        let trieBytes = Int(data.withUnsafeBytes { $0.load(as: UInt32.self).littleEndian })
+        // Header is little-endian per spm_precompiled. Use loadUnaligned because Data
+        // does not guarantee 4-byte alignment of its underlying buffer.
+        let header = data.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
+        let trieBytes = Int(UInt32(littleEndian: header))
         guard trieBytes % 4 == 0, data.count >= 4 + trieBytes else {
             throw TokenizerError.malformedJSON(underlying: DoubleArrayError.truncatedTrie)
         }
@@ -21,7 +24,10 @@ struct DoubleArrayTrie: Sendable {
         var nodeArray = [UInt32](repeating: 0, count: nodeCount)
         data.withUnsafeBytes { ptr in
             let base = ptr.baseAddress!.advanced(by: 4)
-            _ = memcpy(&nodeArray, base, trieBytes)
+            for i in 0..<nodeCount {
+                let raw = base.loadUnaligned(fromByteOffset: i * 4, as: UInt32.self)
+                nodeArray[i] = UInt32(littleEndian: raw)
+            }
         }
         nodes = nodeArray
         let blobStart = 4 + trieBytes
