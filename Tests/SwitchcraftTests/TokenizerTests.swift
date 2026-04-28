@@ -186,6 +186,150 @@ struct DoubleArrayTrieTests {
     }
 }
 
+// MARK: - Added-token parity guard
+//
+// Every entry in `added_tokens` must round-trip to its declared id when encoded
+// in isolation with `addSpecialTokens: false`. For xtr-base-en this passes
+// without code changes today (the added-token IDs coincide with Unigram vocab
+// IDs), but the assertion exists so any future tokenizer that lacks the
+// coincidence surfaces immediately rather than silently diverging from the
+// HuggingFace reference. When porting a new tokenizer, extend the fixture
+// loader so this test runs against every loaded tokenizer's `added_tokens`.
+
+@Suite("Tokenizer / added-token parity")
+struct AddedTokenParityTests {
+    @Test("every added_tokens entry encodes to exactly [id]",
+          arguments: 0..<FixtureLoader.tokenizer.addedTokens.count)
+    func eachAddedTokenRoundTripsToItsID(index: Int) throws {
+        let entry = FixtureLoader.tokenizer.addedTokens[index]
+        let ids = try FixtureLoader.tokenizer.encode(entry.content, addSpecialTokens: false)
+        #expect(ids == [entry.id],
+                "added token \(entry.content.debugDescription) (id=\(entry.id)) encoded to \(ids)")
+    }
+}
+
+// MARK: - Component-level: AddedTokenMatcher
+
+@Suite("AddedTokenMatcher")
+struct AddedTokenMatcherTests {
+    private static func entry(
+        _ content: String,
+        id: Int32,
+        normalized: Bool = false,
+        singleWord: Bool = false,
+        lstrip: Bool = false,
+        rstrip: Bool = false
+    ) -> AddedToken {
+        AddedToken(
+            id: id, content: content, normalized: normalized,
+            singleWord: singleWord, lstrip: lstrip, rstrip: rstrip, special: true
+        )
+    }
+
+    @Test("empty input yields empty output")
+    func emptyInput() {
+        let m = AddedTokenMatcher(entries: [Self.entry("<a>", id: 100)])
+        #expect(m.split("") == [])
+    }
+
+    @Test("no matches returns single text span")
+    func noMatchSingleSpan() {
+        let m = AddedTokenMatcher(entries: [Self.entry("<a>", id: 100)])
+        #expect(m.split("hello world") == [.text("hello world")])
+    }
+
+    @Test("empty entries set returns single text span")
+    func noEntries() {
+        let m = AddedTokenMatcher(entries: [])
+        #expect(m.split("anything goes") == [.text("anything goes")])
+    }
+
+    @Test("substring match anywhere by default")
+    func basicMatch() {
+        let m = AddedTokenMatcher(entries: [Self.entry("<a>", id: 100)])
+        #expect(m.split("x<a>y") == [.text("x"), .added(100), .text("y")])
+    }
+
+    @Test("adjacent matches with no gap produce no empty text spans")
+    func adjacentMatches() {
+        let m = AddedTokenMatcher(entries: [
+            Self.entry("<a>", id: 100),
+            Self.entry("<b>", id: 200),
+        ])
+        #expect(m.split("<a><b>") == [.added(100), .added(200)])
+    }
+
+    @Test("overlapping candidates: longer match wins")
+    func longerWins() {
+        let m = AddedTokenMatcher(entries: [
+            Self.entry("<ab>", id: 100),
+            Self.entry("<abc>", id: 200),
+        ])
+        #expect(m.split("<abc>") == [.added(200)])
+        #expect(m.split("<abc><ab>") == [.added(200), .added(100)])
+    }
+
+    @Test("partial-prefix near-miss falls through to text")
+    func partialPrefix() {
+        let m = AddedTokenMatcher(entries: [Self.entry("<extra>", id: 100)])
+        #expect(m.split("<extralong>") == [.text("<extralong>")])
+        #expect(m.split("<extr") == [.text("<extr")])
+    }
+
+    @Test("single_word: false matches mid-word")
+    func singleWordFalseMatchesMidWord() {
+        let m = AddedTokenMatcher(entries: [Self.entry("foo", id: 100, singleWord: false)])
+        #expect(m.split("xfooy") == [.text("x"), .added(100), .text("y")])
+    }
+
+    @Test("single_word: true rejects mid-word match")
+    func singleWordTrueRejectsMidWord() {
+        let m = AddedTokenMatcher(entries: [Self.entry("foo", id: 100, singleWord: true)])
+        #expect(m.split("xfooy") == [.text("xfooy")])
+    }
+
+    @Test("single_word: true accepts at word boundary")
+    func singleWordTrueAcceptsBoundary() {
+        let m = AddedTokenMatcher(entries: [Self.entry("foo", id: 100, singleWord: true)])
+        #expect(m.split("foo") == [.added(100)])
+        #expect(m.split(" foo ") == [.text(" "), .added(100), .text(" ")])
+        #expect(m.split("(foo)") == [.text("("), .added(100), .text(")")])
+    }
+
+    @Test("single_word: true with non-word content has no boundary requirement")
+    func singleWordTrueNonWordContent() {
+        let m = AddedTokenMatcher(entries: [Self.entry("<x>", id: 100, singleWord: true)])
+        #expect(m.split("a<x>b") == [.text("a"), .added(100), .text("b")])
+    }
+
+    @Test("lstrip consumes adjacent leading whitespace")
+    func lstripConsumesLeading() {
+        let m = AddedTokenMatcher(entries: [Self.entry("<x>", id: 100, lstrip: true)])
+        #expect(m.split("a   <x>b") == [.text("a"), .added(100), .text("b")])
+    }
+
+    @Test("rstrip consumes adjacent trailing whitespace")
+    func rstripConsumesTrailing() {
+        let m = AddedTokenMatcher(entries: [Self.entry("<x>", id: 100, rstrip: true)])
+        #expect(m.split("a<x>   b") == [.text("a"), .added(100), .text("b")])
+    }
+
+    @Test("lstrip+rstrip consume both sides")
+    func lstripRstripBothSides() {
+        let m = AddedTokenMatcher(entries: [
+            Self.entry("<x>", id: 100, lstrip: true, rstrip: true)
+        ])
+        #expect(m.split("a   <x>   b") == [.text("a"), .added(100), .text("b")])
+    }
+
+    @Test("empty-content entries are skipped at construction")
+    func emptyContentSkipped() {
+        let m = AddedTokenMatcher(entries: [Self.entry("", id: 100)])
+        #expect(m.isEmpty)
+        #expect(m.split("anything") == [.text("anything")])
+    }
+}
+
 // MARK: - Component-level: Metaspace pre-tokenizer
 
 @Suite("MetaspacePreTokenizer")
