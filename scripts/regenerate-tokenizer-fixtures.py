@@ -34,10 +34,16 @@ from pathlib import Path
 from tokenizers import Tokenizer  # type: ignore[import-not-found]
 
 
-# Inputs covered by the fixture suite. The first eleven mirror the original
-# PR #7 set; the remaining entries are the issue #8 additions covering
-# added-token pre-segmentation (positive matches, no-space-padding, negative
-# controls that must NOT match, and overlapping-token longest-wins).
+# Inputs covered by the fixture suite. The entries before the Issue #8 marker
+# include the original PR #7 set plus three later pre-Issue #8 additions
+# (`"a" * 2049`, `"cat \U0001F431 dog"`, and `"naïve café résumé"`).
+# The remaining entries are the Issue #8 additions covering added-token
+# pre-segmentation (positive matches, no-space-padding, negative controls
+# that must NOT match, and overlapping-token longest-wins).
+#
+# Non-printable / invisible characters are written with explicit escape
+# sequences so the file stays reviewable and editor-safe (no risk of an
+# editor or formatter silently mangling them).
 INPUTS: list[str] = [
     "",
     "   ",
@@ -48,8 +54,8 @@ INPUTS: list[str] = [
     "▁literal metaspace",
     "ℌello",
     "日本語テキスト",
-    "",
-    "hello​world",
+    "\x01\x02\x03",
+    "hello\u200bworld",
     "a" * 2049,
     "cat \U0001F431 dog",
     "naïve café résumé",
