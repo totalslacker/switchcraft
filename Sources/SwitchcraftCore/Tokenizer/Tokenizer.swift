@@ -23,7 +23,15 @@ public struct Tokenizer: Sendable {
         do {
             data = try Data(contentsOf: url)
         } catch {
-            throw TokenizerError.fileNotFound(path: path)
+            // The file exists per the check above; a failure here is an I/O or
+            // permissions problem, not a missing file. Preserve the underlying
+            // cause for diagnostics rather than papering over it as fileNotFound.
+            let nsError = error as NSError
+            if nsError.domain == NSCocoaErrorDomain,
+               nsError.code == CocoaError.fileReadNoSuchFile.rawValue {
+                throw TokenizerError.fileNotFound(path: path)
+            }
+            throw TokenizerError.ioError(path: path, underlying: error)
         }
         try self.init(data: data)
     }
