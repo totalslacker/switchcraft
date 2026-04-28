@@ -13,6 +13,7 @@ public struct Tokenizer: Sendable {
     private let postProcessor: TemplatePostProcessor
     private let metaspaceDecoder: MetaspaceDecoder
     private let idToToken: [Int32: String]
+    private let specialTokenIDs: Set<Int32>
     /// All `added_tokens` entries from the source `tokenizer.json`. Exposed at
     /// internal visibility so the test target's `@testable import` can iterate
     /// them for the parity guard test (every entry must round-trip to its own
@@ -111,6 +112,7 @@ public struct Tokenizer: Sendable {
         self.addedTokens = addedTokens
         self.preNormMatcher = AddedTokenMatcher(entries: addedTokens.filter { !$0.normalized })
         self.postNormMatcher = AddedTokenMatcher(entries: addedTokens.filter { $0.normalized })
+        self.specialTokenIDs = Set(addedTokens.lazy.filter { $0.special }.map { $0.id })
 
         // PostProcessor (TemplateProcessing)
         guard let postJSON = root["post_processor"] as? [String: Any] else {
@@ -190,15 +192,18 @@ public struct Tokenizer: Sendable {
         return postProcessor.process(modelIDs, addSpecialTokens: addSpecialTokens)
     }
 
-    /// Decode token IDs back to text via the Metaspace decoder.
+    /// Decode token IDs back to text via the Metaspace decoder. IDs whose
+    /// `added_tokens` entry has `special: true` are dropped (matches
+    /// HuggingFace's `decode(skip_special_tokens=True)` default). Filtering by
+    /// the declared `special` flag — rather than by token-string shape — is
+    /// what makes this correct for tokenizers whose specials are not
+    /// `<…>`-shaped (e.g. BERT-style `[CLS]`, `[SEP]`).
     public func decode(_ ids: [Int32]) throws -> String {
         var tokens: [String] = []
         tokens.reserveCapacity(ids.count)
         for id in ids {
+            if specialTokenIDs.contains(id) { continue }
             if let tok = idToToken[id] {
-                if tok.hasPrefix("<") && tok.hasSuffix(">") {
-                    continue
-                }
                 tokens.append(tok)
             }
         }
