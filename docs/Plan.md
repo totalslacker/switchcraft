@@ -291,7 +291,7 @@ Custom kernels for hot paths:
 ### Model Assets
 
 - **GGUF weights**: ~60-100MB, can be embedded in the app binary or downloaded on first launch
-- **Tokenizer**: BPE tokenizer ported to Swift (JSON-based, ~1-2 weeks to implement)
+- **Tokenizer**: Unigram (SentencePiece) tokenizer ported to Swift (JSON-based, ~1-2 weeks to implement)
 - **CoreML model**: Converted offline, shipped with the package or downloaded on first launch
 
 ---
@@ -305,7 +305,7 @@ Track progress by checking off items as they land. Effort estimates and notes fo
 - [x] **Project scaffolding** — `Package.swift`, target layout, CI skeleton
 - [x] **Storage protocol** — `SwitchcraftStorage` and conformance test suite (must precede backend work)
 - [x] **SQLite backend** (1-2 weeks) — reference implementation of the storage protocol; native sqlite3
-- [ ] **BPE tokenizer** (1-2 weeks) — Port from HuggingFace tokenizer.json; identical token IDs vs Rust
+- [x] **Unigram (SentencePiece) tokenizer** (1-2 weeks) — Port from HuggingFace tokenizer.json; identical token IDs vs Rust
 - [ ] **T5 encoder → CoreML** (1-2 weeks) — Model conversion + Swift wrapper
 - [x] **K-means clustering** (1 week) — Standard algorithm, use Accelerate
 - [x] **4-bit residual codec** (1 week) — ~200 lines, bit-level packing; round-trip property tests
