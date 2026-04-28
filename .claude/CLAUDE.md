@@ -13,31 +13,28 @@ The implementation plan lives at `docs/Plan.md`. Read it before making non-trivi
 - **Apache 2.0 throughout.** No GPL/copyleft dependencies.
 - **Async Swift public API, synchronous core.** Public surface is an actor (`SwitchcraftStore`); the internal implementation matches Witchcraft's synchronous shape.
 
-## Fabrik Workflow
+## Workflow
 
-This project uses [Fabrik](https://github.com/tenaciousvc/fabrik) for AI-supervised development. Issues on the GitHub Project board are the unit of work. Board columns define workflow stages:
+GitHub Projects is currently non-functional, so we are **not** using Fabrik or any project-board-driven workflow. Plans, todos, and progress live directly in `docs/Plan.md` as checkbox lists.
 
-**Backlog → Specify → Research → Plan → Implement → Review → Validate → Done**
+### Tracking progress in `docs/Plan.md`
 
-Stage configs live in `.fabrik/stages/` (YAML files). Each stage runs Claude Code in an isolated git worktree with stage-specific skills, models, and tool restrictions.
+`docs/Plan.md` is the source of truth for what's planned, in progress, and done. When you complete a unit of work, **check off the corresponding box(es) in the same commit**:
 
-### Key Concepts
+- Convert `- [ ]` to `- [x]` for items that are now complete.
+- If a checked item turns out to be wrong or incomplete, uncheck it and explain why in the commit message.
+- If you're adding work that wasn't in the plan, add a new checkbox item under the appropriate section rather than doing it silently.
+- Keep the "Progress at a Glance" section consistent with the detailed checklists below it.
 
-- **Issues are work units.** All work flows through GitHub Issues on the project board.
-- **Board columns = stages.** Moving an issue to a column triggers the corresponding stage.
-- **Worktrees isolate work.** Each issue gets its own `fabrik/issue-N` branch and worktree.
-- **Labels are state.** `fabrik:locked:<user>`, `fabrik:editing`, `stage:<name>:complete`, `model:<name>`.
-- **Comments steer work.** Comment on an issue to provide feedback; Fabrik processes it with the stage's comment prompt.
-- **`FABRIK_STAGE_COMPLETE`** — signal in Claude output that marks a stage as done.
-- **PRs include `Closes #N`** — every PR must reference its issue for auto-close on merge.
+Treat the checkbox list like a precise commit log of feature completeness — a future contributor (or future you) should be able to read `docs/Plan.md` and know exactly what's been built without spelunking through git history.
 
 ### Branch & PR Rules
 
-- Always work on a branch, never commit directly to main.
+- Always work on a branch, never commit directly to main, except for trivial documentation edits explicitly authorized by the user.
 - Commit frequently — after each logical unit of work, not just at the end.
-- Push regularly so progress is visible on the draft PR.
-- Check `git status` first in any stage (may have uncommitted work from a previous session).
-- Rebase onto latest main in Review and Validate stages.
+- Push regularly so progress is visible.
+- Check `git status` before starting (may have uncommitted work from a previous session).
+- Rebase onto latest main before opening a PR.
 
 ## Testing Requirements
 

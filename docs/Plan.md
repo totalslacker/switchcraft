@@ -6,6 +6,14 @@ Switchcraft is a Swift port of [Witchcraft](https://github.com/dropbox/witchcraf
 
 No Swift, Go, Java, Kotlin, or TypeScript ports of XTR-Warp / Witchcraft currently exist — Switchcraft will be the first native Apple platform implementation.
 
+## Progress at a Glance
+
+High-level phases. Detailed checklists live in each section below — keep both in sync.
+
+- [ ] **Phase 1: MVP** — port Witchcraft to Swift, SQLite-backed, passing the upstream test corpus
+- [ ] **Phase 2: Production optimization** — Metal kernels, caching, concurrency improvements
+- [ ] **Open source release** — Apache 2.0 Swift package on SPM
+
 ## Motivation
 
 Most local semantic search systems use **document-level embeddings** — a single ~768-dimensional vector per document, searched with brute-force KNN. This has well-known quality limitations:
@@ -292,26 +300,28 @@ Custom kernels for hot paths:
 
 ### Phase 1: MVP (10-14 weeks)
 
-| Component | Effort | Notes |
-|---|---|---|
-| T5 encoder → CoreML | 1-2 weeks | Model conversion + Swift wrapper |
-| BPE tokenizer | 1-2 weeks | Port from HuggingFace tokenizer.json |
-| SQLite schema + DB layer | 1-2 weeks | Direct port, use GRDB.swift or native sqlite3 |
-| K-means clustering | 1 week | Standard algorithm, use Accelerate |
-| LSM-tree index structure | 1 week | Cascading merge logic |
-| 4-bit residual codec | 1 week | ~200 lines, bit-level packing |
-| Search pipeline (centroid match → score) | 1-2 weeks | Core retrieval algorithm |
-| RRF + FTS5 hybrid | 3-4 days | Adapt existing Witchcraft logic |
-| Async Swift API | 3-4 days | Actor wrapper |
-| Testing + benchmarking | 2-3 weeks | Correctness + performance validation |
+Track progress by checking off items as they land. Effort estimates and notes follow each item.
+
+- [ ] **Project scaffolding** — `Package.swift`, target layout, CI skeleton
+- [ ] **Storage protocol** — `SwitchcraftStorage` and conformance test suite (must precede backend work)
+- [ ] **SQLite backend** (1-2 weeks) — reference implementation of the storage protocol; GRDB.swift or native sqlite3
+- [ ] **BPE tokenizer** (1-2 weeks) — Port from HuggingFace tokenizer.json; identical token IDs vs Rust
+- [ ] **T5 encoder → CoreML** (1-2 weeks) — Model conversion + Swift wrapper
+- [ ] **K-means clustering** (1 week) — Standard algorithm, use Accelerate
+- [ ] **4-bit residual codec** (1 week) — ~200 lines, bit-level packing; round-trip property tests
+- [ ] **LSM-tree index structure** (1 week) — Cascading merge logic
+- [ ] **Search pipeline** (1-2 weeks) — Centroid match → residual decode → MaxSim scoring
+- [ ] **RRF + FTS5 hybrid** (3-4 days) — Adapt Witchcraft's hybrid fusion
+- [ ] **Async Swift API** (3-4 days) — `SwitchcraftStore` actor wrapper
+- [ ] **Testing + benchmarking** (2-3 weeks) — Correctness + performance validation (see Testing Strategy)
 
 ### Phase 2: Production Optimization
 
-- Metal compute shaders for hot paths
-- LRU caching for query embeddings
-- Background indexing pipeline
-- Parallel bucket search
-- Batch document processing
+- [ ] Metal compute shaders for hot paths (Q4 dequant + matmul, centroid similarity, residual scoring)
+- [ ] LRU caching for query embeddings
+- [ ] Background indexing pipeline
+- [ ] Parallel bucket search
+- [ ] Batch document processing
 
 ---
 
@@ -349,6 +359,12 @@ Witchcraft has 12 unit tests (672 lines in `tests.rs`) plus per-module tests and
 ### Phase 1: Cross-Platform Validation
 
 The primary goal is proving the Swift port produces **identical results** to the Rust implementation for the same inputs. Witchcraft's existing test corpus and queries are the foundation.
+
+Deliverables:
+
+- [ ] 33-fact corpus ported verbatim, queries pass with same retrieval / ranking / scores (±0.01)
+- [ ] NFCorpus benchmark pipeline ported, NDCG@10 ∈ [0.31, 0.33]
+- [ ] Bit-exact embedding validation against Candle reference outputs
 
 #### Port Witchcraft's 33-Fact Corpus Verbatim
 
@@ -399,7 +415,14 @@ For a subset of documents, compare the raw T5 token embeddings between Rust (Can
 
 ### Phase 2: Extended Coverage (Gaps in Witchcraft)
 
-Tests that Witchcraft doesn't have but Switchcraft must:
+Tests that Witchcraft doesn't have but Switchcraft must. Each suite below is a deliverable:
+
+- [ ] Matrix Operations suite (GEMM, matmul_t, batched argmax, packed/fused GEMM)
+- [ ] Residual Codec suite (round-trip, sizing, range, batch parity)
+- [ ] Concurrency suite (concurrent reads during indexing, reader/writer visibility, simultaneous searches)
+- [ ] CoreML Inference suite (parity vs Candle, tokenizer parity, sliding window, low-signal filtering)
+- [ ] Edge Cases suite (empty/short queries, very long docs, stopwords, Unicode, dedup, removal)
+- [ ] Performance Regression suite (search latency, indexing throughput, memory)
 
 #### GEMM / Matrix Operations
 
@@ -502,6 +525,15 @@ Tests/Fixtures/
 ├── nfcorpus_queries.tsv        # NFCorpus test queries
 └── nfcorpus_expected.json      # Expected NDCG@10 scores
 ```
+
+Fixture deliverables:
+
+- [ ] `facts_corpus.json`
+- [ ] `reference_embeddings.bin`
+- [ ] `reference_centroids.bin`
+- [ ] `reference_residuals.bin`
+- [ ] `nfcorpus_queries.tsv`
+- [ ] `nfcorpus_expected.json`
 
 This allows the Swift tests to validate correctness without running the Rust implementation — just compare against the committed reference data.
 
