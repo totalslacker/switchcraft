@@ -30,6 +30,12 @@ playground.xcworkspace
 # .swiftpm
 
 .build/
+.swiftpm/
+Package.resolved
+DerivedData/
+
+# Local Fabrik tooling — not used by this project
+/fabrik
 
 # CocoaPods
 #
