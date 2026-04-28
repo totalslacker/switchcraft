@@ -1,0 +1,32 @@
+name: Auto-request Copilot review
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  request-copilot:
+    name: Request GitHub Copilot review
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Request Copilot as reviewer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set +e
+          gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${REPO}/pulls/${PR_NUMBER}/requested_reviewers" \
+            -f 'reviewers[]=Copilot'
+          rc=$?
+          if [ $rc -ne 0 ]; then
+            echo "::warning::Copilot review request returned $rc. The repo may not have Copilot code review enabled, or the reviewer is already requested."
+          fi
+          exit 0
