@@ -11,6 +11,7 @@ let package = Package(
     products: [
         .library(name: "Switchcraft", targets: ["Switchcraft"]),
         .library(name: "SwitchcraftSQLite", targets: ["SwitchcraftSQLite"]),
+        .library(name: "SwitchcraftStorageTesting", targets: ["SwitchcraftStorageTesting"]),
     ],
     targets: [
         .target(
@@ -27,9 +28,19 @@ let package = Package(
             dependencies: ["SwitchcraftCore"],
             path: "Sources/SwitchcraftSQLite"
         ),
+        .target(
+            name: "SwitchcraftStorageTesting",
+            dependencies: ["SwitchcraftCore"],
+            path: "Sources/SwitchcraftStorageTesting"
+        ),
         .testTarget(
             name: "SwitchcraftTests",
-            dependencies: ["Switchcraft", "SwitchcraftSQLite", "SwitchcraftCore"],
+            dependencies: [
+                "Switchcraft",
+                "SwitchcraftSQLite",
+                "SwitchcraftCore",
+                "SwitchcraftStorageTesting",
+            ],
             path: "Tests/SwitchcraftTests"
         ),
     ]

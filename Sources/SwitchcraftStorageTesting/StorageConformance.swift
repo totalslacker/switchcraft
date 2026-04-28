@@ -1,0 +1,288 @@
+import Foundation
+import SwitchcraftCore
+import Testing
+
+/// A reusable conformance suite for `SwitchcraftStorage` implementations.
+///
+/// Backends import this module and run `StorageConformance.runAll(makeStorage:)`
+/// from a `@Test` function. Every assertion uses Swift Testing's `#expect`
+/// macros so failures attribute to the calling test.
+///
+/// Usage:
+/// ```swift
+/// @Test func myBackendIsCompliant() async throws {
+///     try await StorageConformance.runAll {
+///         MyBackend(path: ":memory:")
+///     }
+/// }
+/// ```
+public enum StorageConformance {
+
+    /// Run every conformance check against a fresh storage instance produced
+    /// by `makeStorage`. The closure is called once at the start of the run;
+    /// the suite performs `clear()` between scenarios so a single instance
+    /// is reused.
+    public static func runAll(
+        makeStorage: () async throws -> any SwitchcraftStorage
+    ) async throws {
+        let storage = try await makeStorage()
+        try await storage.open()
+
+        try await runDocumentRoundTrip(storage)
+        try await runDocumentUpsertReplaces(storage)
+        try await runDocumentDelete(storage)
+        try await runDocumentFilters(storage)
+
+        try await runChunkInsertAndLookup(storage)
+        try await runChunkDedupByHash(storage)
+
+        try await runGenerationLifecycle(storage)
+        try await runBucketLifecycle(storage)
+        try await runDeleteGenerationCascadesToBuckets(storage)
+
+        try await runClearEmptiesEverything(storage)
+
+        try await runFullTextRetrieval(storage)
+        try await runFullTextRespectsFilter(storage)
+
+        try await storage.close()
+    }
+
+    // MARK: - Documents
+
+    static func runDocumentRoundTrip(_ storage: any SwitchcraftStorage) async throws {
+        try await storage.clear()
+        let doc = makeDocument(uuid: "a", body: "hello world")
+        try await storage.upsertDocument(doc)
+
+        let fetched = try await storage.document(uuid: "a")
+        #expect(fetched == doc)
+        #expect(try await storage.documentCount() == 1)
+    }
+
+    static func runDocumentUpsertReplaces(_ storage: any SwitchcraftStorage) async throws {
+        try await storage.clear()
+        try await storage.upsertDocument(makeDocument(uuid: "a", body: "v1"))
+        try await storage.upsertDocument(makeDocument(uuid: "a", body: "v2"))
+
+        let fetched = try await storage.document(uuid: "a")
+        #expect(fetched?.body == "v2")
+        #expect(try await storage.documentCount() == 1)
+    }
+
+    static func runDocumentDelete(_ storage: any SwitchcraftStorage) async throws {
+        try await storage.clear()
+        try await storage.upsertDocument(makeDocument(uuid: "a", body: "x"))
+        try await storage.deleteDocument(uuid: "a")
+        #expect(try await storage.document(uuid: "a") == nil)
+        #expect(try await storage.documentCount() == 0)
+
+        // Deleting a missing document is a no-op, not an error.
+        try await storage.deleteDocument(uuid: "missing")
+    }
+
+    static func runDocumentFilters(_ storage: any SwitchcraftStorage) async throws {
+        try await storage.clear()
+        let early = makeDocument(
+            uuid: "early",
+            body: "early text",
+            date: Date(timeIntervalSince1970: 1_000_000),
+            metadata: ["tag": "alpha"]
+        )
+        let late = makeDocument(
+            uuid: "late",
+            body: "late text",
+            date: Date(timeIntervalSince1970: 2_000_000),
+            metadata: ["tag": "beta"]
+        )
+        try await storage.upsertDocument(early)
+        try await storage.upsertDocument(late)
+
+        let all = try await storage.documents(matching: .all)
+        #expect(Set(all.map(\.uuid)) == ["early", "late"])
+
+        let onlyLate = try await storage.documents(matching: .uuidIn(["late"]))
+        #expect(onlyLate.map(\.uuid) == ["late"])
+
+        let beforeMid = try await storage.documents(
+            matching: .dateRange(start: nil, end: Date(timeIntervalSince1970: 1_500_000))
+        )
+        #expect(beforeMid.map(\.uuid) == ["early"])
+
+        let onlyAlpha = try await storage.documents(
+            matching: .metadataEquals(key: "tag", value: "alpha")
+        )
+        #expect(onlyAlpha.map(\.uuid) == ["early"])
+
+        let notAlpha = try await storage.documents(
+            matching: .not(.metadataEquals(key: "tag", value: "alpha"))
+        )
+        #expect(notAlpha.map(\.uuid) == ["late"])
+    }
+
+    // MARK: - Chunks
+
+    static func runChunkInsertAndLookup(_ storage: any SwitchcraftStorage) async throws {
+        try await storage.clear()
+        let inserted = try await storage.upsertChunk(
+            ChunkRecord(hash: "h1", model: "xtr", embeddings: Data([0x01, 0x02]), counts: [3])
+        )
+        #expect(inserted.id != ChunkRecord.unassigned)
+        #expect(inserted.hash == "h1")
+
+        let byHash = try await storage.chunk(hash: "h1")
+        #expect(byHash == inserted)
+
+        let byID = try await storage.chunk(id: inserted.id)
+        #expect(byID == inserted)
+
+        #expect(try await storage.chunk(hash: "missing") == nil)
+        #expect(try await storage.chunkCount() == 1)
+    }
+
+    static func runChunkDedupByHash(_ storage: any SwitchcraftStorage) async throws {
+        try await storage.clear()
+        let first = try await storage.upsertChunk(
+            ChunkRecord(hash: "h1", model: "xtr", embeddings: Data([0x01]))
+        )
+        let second = try await storage.upsertChunk(
+            ChunkRecord(hash: "h1", model: "xtr", embeddings: Data([0x99]))
+        )
+        #expect(first.id == second.id)
+        #expect(first.embeddings == second.embeddings)
+        #expect(try await storage.chunkCount() == 1)
+    }
+
+    // MARK: - Generations & Buckets
+
+    static func runGenerationLifecycle(_ storage: any SwitchcraftStorage) async throws {
+        try await storage.clear()
+
+        let g1 = try await storage.insertGeneration(
+            GenerationRecord(level: 0, numEmbeddings: 100, minChunkID: 1, maxChunkID: 10, created: Date())
+        )
+        let g2 = try await storage.insertGeneration(
+            GenerationRecord(level: 1, numEmbeddings: 500, minChunkID: 1, maxChunkID: 50, created: Date())
+        )
+        #expect(g1.id != GenerationRecord.unassigned)
+        #expect(g2.id > g1.id)
+
+        let listed = try await storage.generations()
+        #expect(listed.map(\.id) == [g1.id, g2.id])
+
+        try await storage.deleteGeneration(id: g1.id)
+        let remaining = try await storage.generations()
+        #expect(remaining.map(\.id) == [g2.id])
+
+        // Deleting a missing generation is a no-op.
+        try await storage.deleteGeneration(id: 9999)
+    }
+
+    static func runBucketLifecycle(_ storage: any SwitchcraftStorage) async throws {
+        try await storage.clear()
+
+        let gen = try await storage.insertGeneration(
+            GenerationRecord(level: 0, numEmbeddings: 0, minChunkID: 0, maxChunkID: 0, created: Date())
+        )
+
+        let b1 = try await storage.insertBucket(
+            BucketRecord(generationID: gen.id, center: Data([0x01]), indices: Data([0x02]), residuals: Data([0x03]))
+        )
+        let b2 = try await storage.insertBucket(
+            BucketRecord(generationID: gen.id, center: Data([0x04]), indices: Data([0x05]), residuals: Data([0x06]))
+        )
+        #expect(b1.id != BucketRecord.unassigned)
+        #expect(b2.id != b1.id)
+
+        let buckets = try await storage.buckets(forGeneration: gen.id)
+        #expect(buckets.map(\.id) == [b1.id, b2.id])
+
+        let none = try await storage.buckets(forGeneration: 9999)
+        #expect(none.isEmpty)
+    }
+
+    static func runDeleteGenerationCascadesToBuckets(_ storage: any SwitchcraftStorage) async throws {
+        try await storage.clear()
+        let gen = try await storage.insertGeneration(
+            GenerationRecord(level: 0, numEmbeddings: 0, minChunkID: 0, maxChunkID: 0, created: Date())
+        )
+        _ = try await storage.insertBucket(
+            BucketRecord(generationID: gen.id, center: Data(), indices: Data(), residuals: Data())
+        )
+        try await storage.deleteGeneration(id: gen.id)
+
+        let buckets = try await storage.buckets(forGeneration: gen.id)
+        #expect(buckets.isEmpty)
+    }
+
+    // MARK: - Clear
+
+    static func runClearEmptiesEverything(_ storage: any SwitchcraftStorage) async throws {
+        try await storage.clear()
+        try await storage.upsertDocument(makeDocument(uuid: "a", body: "x"))
+        _ = try await storage.upsertChunk(ChunkRecord(hash: "h", model: "m", embeddings: Data()))
+        let gen = try await storage.insertGeneration(
+            GenerationRecord(level: 0, numEmbeddings: 0, minChunkID: 0, maxChunkID: 0, created: Date())
+        )
+        _ = try await storage.insertBucket(
+            BucketRecord(generationID: gen.id, center: Data(), indices: Data(), residuals: Data())
+        )
+
+        try await storage.clear()
+        #expect(try await storage.documentCount() == 0)
+        #expect(try await storage.chunkCount() == 0)
+        #expect(try await storage.generations().isEmpty)
+        #expect(try await storage.buckets(forGeneration: gen.id).isEmpty)
+    }
+
+    // MARK: - Full-text Search
+
+    static func runFullTextRetrieval(_ storage: any SwitchcraftStorage) async throws {
+        try await storage.clear()
+        try await storage.upsertDocument(makeDocument(uuid: "fruit", body: "apples and bananas are fruit"))
+        try await storage.upsertDocument(makeDocument(uuid: "veg",   body: "carrots and broccoli are vegetables"))
+
+        let hits = try await storage.searchFullText(query: "bananas", limit: 10, filter: .all)
+        #expect(hits.first?.uuid == "fruit")
+        #expect(hits.contains { $0.uuid == "veg" } == false)
+    }
+
+    static func runFullTextRespectsFilter(_ storage: any SwitchcraftStorage) async throws {
+        try await storage.clear()
+        try await storage.upsertDocument(
+            makeDocument(uuid: "a", body: "the quick brown fox", metadata: ["lang": "en"])
+        )
+        try await storage.upsertDocument(
+            makeDocument(uuid: "b", body: "the quick green frog", metadata: ["lang": "en"])
+        )
+
+        let onlyA = try await storage.searchFullText(
+            query: "quick", limit: 10, filter: .uuidIn(["a"])
+        )
+        #expect(onlyA.map(\.uuid) == ["a"])
+    }
+
+    // MARK: - Helpers
+
+    static func makeDocument(
+        uuid: String,
+        body: String,
+        date: Date = Date(timeIntervalSince1970: 0),
+        metadata: [String: String] = [:]
+    ) -> DocumentRecord {
+        let metadataData: Data
+        if metadata.isEmpty {
+            metadataData = Data()
+        } else {
+            metadataData = (try? JSONSerialization.data(withJSONObject: metadata)) ?? Data()
+        }
+        return DocumentRecord(
+            uuid: uuid,
+            date: date,
+            metadata: metadataData,
+            hash: "hash-\(uuid)",
+            body: body,
+            lens: []
+        )
+    }
+}

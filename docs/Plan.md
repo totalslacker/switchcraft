@@ -303,7 +303,7 @@ Custom kernels for hot paths:
 Track progress by checking off items as they land. Effort estimates and notes follow each item.
 
 - [x] **Project scaffolding** — `Package.swift`, target layout, CI skeleton
-- [ ] **Storage protocol** — `SwitchcraftStorage` and conformance test suite (must precede backend work)
+- [x] **Storage protocol** — `SwitchcraftStorage` and conformance test suite (must precede backend work)
 - [ ] **SQLite backend** (1-2 weeks) — reference implementation of the storage protocol; GRDB.swift or native sqlite3
 - [ ] **BPE tokenizer** (1-2 weeks) — Port from HuggingFace tokenizer.json; identical token IDs vs Rust
 - [ ] **T5 encoder → CoreML** (1-2 weeks) — Model conversion + Swift wrapper
