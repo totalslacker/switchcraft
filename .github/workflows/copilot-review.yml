@@ -20,13 +20,39 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set +e
-          gh api \
+          # Capture body and HTTP status separately so we can distinguish
+          # success / "already requested" / "bot not enabled" / other errors.
+          response=$(mktemp)
+          status=$(gh api \
             --method POST \
             -H "Accept: application/vnd.github+json" \
             "/repos/${REPO}/pulls/${PR_NUMBER}/requested_reviewers" \
-            -f 'reviewers[]=Copilot'
-          rc=$?
-          if [ $rc -ne 0 ]; then
-            echo "::warning::Copilot review request returned $rc. The repo may not have Copilot code review enabled, or the reviewer is already requested."
+            -f 'reviewers[]=copilot-pull-request-reviewer' \
+            --include 2>"$response.err" \
+            | tee "$response" \
+            | head -1 | awk '{print $2}')
+
+          # gh api --include puts headers ahead of body and a status line.
+          # If the call already succeeded we can short-circuit.
+          if grep -q '"requested_reviewers":\[' "$response" \
+               && grep -q '"login":"copilot-pull-request-reviewer"' "$response"; then
+            echo "Copilot reviewer requested successfully."
+            exit 0
           fi
+
+          # Look for the canonical "not a collaborator" 422.
+          if grep -qi 'not a collaborator' "$response.err" "$response"; then
+            echo "::warning::Copilot code review is not enabled on this repository. Enable it at Settings → Code, planning, and automation → Copilot code review → Automatic, then re-run this workflow."
+            exit 0
+          fi
+
+          # 200 OK but empty requested_reviewers → unknown login silently dropped.
+          if grep -q '"requested_reviewers":\[\]' "$response"; then
+            echo "::warning::Copilot reviewer was not added (login silently dropped by GitHub). Confirm the bot login or enable Copilot code review for this repo."
+            exit 0
+          fi
+
+          # Anything else: dump for debugging but don't block the PR.
+          echo "::warning::Copilot review request returned an unexpected response. See logs for details."
+          cat "$response.err" "$response" || true
           exit 0
