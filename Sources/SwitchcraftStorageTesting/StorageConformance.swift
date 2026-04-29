@@ -32,6 +32,7 @@ public enum StorageConformance {
         try await runDocumentUpsertReplaces(storage)
         try await runDocumentDelete(storage)
         try await runDocumentFilters(storage)
+        try await runDocumentsForChunkHash(storage)
 
         try await runChunkInsertAndLookup(storage)
         try await runChunkDedupByHash(storage)
@@ -118,6 +119,39 @@ public enum StorageConformance {
             matching: .not(.metadataEquals(key: "tag", value: "alpha"))
         )
         #expect(notAlpha.map(\.uuid) == ["late"])
+    }
+
+    static func runDocumentsForChunkHash(_ storage: any SwitchcraftStorage) async throws {
+        try await storage.clear()
+
+        // Empty store: no matches.
+        let none = try await storage.documents(forChunkHash: "missing")
+        #expect(none.isEmpty)
+
+        // Single document with hash "h-a".
+        let solo = makeDocument(uuid: "solo", body: "x")
+        try await storage.upsertDocument(solo)
+        let onlySolo = try await storage.documents(forChunkHash: solo.hash)
+        #expect(onlySolo.map(\.uuid) == ["solo"])
+
+        // Two documents sharing a chunk hash both come back.
+        var shared1 = makeDocument(uuid: "shared1", body: "x")
+        var shared2 = makeDocument(uuid: "shared2", body: "y")
+        shared1.hash = "shared-hash"
+        shared2.hash = "shared-hash"
+        try await storage.upsertDocument(shared1)
+        try await storage.upsertDocument(shared2)
+        let shared = try await storage.documents(forChunkHash: "shared-hash")
+        #expect(Set(shared.map(\.uuid)) == ["shared1", "shared2"])
+
+        // Deleting one of the sharers removes only that one.
+        try await storage.deleteDocument(uuid: "shared1")
+        let remaining = try await storage.documents(forChunkHash: "shared-hash")
+        #expect(remaining.map(\.uuid) == ["shared2"])
+
+        // Unknown hash still returns empty.
+        let stillNone = try await storage.documents(forChunkHash: "no-such-hash")
+        #expect(stillNone.isEmpty)
     }
 
     // MARK: - Chunks
