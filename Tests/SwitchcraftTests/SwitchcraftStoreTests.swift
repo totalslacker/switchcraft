@@ -26,9 +26,15 @@ struct SwitchcraftStoreTests {
     static func makeTempDatabasePath() -> (path: String, cleanup: () -> Void) {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("switchcraft-store-tests-\(UUID().uuidString)")
-        try? FileManager.default.createDirectory(
-            at: dir, withIntermediateDirectories: true
-        )
+        do {
+            try FileManager.default.createDirectory(
+                at: dir, withIntermediateDirectories: true
+            )
+        } catch {
+            fatalError(
+                "Failed to create temporary database directory at \(dir.path): \(error)"
+            )
+        }
         let path = dir.appendingPathComponent("store.db").path
         let cleanup: () -> Void = {
             try? FileManager.default.removeItem(at: dir)

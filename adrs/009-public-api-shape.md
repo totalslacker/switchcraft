@@ -117,11 +117,18 @@ internal `isShutDown` flag. Calling `shutdown` a second time is a
 no-op. Every other public method calls `ensureRunning()` first and
 throws `SwitchcraftStoreError.alreadyShutDown` if the flag is set.
 
-In-flight calls that started before `shutdown` ran complete normally —
-actor isolation serialises them with `shutdown` as just another actor
-method. There is no "cancel mid-call" semantics; concurrent callers
-who race `shutdown` may either complete or observe the flag, but never
-both partially.
+Because Swift actors are re-entrant at `await` suspension points,
+calls that started before `shutdown()` are not guaranteed to complete
+normally. A public method may suspend (for example during
+`indexer.flush()` or `embedder.encode(...)`), `shutdown()` may then run
+and close storage, and the earlier call may resume and fail/throw.
+The implementation sets the `isShutDown` flag before awaiting flush /
+close so calls that *arrive* during the shutdown window observe the
+flag at the next `ensureRunning()` check and throw `alreadyShutDown`,
+rather than racing through gates and operating on closed storage.
+There is no special "cancel mid-call" mechanism, but callers racing
+`shutdown()` must tolerate either completing before shutdown takes
+effect or observing shutdown-related failure after resumption.
 
 ## (h) Reopen-then-add limitation, documented only
 
