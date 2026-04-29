@@ -44,6 +44,13 @@ public protocol SwitchcraftStorage: Sendable {
     /// Return all documents matching `filter`, in unspecified order.
     func documents(matching filter: StorageFilter) async throws -> [DocumentRecord]
 
+    /// Return every document whose `hash` equals the supplied chunk hash,
+    /// in unspecified order. Used by the search pipeline to map a scored
+    /// chunk back to the documents that share it (chunks are deduplicated
+    /// by content hash; multiple documents may reference the same chunk).
+    /// Returns an empty array if no documents match.
+    func documents(forChunkHash hash: String) async throws -> [DocumentRecord]
+
     /// Return the total number of documents.
     func documentCount() async throws -> Int
 

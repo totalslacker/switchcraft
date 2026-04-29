@@ -63,6 +63,10 @@ public actor InMemoryStorage: SwitchcraftStorage {
         documents.values.filter { filter.matches($0) }
     }
 
+    public func documents(forChunkHash hash: String) async throws -> [DocumentRecord] {
+        documents.values.filter { $0.hash == hash }
+    }
+
     public func documentCount() async throws -> Int {
         documents.count
     }

@@ -103,6 +103,21 @@ public actor SQLiteStorage: SwitchcraftStorage {
         return results
     }
 
+    public func documents(forChunkHash hash: String) async throws -> [DocumentRecord] {
+        let conn = try requireConnection()
+        let stmt = try conn.prepare("""
+            SELECT uuid, date, metadata, hash, body, lens
+            FROM document
+            WHERE hash = ?
+            """)
+        try stmt.bind([.text(hash)])
+        var results: [DocumentRecord] = []
+        while try stmt.step() {
+            results.append(decodeDocument(stmt))
+        }
+        return results
+    }
+
     public func documentCount() async throws -> Int {
         try scalarInt("SELECT COUNT(*) FROM document")
     }
