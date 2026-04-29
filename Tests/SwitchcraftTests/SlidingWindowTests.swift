@@ -71,10 +71,9 @@ struct SlidingWindowTests {
         windowSize: Int, dims: Int
     ) -> (normalised: [Float], rawNorms: [Float]) {
         var v = [Float](repeating: 0, count: windowSize * dims)
-        var n = [Float](repeating: 5.0, count: windowSize)
+        let n = [Float](repeating: 5.0, count: windowSize)
         for row in 0..<windowSize {
             v[row * dims + (row % dims)] = 1
-            _ = n[row]
         }
         return (v, n)
     }
