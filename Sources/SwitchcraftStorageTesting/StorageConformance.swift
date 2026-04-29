@@ -46,6 +46,7 @@ public enum StorageConformance {
         try await runFullTextRetrieval(storage)
         try await runFullTextRespectsFilter(storage)
         try await runFullTextDeterministicTieBreak(storage)
+        try await runFullTextHandlesPunctuation(storage)
 
         try await storage.close()
     }
@@ -316,6 +317,34 @@ public enum StorageConformance {
             let groupUuids = first[i..<j].map(\.uuid)
             #expect(groupUuids == groupUuids.sorted())
             i = j
+        }
+    }
+
+    /// Natural-language queries with punctuation (periods, commas, quotes,
+    /// parentheses, exclamation marks) must not be passed through to the
+    /// FTS backend's query grammar verbatim. Backends that delegate to
+    /// FTS5 used to raise `SQLITE_ERROR: fts5: syntax error near "."` on
+    /// input like `"I picked some apples."` — see issue #31. This suite
+    /// asserts that every backend tolerates such inputs without throwing.
+    /// Because FTS5's default tokenizer treats space-separated terms as an
+    /// implicit AND, this is a smoke test only; ranked-quality assertions
+    /// for multi-term queries belong in higher-level hybrid-search tests.
+    static func runFullTextHandlesPunctuation(_ storage: any SwitchcraftStorage) async throws {
+        try await storage.clear()
+        try await storage.upsertDocument(
+            makeDocument(uuid: "fruit", body: "apples and bananas are fruit")
+        )
+
+        let punctuationQueries = [
+            "I picked some red apples from the orchard.",
+            "apples; bananas, and pears.",
+            "(apples) \"and\" bananas?",
+            "Are you serious?!?",
+            "what about \"phrase\" search?",
+        ]
+        for query in punctuationQueries {
+            // Either returns hits or doesn't; the contract is "must not throw".
+            _ = try await storage.searchFullText(query: query, limit: 10, filter: .all)
         }
     }
 

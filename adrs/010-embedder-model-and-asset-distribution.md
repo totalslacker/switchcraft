@@ -47,7 +47,7 @@ release-asset workflow MUST embed the SHA into the
 If the upstream HuggingFace repo is renamed, gated, or removed, the
 asset can be rebuilt from a mirror provided the SHA matches.
 
-## (c) Asset format = `.mlpackage`, FP16 weights, dual output
+## (c) Asset format = `.mlpackage`, FP32 compute / FP16 outputs, dual output
 
 The conversion script emits a `.mlpackage` (mlprogram backend) with:
 
@@ -71,9 +71,47 @@ Two outputs are emitted because:
    undefined for zero vectors).
 
 Emitting both vectors is simpler than emitting a per-token norm scalar
-and is well-supported by `coremltools`. FP16 weights are explicit
-(`compute_precision=ct.precision.FLOAT16`) to keep the `.mlpackage`
-under ~80 MB.
+and is well-supported by `coremltools`.
+
+### Precision contract: FP32 compute, FP16 outputs
+
+The conversion script sets `compute_precision=ct.precision.FLOAT32`
+and emits FP16-typed output ports. **Compute and weight storage are
+both FP32; only the output dtype is FP16.** This deviates from the
+"FP16 weights everywhere" intent of the original ADR (issue #18) and
+inflates the `.mlpackage` from the originally-budgeted ~80 MB to
+~430 MB.
+
+Why we accept the size hit: the `.mlpackage` produced with
+`compute_precision=ct.precision.FLOAT16` (the previous setting)
+silently returns NaN-filled outputs at `MLModel.prediction(_:)` time
+on this graph. Two precision-sensitive regions overflow / collapse
+under blanket FP16:
+
+1. **T5's known activation outliers** propagate through attention
+   matmul and RMSNorm `pow → reduce_mean → rsqrt`, producing inf/NaN
+   that contaminates downstream layers. Same pattern as
+   `huggingface/diffusers#8604`.
+2. **The output L2-normalisation** (`vector_norm` on a 128-dim
+   projection) sums 128 squared values; with FP16 inputs this can
+   exceed FP16's ~65 504 ceiling.
+
+Per-op FP32 carve-outs around the L2 region were tried first
+(coremltools' `FP16ComputePrecision(op_selector=…)` keeping `pow`,
+`rsqrt`, `reduce_sum`, `real_div`, etc. at FP32). They fix the
+output-region overflow but do not stabilise T5's encoder body —
+the same NaN reproduces against coremltools 7.2 and 9.0. The smallest
+working carve-out is "all of it": FP32 compute throughout.
+
+Output-port FP16 is preserved so the Swift wrapper's existing
+contract (`MLMultiArray` reads as `Float16 [1, 512, 128]`, widened
+to FP32 at the boundary by `CoreMLModelIO`) keeps working unchanged.
+
+A future revisit (separate issue) would compress weights to FP16
+storage via a custom MIL pass while keeping compute at FP32 — that
+would halve the asset to ~215 MB. Treat the current 430 MB size as
+correctness-first; size optimisation is deferred. See issue #31 for
+the full diagnostic and decision log.
 
 ## (d) Distribution = local placement + env-var test gate
 
