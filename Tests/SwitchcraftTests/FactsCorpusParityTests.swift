@@ -13,13 +13,19 @@ import CoreML
 ///
 /// Asserts that, for the same indexed corpus, Switchcraft's
 /// `SearchEngine.search` (the pure-vector pipeline — see ADR 008 for why
-/// the hybrid surface is *not* a parity gate) returns the same
-/// document IDs in the same order with scores within ±0.01 of the
-/// reference values produced by Witchcraft's `match_centroids` for
-/// every query in `Tests/Fixtures/facts_corpus.json`.
+/// the hybrid surface is *not* a parity gate) matches the reference
+/// values produced by Witchcraft's `match_centroids` for every query
+/// in `Tests/Fixtures/facts_corpus.json` under the relaxed FP32-vs-Q4K
+/// shape documented in ADR 010(h):
 ///
-/// Tolerance, k=32, tPrime=40000, and the asset-gate trait are spec'd
-/// by ADR 003 / ADR 006 / ADR 010.
+/// - Top-1 doc-id: strict equality with Witchcraft.
+/// - Top-3 doc-id set: set equality (membership, not order).
+/// - Per-doc score: within ±0.025 of the Witchcraft reference for that
+///   doc-id (matched by doc-id, not by rank).
+/// - Doc order beyond rank 3: best-effort, no assertion.
+///
+/// k=32, tPrime=40000, and the asset-gate trait are spec'd by
+/// ADR 006 / ADR 010.
 ///
 /// ### `SharedStore` lifecycle convention
 ///
@@ -198,7 +204,19 @@ struct FactsCorpusParityTests {
         // Top-K (K=3) document set must match — membership only, order
         // is allowed to permute under cross-implementation precision
         // drift. Beyond rank K the result order is best-effort.
-        let k = min(Self.topKSetCheckRanks, expectedIds.count, actualIds.count)
+        //
+        // Derive K from the expected side and assert separately that
+        // Switchcraft returned at least K hits, so a short result list
+        // surfaces as a hard failure rather than a silently-weakened
+        // set check.
+        let k = min(Self.topKSetCheckRanks, expectedIds.count)
+        #expect(
+            actualIds.count >= k,
+            """
+            Query "\(queryFixture.query)" returned only \(actualIds.count) \
+            hits — expected at least \(k) to validate top-\(k) set parity.
+            """
+        )
         let actualTopSet = Set(actualIds.prefix(k))
         let expectedTopSet = Set(expectedIds.prefix(k))
         #expect(
@@ -210,19 +228,30 @@ struct FactsCorpusParityTests {
             """
         )
 
-        // Per-result score parity within tolerance, by rank. Beyond
-        // rank K-1 we still compare scores at matching ranks; the
-        // ordering check above is what's relaxed past K.
-        let common = min(hits.count, queryFixture.expected.count)
-        for i in 0..<common {
-            let actual = hits[i].score
-            let expected = queryFixture.expected[i].score
+        // Per-doc score parity within tolerance, matched by doc-id (not
+        // by rank). Comparing by rank would compare scores for
+        // *different* documents whenever rank-ordering permutes within
+        // the top-K — masking real drift on one doc and falsely
+        // flagging another. Build a doc-id → expected-score map and
+        // assert each returned hit's score against the reference for
+        // its own doc-id.
+        let expectedScoreByDocId: [String: Float] = Dictionary(
+            uniqueKeysWithValues: queryFixture.expected.map { ($0.docId, $0.score) }
+        )
+        for hit in hits {
+            guard let expected = expectedScoreByDocId[hit.uuid] else {
+                // Doc returned by Switchcraft but not in the Witchcraft
+                // reference top-K. The set-equality check above already
+                // flags this for ranks < K; for ranks ≥ K it's
+                // best-effort (no assertion per ADR 010(h)).
+                continue
+            }
             #expect(
-                abs(actual - expected) <= Self.scoreTolerance,
+                abs(hit.score - expected) <= Self.scoreTolerance,
                 """
-                Query "\(queryFixture.query)" rank \(i): score \(actual) \
-                drifted from Witchcraft reference \(expected) by more \
-                than ±\(Self.scoreTolerance) (Δ=\(actual - expected)).
+                Query "\(queryFixture.query)" doc \(hit.uuid): score \
+                \(hit.score) drifted from Witchcraft reference \(expected) \
+                by more than ±\(Self.scoreTolerance) (Δ=\(hit.score - expected)).
                 """
             )
         }
