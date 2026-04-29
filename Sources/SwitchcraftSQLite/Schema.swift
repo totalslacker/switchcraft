@@ -76,5 +76,11 @@ enum Schema {
         """,
 
         "CREATE INDEX IF NOT EXISTS bucket_generation_idx ON bucket(generation_id)",
+
+        // Search calls `documents(forChunkHash:)` once per selected chunk
+        // to bridge ADR 005's `(chunkID, tokenOffset)` bucket pairs back
+        // to documents. Without this index that becomes a full table scan
+        // per call and dominates wall time on large corpora.
+        "CREATE INDEX IF NOT EXISTS document_hash_idx ON document(hash)",
     ]
 }
