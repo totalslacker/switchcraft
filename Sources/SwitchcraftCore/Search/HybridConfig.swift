@@ -2,10 +2,11 @@ import Foundation
 
 /// Tuneable parameters for `SearchEngine.searchHybrid`.
 ///
-/// Hybrid search runs the vector pipeline and the FTS pipeline in parallel
-/// (sequentially within the actor for determinism), pulls
-/// `perSourceBudget` candidates from each, and fuses the two ranked lists
-/// via standard equal-weight Reciprocal Rank Fusion:
+/// Hybrid search runs the vector pipeline and the FTS pipeline
+/// sequentially (parallelism is intentionally avoided so the fused output
+/// is byte-identical for the same inputs), pulls `perSourceBudget`
+/// candidates from each, and fuses the two ranked lists via standard
+/// equal-weight Reciprocal Rank Fusion:
 ///
 /// `rrf(uuid) = Σ 1 / (rrfK + rank_in_source)`
 ///
