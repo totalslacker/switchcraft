@@ -427,7 +427,7 @@ For a subset of documents, compare the raw T5 token embeddings between Rust (Can
 
 Tests that Witchcraft doesn't have but Switchcraft must. Each suite below is a deliverable:
 
-- [ ] Matrix Operations suite (GEMM, matmul_t, batched argmax, packed/fused GEMM)
+- [x] Matrix Operations suite (GEMM, matmul_t, batched argmax, packed/fused GEMM)
 - [x] Residual Codec suite (round-trip, sizing, range, batch parity)
 - [ ] Concurrency suite (concurrent reads during indexing, reader/writer visibility, simultaneous searches)
 - [ ] CoreML Inference suite (parity vs Candle, tokenizer parity, sliding window, low-signal filtering)
