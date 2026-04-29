@@ -222,9 +222,12 @@ public actor SwitchcraftStore {
     /// `SwitchcraftStoreError.alreadyShutDown`.
     public func shutdown() async throws {
         if isShutDown { return }
+        // Set the flag before any `await` so calls that arrive while
+        // the actor is suspended in flush/close observe shutdown and
+        // throw `alreadyShutDown` instead of racing through gates.
+        isShutDown = true
         try await indexer.flush()
         try await storage.close()
-        isShutDown = true
     }
 
     // MARK: - Helpers
