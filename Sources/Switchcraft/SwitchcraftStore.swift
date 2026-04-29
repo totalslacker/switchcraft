@@ -1,0 +1,267 @@
+import Foundation
+import CryptoKit
+import SwitchcraftCore
+
+/// Public, async, document-management surface over a `SwitchcraftStorage`
+/// backend, an `Embedder`, and the index/search engines.
+///
+/// Library consumers normally interact with Switchcraft through this
+/// actor:
+///
+/// ```swift
+/// let store = try await SwitchcraftStore.sqlite(
+///     databasePath: "/tmp/x.db",
+///     embedder: myEmbedder
+/// )
+/// try await store.add(id: "doc-1", body: "some text")
+/// let hits = try await store.search(query: "what is some text about?", topK: 10)
+/// ```
+///
+/// The store performs four jobs on every `add`: embed text via the
+/// supplied `Embedder`, persist a `DocumentRecord` and a `ChunkRecord`,
+/// buffer per-token embeddings in the `Indexer`'s ledger, and (later)
+/// flush before serving queries.
+///
+/// Determinism is preserved end-to-end: same `Embedder` + same `add`
+/// sequence ⇒ byte-identical `HybridHit` orderings and float-equal scores.
+public actor SwitchcraftStore {
+
+    // MARK: - State
+
+    private let storage: any SwitchcraftStorage
+    private let embedder: any Embedder
+    private let indexer: Indexer
+    private let searchEngine: SearchEngine
+    public let config: StoreConfig
+
+    private var isShutDown: Bool = false
+
+    // MARK: - Init
+
+    /// Build a store over any `SwitchcraftStorage`.
+    ///
+    /// Calls `storage.open()`. The storage must not have generations from
+    /// a prior session that aren't represented in the in-memory indexer
+    /// ledger if the caller intends to add new documents — that scenario
+    /// can throw `Indexer.Error.ledgerOutOfSync` on the next flush. A
+    /// reopened store can serve `search` against the existing index.
+    public init(
+        storage: any SwitchcraftStorage,
+        embedder: any Embedder,
+        config: StoreConfig = .default
+    ) async throws {
+        guard embedder.dims > 0, embedder.dims % 2 == 0 else {
+            throw SwitchcraftStoreError.invalidEmbeddingDimensions(embedder.dims)
+        }
+        self.storage = storage
+        self.embedder = embedder
+        self.config = config
+        self.indexer = Indexer(storage: storage, config: config.indexer)
+        self.searchEngine = SearchEngine(storage: storage, config: config.search)
+        try await storage.open()
+    }
+
+    // MARK: - Document management
+
+    /// Upsert a document. Calling `add` twice with the same `id` replaces
+    /// the previous document; the new body's embeddings supersede the
+    /// old ones for search purposes (the old chunk's embeddings are left
+    /// in storage as orphans — see the package's known-limitations notes).
+    ///
+    /// `metadata` is JSON-encoded with sorted keys so byte-identical input
+    /// produces byte-identical `DocumentRecord.metadata`.
+    public func add(
+        id: String,
+        date: Date = Date(),
+        metadata: [String: String] = [:],
+        body: String
+    ) async throws {
+        try ensureRunning()
+
+        // TODO: paragraph splitter — single chunk per body for v1.
+        let embeddings = try await embedder.encode(body)
+        let dims = embedder.dims
+        guard embeddings.count % dims == 0 else {
+            throw SwitchcraftStoreError.embeddingMismatch(
+                count: embeddings.count, dims: dims
+            )
+        }
+        let tokenCount = embeddings.count / dims
+
+        let hash = Self.contentHash(body)
+        let metadataData = try Self.encodeMetadata(metadata)
+
+        // Pre-check chunk existence so we only buffer embeddings into the
+        // indexer ledger when the chunk is genuinely new. `upsertChunk`
+        // alone returns the existing record on hash collision but does
+        // not signal whether an insert happened, so we'd risk
+        // double-buffering identical embeddings under the same chunkID.
+        let existing = try await storage.chunk(hash: hash)
+        let chunkID: Int64
+        if let existing {
+            chunkID = existing.id
+        } else {
+            let inserted = try await storage.upsertChunk(
+                ChunkRecord(
+                    hash: hash,
+                    model: embedder.modelIdentifier,
+                    embeddings: Data(),
+                    counts: [tokenCount]
+                )
+            )
+            chunkID = inserted.id
+            if tokenCount > 0 {
+                try await indexer.add(
+                    chunkID: chunkID,
+                    embeddings: embeddings,
+                    dims: dims
+                )
+            }
+        }
+
+        try await storage.upsertDocument(
+            DocumentRecord(
+                uuid: id,
+                date: date,
+                metadata: metadataData,
+                hash: hash,
+                body: body,
+                lens: [tokenCount]
+            )
+        )
+    }
+
+    /// Remove the document identified by `id`. No-op if absent. The
+    /// content chunk and its buffered embeddings are left in place — the
+    /// search engine drops orphan chunks because no document maps to the
+    /// chunk's hash.
+    public func remove(id: String) async throws {
+        try ensureRunning()
+        try await storage.deleteDocument(uuid: id)
+    }
+
+    /// Flush any pending L0 embeddings into the LSM tree. Called
+    /// automatically before every `search` and `score`, so most callers
+    /// never need to invoke it directly.
+    public func index() async throws {
+        try ensureRunning()
+        try await indexer.flush()
+    }
+
+    /// Wipe all documents, chunks, and LSM generations. The backing
+    /// storage file is left in place (tables are emptied).
+    public func clear() async throws {
+        try ensureRunning()
+        try await indexer.clearIndex()
+        try await storage.clear()
+    }
+
+    // MARK: - Search
+
+    /// Hybrid vector + BM25 search via Reciprocal Rank Fusion. Calls
+    /// `index()` internally so callers never need to flush manually.
+    public func search(
+        query: String,
+        topK: Int = 10,
+        filter: StorageFilter = .all
+    ) async throws -> [HybridHit] {
+        try ensureRunning()
+        try await indexer.flush()
+        let queryEmbeddings = try await embedder.encode(query)
+        let dims = embedder.dims
+        guard queryEmbeddings.count % dims == 0 else {
+            throw SwitchcraftStoreError.embeddingMismatch(
+                count: queryEmbeddings.count, dims: dims
+            )
+        }
+        return try await searchEngine.searchHybrid(
+            queryEmbeddings: queryEmbeddings,
+            dims: dims,
+            queryText: query,
+            topK: topK,
+            filter: filter,
+            config: config.hybrid
+        )
+    }
+
+    /// Score `passages` against `query`. Returns one MaxSim score per
+    /// passage in input order. Reproducible for the same `Embedder`.
+    public func score(query: String, passages: [String]) async throws -> [Float] {
+        try ensureRunning()
+        try await indexer.flush()
+        let queryEmbeddings = try await embedder.encode(query)
+        let dims = embedder.dims
+        guard queryEmbeddings.count % dims == 0 else {
+            throw SwitchcraftStoreError.embeddingMismatch(
+                count: queryEmbeddings.count, dims: dims
+            )
+        }
+        var passageEmbeddings: [[Float]] = []
+        passageEmbeddings.reserveCapacity(passages.count)
+        for passage in passages {
+            let emb = try await embedder.encode(passage)
+            guard emb.count % dims == 0 else {
+                throw SwitchcraftStoreError.embeddingMismatch(
+                    count: emb.count, dims: dims
+                )
+            }
+            passageEmbeddings.append(emb)
+        }
+        return try await searchEngine.score(
+            queryEmbeddings: queryEmbeddings,
+            dims: dims,
+            passages: passageEmbeddings
+        )
+    }
+
+    // MARK: - Lifecycle
+
+    /// Flush pending writes, close the underlying storage, and mark the
+    /// store as shut down. Idempotent: a second call is a no-op. After
+    /// shutdown, every other public method throws
+    /// `SwitchcraftStoreError.alreadyShutDown`.
+    public func shutdown() async throws {
+        if isShutDown { return }
+        try await indexer.flush()
+        try await storage.close()
+        isShutDown = true
+    }
+
+    // MARK: - Helpers
+
+    private func ensureRunning() throws {
+        if isShutDown { throw SwitchcraftStoreError.alreadyShutDown }
+    }
+
+    /// SHA-256 of the body's UTF-8 bytes, hex-encoded. Used as the chunk
+    /// dedup key. Stable across processes and Swift versions.
+    static func contentHash(_ body: String) -> String {
+        let digest = SHA256.hash(data: Data(body.utf8))
+        var out = ""
+        out.reserveCapacity(SHA256.Digest.byteCount * 2)
+        for byte in digest {
+            let hi = byte >> 4
+            let lo = byte & 0x0F
+            out.append(Self.hexDigit(hi))
+            out.append(Self.hexDigit(lo))
+        }
+        return out
+    }
+
+    private static func hexDigit(_ nibble: UInt8) -> Character {
+        nibble < 10
+            ? Character(UnicodeScalar(0x30 + nibble))
+            : Character(UnicodeScalar(0x61 + (nibble - 10)))
+    }
+
+    /// JSON-encode a `[String: String]` metadata dict using sorted keys
+    /// so equal dicts always produce byte-identical `Data`. Required for
+    /// the determinism acceptance criterion.
+    static func encodeMetadata(_ metadata: [String: String]) throws -> Data {
+        if metadata.isEmpty { return Data() }
+        return try JSONSerialization.data(
+            withJSONObject: metadata,
+            options: [.sortedKeys]
+        )
+    }
+}
