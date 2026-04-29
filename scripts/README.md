@@ -70,13 +70,18 @@ Extract that block and write it to the Switchcraft repo at
 `Tests/Fixtures/facts_corpus.json`:
 
 ```bash
-cargo test --features t5-quantized --lib \
+WITCHCRAFT_COMMIT=$(git rev-parse HEAD) cargo test \
+    --features t5-quantized --lib \
     tests::tests::dump_facts_corpus_fixture \
     -- --nocapture --include-ignored 2>&1 \
 | awk '/^---SWITCHCRAFT-FIXTURE-BEGIN---$/{flag=1; next} \
        /^---SWITCHCRAFT-FIXTURE-END---$/{flag=0} flag' \
 > /path/to/switchcraft/Tests/Fixtures/facts_corpus.json
 ```
+
+`WITCHCRAFT_COMMIT` must be set on this command too — the helper reads
+the env var directly when emitting the `provenance.witchcraftCommit`
+field, and falls back to the literal string `"UNKNOWN"` if unset.
 
 Then:
 
