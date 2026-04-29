@@ -10,6 +10,13 @@
 # older releases; 7.2 is the first version where the canonical conversion
 # path is stable for fixed [1, 512] int32 inputs.
 #
+# Note: per ADR 010(c) and issue #31, the script uses FP32 compute precision
+# (not FP16) because T5's activation outliers + the output L2-norm both
+# overflow FP16 on this graph. Verified against coremltools 7.2 and 9.0;
+# no toolchain bump fixes it. Do not flip `compute_precision` back to
+# FLOAT16 without re-validating the parity check; the script will produce
+# a `.mlpackage` whose `MLModel.prediction(_:)` returns NaN-filled outputs.
+#
 # Install with:
 #     pip install -r scripts/requirements-coreml.txt
 
