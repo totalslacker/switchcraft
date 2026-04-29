@@ -39,7 +39,8 @@ public actor SearchEngine {
 
     /// Errors thrown by `SearchEngine` when input shapes are malformed.
     public enum Error: Swift.Error, Sendable, Equatable {
-        /// `dims` was zero or negative.
+        /// `dims` was zero, negative, or odd. Q4 residuals pack two
+        /// floats per byte so `dims` must be a positive even number.
         case invalidDims(Int)
         /// Embedding buffer length is not a multiple of `dims`.
         case ragged(count: Int, dims: Int)
@@ -82,7 +83,7 @@ public actor SearchEngine {
         topK: Int,
         filter: StorageFilter = .all
     ) async throws -> [SearchHit] {
-        guard dims > 0 else { throw Error.invalidDims(dims) }
+        guard dims > 0, dims % 2 == 0 else { throw Error.invalidDims(dims) }
         guard queryEmbeddings.count % dims == 0 else {
             throw Error.ragged(count: queryEmbeddings.count, dims: dims)
         }
@@ -126,8 +127,9 @@ public actor SearchEngine {
             // 2. Per query token: top-k with cumulative-token budget.
             for q in 0..<n {
                 let row = q * numCentroids
-                // Stable sort indices by descending similarity. Ties
-                // broken by ascending centroid index for determinism.
+                // Sort indices by descending similarity, breaking ties
+                // by ascending centroid index. The total order makes
+                // the result deterministic regardless of sort stability.
                 var order = Array(0..<numCentroids)
                 order.sort { a, b in
                     let sa = sims[row + a]
@@ -245,11 +247,14 @@ public actor SearchEngine {
                     }
                     perDocMax[doc.uuid] = seeded
                 }
-                var arr = perDocMax[doc.uuid]!
+                // Update the per-document max in place via the
+                // dictionary's subscript modify accessor — avoids
+                // copying the [Float] buffer per chunk per document.
                 for q in 0..<n {
-                    if chunkMax[q] > arr[q] { arr[q] = chunkMax[q] }
+                    if chunkMax[q] > perDocMax[doc.uuid]![q] {
+                        perDocMax[doc.uuid]![q] = chunkMax[q]
+                    }
                 }
-                perDocMax[doc.uuid] = arr
             }
         }
 
@@ -276,8 +281,9 @@ public actor SearchEngine {
             hits.append(SearchHit(uuid: uuid, score: score))
         }
 
-        // 7. Deterministic ordering by (-score, uuid) ascending using
-        //    a stable sort.
+        // 7. Deterministic ordering by (-score, uuid) ascending. The
+        //    comparator defines a total order, so determinism does not
+        //    depend on Swift's sort being stable.
         hits.sort { lhs, rhs in
             if lhs.score != rhs.score { return lhs.score > rhs.score }
             return lhs.uuid < rhs.uuid
@@ -305,7 +311,7 @@ public actor SearchEngine {
         dims: Int,
         passages: [[Float]]
     ) async throws -> [Float] {
-        guard dims > 0 else { throw Error.invalidDims(dims) }
+        guard dims > 0, dims % 2 == 0 else { throw Error.invalidDims(dims) }
         guard queryEmbeddings.count % dims == 0 else {
             throw Error.ragged(count: queryEmbeddings.count, dims: dims)
         }
