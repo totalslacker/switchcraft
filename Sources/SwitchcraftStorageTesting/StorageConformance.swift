@@ -45,6 +45,7 @@ public enum StorageConformance {
 
         try await runFullTextRetrieval(storage)
         try await runFullTextRespectsFilter(storage)
+        try await runFullTextDeterministicTieBreak(storage)
 
         try await storage.close()
     }
@@ -279,6 +280,26 @@ public enum StorageConformance {
         let hits = try await storage.searchFullText(query: "bananas", limit: 10, filter: .all)
         #expect(hits.first?.uuid == "fruit")
         #expect(hits.contains { $0.uuid == "veg" } == false)
+    }
+
+    /// FTS results with tied scores must be ordered by uuid ascending so
+    /// hybrid fusion is deterministic across runs (ADR 008).
+    static func runFullTextDeterministicTieBreak(_ storage: any SwitchcraftStorage) async throws {
+        try await storage.clear()
+        // Three documents with bodies that all match "common" once.
+        // BM25 scores will be identical (or near-identical), and the
+        // in-memory backend's overlap score is exactly equal.
+        try await storage.upsertDocument(makeDocument(uuid: "c-zeta",  body: "common term zeta"))
+        try await storage.upsertDocument(makeDocument(uuid: "a-alpha", body: "common term alpha"))
+        try await storage.upsertDocument(makeDocument(uuid: "b-beta",  body: "common term beta"))
+
+        let first  = try await storage.searchFullText(query: "common", limit: 10, filter: .all)
+        let second = try await storage.searchFullText(query: "common", limit: 10, filter: .all)
+
+        #expect(first.map(\.uuid) == second.map(\.uuid))
+        let uuids = first.map(\.uuid)
+        #expect(uuids == uuids.sorted())
+        #expect(Set(uuids) == ["a-alpha", "b-beta", "c-zeta"])
     }
 
     static func runFullTextRespectsFilter(_ storage: any SwitchcraftStorage) async throws {

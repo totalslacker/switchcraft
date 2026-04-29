@@ -285,12 +285,14 @@ public actor SQLiteStorage: SwitchcraftStorage {
         let clause = filter.lower(tableAlias: "d")
 
         // bm25() returns lower = more relevant; negate so higher = better.
+        // Tie-break on uuid ascending to keep ordering byte-identical with
+        // the in-memory backend and stable across runs (see ADR 008).
         let sql = """
             SELECT d.uuid, -bm25(document_fts) AS score
             FROM document_fts
             JOIN document d ON d.rowid = document_fts.rowid
             WHERE document_fts MATCH ? AND \(clause.sql)
-            ORDER BY score DESC
+            ORDER BY score DESC, d.uuid ASC
             LIMIT ?
             """
         let stmt = try conn.prepare(sql)

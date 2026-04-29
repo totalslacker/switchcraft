@@ -294,6 +294,152 @@ public actor SearchEngine {
         return hits
     }
 
+    /// Run vector search and full-text search in tandem and fuse their
+    /// ranked lists via Reciprocal Rank Fusion (equal-weight, 1-indexed).
+    ///
+    /// Pipeline:
+    ///  1. Vector candidates: call `search(...)` with `topK = perSourceBudget`.
+    ///  2. FTS candidates: call `storage.searchFullText(...)` with
+    ///     `limit = perSourceBudget`. The same `filter` is pushed into both
+    ///     sub-calls as a performance optimisation.
+    ///  3. For every uuid present in either list, compute
+    ///     `rrf = Σ 1 / (rrfK + rank)` over its sources (1-indexed).
+    ///  4. Apply `filter` to the union of uuids by re-fetching each
+    ///     `DocumentRecord` and evaluating `filter.matches(_:)` — the
+    ///     correctness gate against any future divergence between the
+    ///     two backends' native filter lowerings and `StorageFilter`.
+    ///  5. Sort by `(rrf DESC, uuid ASC)` and return the prefix `topK`.
+    ///
+    /// Empty-input fallbacks (still RRF-formatted scores):
+    /// - No query embeddings (`queryEmbeddings.count == 0`): FTS-only.
+    /// - Empty / whitespace-only `queryText`: vector-only.
+    /// - Both empty: returns `[]`.
+    ///
+    /// All sub-calls are awaited sequentially — no `TaskGroup` — so the
+    /// fused output is byte-identical for the same inputs.
+    ///
+    /// - Parameters:
+    ///   - queryEmbeddings: row-major `n × dims` query token embeddings.
+    ///     Pass an empty array to skip vector search.
+    ///   - dims: vector dimensionality. Ignored when `queryEmbeddings`
+    ///     is empty.
+    ///   - queryText: raw query string for the FTS source.
+    ///     Whitespace-only and empty strings skip FTS search.
+    ///   - topK: maximum number of fused hits to return.
+    ///   - filter: pushed to both sources and re-applied to the union.
+    ///   - config: RRF tuning. See `HybridConfig` and ADR 008.
+    public func searchHybrid(
+        queryEmbeddings: [Float],
+        dims: Int,
+        queryText: String,
+        topK: Int,
+        filter: StorageFilter = .all,
+        config: HybridConfig = HybridConfig()
+    ) async throws -> [HybridHit] {
+        guard topK > 0 else { return [] }
+
+        let trimmedQuery = queryText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasVector = !queryEmbeddings.isEmpty
+        let hasText = !trimmedQuery.isEmpty
+        if !hasVector && !hasText { return [] }
+
+        // 1. Vector candidates (skipped if no embeddings).
+        let vectorHits: [SearchHit]
+        if hasVector {
+            vectorHits = try await search(
+                queryEmbeddings: queryEmbeddings,
+                dims: dims,
+                topK: config.perSourceBudget,
+                filter: filter
+            )
+        } else {
+            vectorHits = []
+        }
+
+        // 2. FTS candidates (skipped if no text).
+        let ftsHits: [FullTextHit]
+        if hasText {
+            ftsHits = try await storage.searchFullText(
+                query: trimmedQuery,
+                limit: config.perSourceBudget,
+                filter: filter
+            )
+        } else {
+            ftsHits = []
+        }
+
+        // 3. Build per-uuid union with 1-indexed ranks and per-source raw
+        //    scores. Iterate in input order so the union map's key order
+        //    is deterministic.
+        struct Provenance {
+            var vectorRank: Int?
+            var vectorScore: Float?
+            var ftsRank: Int?
+            var ftsScore: Float?
+        }
+        var union: [String: Provenance] = [:]
+        union.reserveCapacity(vectorHits.count + ftsHits.count)
+
+        for (i, hit) in vectorHits.enumerated() {
+            var prov = union[hit.uuid] ?? Provenance()
+            prov.vectorRank = i + 1
+            prov.vectorScore = hit.score
+            union[hit.uuid] = prov
+        }
+        for (i, hit) in ftsHits.enumerated() {
+            var prov = union[hit.uuid] ?? Provenance()
+            prov.ftsRank = i + 1
+            prov.ftsScore = hit.score
+            union[hit.uuid] = prov
+        }
+
+        if union.isEmpty { return [] }
+
+        // 4. Final filter pass on the union. The same filter has already
+        //    been pushed into both sub-calls; this is the correctness
+        //    gate against any divergence between a backend's native
+        //    filter lowering and `StorageFilter.matches`.
+        let kFloat = Float(config.rrfK)
+        var hits: [HybridHit] = []
+        hits.reserveCapacity(union.count)
+        for (uuid, prov) in union {
+            if case .all = filter {
+                // Skip the per-uuid document fetch when there is no
+                // filter to apply.
+            } else {
+                guard let document = try await storage.document(uuid: uuid),
+                      filter.matches(document)
+                else {
+                    continue
+                }
+            }
+
+            var score: Float = 0
+            if let r = prov.vectorRank { score += 1 / (kFloat + Float(r)) }
+            if let r = prov.ftsRank    { score += 1 / (kFloat + Float(r)) }
+
+            hits.append(HybridHit(
+                uuid: uuid,
+                score: score,
+                vectorRank: prov.vectorRank,
+                vectorScore: prov.vectorScore,
+                ftsRank: prov.ftsRank,
+                ftsScore: prov.ftsScore
+            ))
+        }
+
+        // 5. Sort by (rrf DESC, uuid ASC) — total order, deterministic
+        //    regardless of the underlying sort's stability.
+        hits.sort { lhs, rhs in
+            if lhs.score != rhs.score { return lhs.score > rhs.score }
+            return lhs.uuid < rhs.uuid
+        }
+        if hits.count > topK {
+            return Array(hits.prefix(topK))
+        }
+        return hits
+    }
+
     /// Score already-embedded passage token vectors directly against the
     /// query, without any storage or centroid lookup. Pure in-memory
     /// MaxSim utility — for each passage, compute per-q-token max dot

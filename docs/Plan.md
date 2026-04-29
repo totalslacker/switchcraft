@@ -311,7 +311,7 @@ Track progress by checking off items as they land. Effort estimates and notes fo
 - [x] **4-bit residual codec** (1 week) — ~200 lines, bit-level packing; round-trip property tests
 - [x] **LSM-tree index structure** (1 week) — Cascading merge logic
 - [x] **Search pipeline** (1-2 weeks) — Centroid match → residual decode → MaxSim scoring
-- [ ] **RRF + FTS5 hybrid** (3-4 days) — Adapt Witchcraft's hybrid fusion
+- [x] **RRF + FTS5 hybrid** (3-4 days) — Adapt Witchcraft's hybrid fusion
 - [ ] **Async Swift API** (3-4 days) — `SwitchcraftStore` actor wrapper
 - [ ] **Testing + benchmarking** (2-3 weeks) — Correctness + performance validation (see Testing Strategy)
 
