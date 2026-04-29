@@ -1,0 +1,108 @@
+diff --git a/src/tests.rs b/src/tests.rs
+index 9d4aec4..ecf71d1 100644
+--- a/src/tests.rs
++++ b/src/tests.rs
+@@ -54,6 +54,103 @@ mod tests {
+     ];
+     const THRESHOLD: f32 = 0.7;
+ 
++    /// Emit a JSON document on stdout that the Switchcraft repository
++    /// commits as `Tests/Fixtures/facts_corpus.json`. See
++    /// `scripts/witchcraft-fact-dump.patch` and `scripts/README.md` in
++    /// the Switchcraft repo for the full regeneration procedure.
++    ///
++    /// `#[ignore]` so a normal `cargo test` run does not invoke it; pass
++    /// `--include-ignored` to run.
++    #[test]
++    #[ignore]
++    fn dump_facts_corpus_fixture() -> std::io::Result<()> {
++        let dir = tempdir().unwrap();
++        let path: PathBuf = dir.path().join("warp");
++        let mut db = DB::new(path.clone()).unwrap();
++        let device = crate::make_device();
++        let assets = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/assets"));
++        let embedder = crate::Embedder::new(&device, &assets).unwrap();
++
++        // Same indexing flow as test_end_to_end. We use the original
++        // FACTS array verbatim (including the duplicate at index 16).
++        let mut uuids = vec![];
++        for body in FACTS {
++            let uuid = Uuid::new_v5(&Uuid::NAMESPACE_OID, body.as_bytes());
++            uuids.push(uuid.clone());
++            db.add_doc(&uuid, None, &uuid.to_string(), &body, None)
++                .unwrap();
++        }
++        crate::embed_chunks(&db, &embedder, None).unwrap();
++        crate::index_chunks(&db, &device).unwrap();
++
++        // Stable git SHA of the Witchcraft tree the helper was applied
++        // to. The runner is expected to set this externally — the
++        // patched file does not know which SHA it was applied on top of.
++        let commit = std::env::var("WITCHCRAFT_COMMIT")
++            .unwrap_or_else(|_| "UNKNOWN".to_string());
++        let now = chrono::Utc::now().to_rfc3339();
++
++        // Emit JSON between markers so the runner can grep/sed it out
++        // of stdout without depending on cargo's test-output framing.
++        println!("---SWITCHCRAFT-FIXTURE-BEGIN---");
++        println!("{{");
++        println!("  \"provenance\": {{");
++        println!("    \"witchcraftCommit\": \"{commit}\",");
++        println!("    \"generatedAt\": \"{now}\",");
++        println!("    \"computeUnits\": \"all\",");
++        println!("    \"k\": 32,");
++        println!("    \"tPrime\": 40000,");
++        println!("    \"threshold\": 0.0");
++        println!("  }},");
++        println!("  \"facts\": [");
++        for (i, body) in FACTS.iter().enumerate() {
++            let escaped = body.replace('\\', "\\\\").replace('"', "\\\"");
++            let comma = if i + 1 < FACTS.len() { "," } else { "" };
++            println!("    \"{escaped}\"{comma}");
++        }
++        println!("  ],");
++        println!("  \"queries\": [");
++        for (qi, (q, _)) in QUERIES.iter().enumerate() {
++            let q_escaped = q.replace('\\', "\\\\").replace('"', "\\\"");
++            // match_centroids is the pure-vector pipeline. Threshold 0.0
++            // captures every candidate that survives the LSM scan; the
++            // Switchcraft side asserts against this same untransformed
++            // score (its `SearchEngine.search` returns raw MaxSim mean
++            // scores without the post-processing roll that
++            // `crate::search` applies).
++            let (qe, _) = embedder.embed(q).unwrap();
++            let qe = qe.get(0).unwrap();
++            let hits = crate::match_centroids(&db, &qe, 0.0, 10, None).unwrap();
++            println!("    {{");
++            println!("      \"query\": \"{q_escaped}\",");
++            println!("      \"expected\": [");
++            for (hi, (score, doc_idx, _sub_idx)) in hits.iter().enumerate() {
++                // match_centroids returns the document rowid (1-based
++                // SQLite rowid). Map back to the 0-based insertion
++                // index by looking up the UUID stored in metadata.
++                let metadata: String = db
++                    .query("SELECT metadata FROM document WHERE rowid = ?1")
++                    .unwrap()
++                    .query_row((*doc_idx,), |row| row.get(0))
++                    .unwrap();
++                let uuid = Uuid::parse_str(&metadata).unwrap();
++                let index = uuids.iter().position(|u| *u == uuid).unwrap();
++                let comma = if hi + 1 < hits.len() { "," } else { "" };
++                println!("        {{ \"docId\": \"{index}\", \"score\": {score} }}{comma}");
++            }
++            let qcomma = if qi + 1 < QUERIES.len() { "," } else { "" };
++            println!("      ]");
++            println!("    }}{qcomma}");
++        }
++        println!("  ]");
++        println!("}}");
++        println!("---SWITCHCRAFT-FIXTURE-END---");
++
++        db.clear();
++        db.shutdown();
++        Ok(())
++    }
++
+     #[test]
+     fn test_end_to_end() -> std::io::Result<()> {
+         let dir = tempdir().unwrap();

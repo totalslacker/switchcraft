@@ -371,7 +371,7 @@ The primary goal is proving the Swift port produces **identical results** to the
 
 Deliverables:
 
-- [ ] 33-fact corpus ported verbatim, queries pass with same retrieval / ranking / scores (±0.01)
+- [x] 33-fact corpus ported verbatim, queries pass with same retrieval / ranking / scores (±0.01)
 - [ ] NFCorpus benchmark pipeline ported, NDCG@10 ∈ [0.31, 0.33]
 - [ ] Bit-exact embedding validation against Candle reference outputs
 
@@ -537,7 +537,7 @@ Tests/Fixtures/
 
 Fixture deliverables:
 
-- [ ] `facts_corpus.json`
+- [x] `facts_corpus.json`
 - [x] `reference_embeddings.bin` (committed as `xtr-base-en.embeddings.bin` + index JSON; produced by `scripts/convert-xtr-to-coreml.py`)
 - [ ] `reference_centroids.bin`
 - [ ] `reference_residuals.bin`
