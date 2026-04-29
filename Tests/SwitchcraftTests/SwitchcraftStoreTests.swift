@@ -4,6 +4,10 @@ import Testing
 @testable import SwitchcraftCore
 @testable import SwitchcraftSQLite
 
+#if canImport(CoreML)
+@testable import SwitchcraftCoreML
+#endif
+
 @Suite("SwitchcraftStore")
 struct SwitchcraftStoreTests {
 
@@ -295,4 +299,60 @@ struct SwitchcraftStoreTests {
             )
         }
     }
+
+    // MARK: - End-to-end with the real T5/CoreML embedder
+
+#if canImport(CoreML)
+    /// Asset-gated end-to-end smoke test: exercises the full
+    /// `T5CoreMLEmbedder + SwitchcraftStore.sqlite(:memory:)` pipeline
+    /// on three real-text documents, then verifies that searching with
+    /// the body of a fourth (held-out) document returns the
+    /// semantically-closest doc at rank 1.
+    ///
+    /// Skipped when `SWITCHCRAFT_XTR_MLPACKAGE` is unset.
+    @Test(
+        "T5CoreMLEmbedder end-to-end: closest semantic match wins at rank 1",
+        .enabled(if: CoreMLAsset.isAvailable)
+    )
+    func t5CoreMLEndToEnd() async throws {
+        let modelURL = CoreMLAsset.url!
+        let tokenizerURL = Bundle.module.url(
+            forResource: "xtr-base-en.tokenizer",
+            withExtension: "json",
+            subdirectory: "Fixtures"
+        )!
+        let tokenizer = try Tokenizer(contentsOf: tokenizerURL.path)
+        let embedder = try await T5CoreMLEmbedder(
+            modelURL: modelURL,
+            tokenizer: tokenizer
+        )
+        let store = try await SwitchcraftStore.sqlite(
+            databasePath: ":memory:",
+            embedder: embedder
+        )
+
+        try await store.add(
+            id: "fruit",
+            body: "Apples and bananas are popular fruits eaten worldwide."
+        )
+        try await store.add(
+            id: "weather",
+            body: "Heavy rainfall and thunderstorms are expected this evening."
+        )
+        try await store.add(
+            id: "code",
+            body: "Refactoring legacy code requires careful test coverage."
+        )
+        try await store.index()
+
+        // The query talks about fruit; "fruit" should top the ranking.
+        let hits = try await store.search(
+            query: "I picked some red apples from the orchard.",
+            topK: 3
+        )
+        #expect(hits.first?.uuid == "fruit")
+
+        try await store.shutdown()
+    }
+#endif
 }
