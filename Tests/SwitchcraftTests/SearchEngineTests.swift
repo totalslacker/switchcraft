@@ -253,9 +253,6 @@ struct SearchEngineTests {
                 }
             }
         }
-        let approx0 = approxByPair[IndexPair(chunkID: UInt32(chunk.id), tokenOffset: 0)]!
-        let approx2 = approxByPair[IndexPair(chunkID: UInt32(chunk.id), tokenOffset: 2)]!
-
         // Expected per-q-token max = max over all reconstructed tokens of
         // (q · approxToken). Compute by enumerating all approx tokens.
         let allApprox = (0..<4).compactMap {
@@ -267,14 +264,18 @@ struct SearchEngineTests {
             for i in 0..<a.count { s += a[i] * b[i] }
             return s
         }
-        let q0Max = allApprox.map { dot(rows[0], $0) }.max()!
-        let q1Max = allApprox.map { dot(rows[2], $0) }.max()!
+        let q0Scores = allApprox.map { dot(rows[0], $0) }
+        let q1Scores = allApprox.map { dot(rows[2], $0) }
+        let q0Max = q0Scores.max()!
+        let q1Max = q1Scores.max()!
         let expected = (q0Max + q1Max) / 2.0
 
-        // Sanity: the per-q max should pick the matching reconstructed
-        // token, not a random other one. (This is the locked algorithm.)
-        #expect(q0Max == allApprox.map { dot(rows[0], $0) }.max())
-        _ = approx0; _ = approx2  // suppress unused warnings
+        // The per-q max should pick the matching reconstructed token —
+        // i.e. token 0 for q=rows[0], token 2 for q=rows[2]. Q4 quantisation
+        // is lossy, so this isn't guaranteed mathematically; this is a
+        // sanity check that the test corpus is well-behaved.
+        #expect(q0Scores.firstIndex(of: q0Max) == 0)
+        #expect(q1Scores.firstIndex(of: q1Max) == 2)
 
         #expect(abs(hit.score - expected) < 1e-5,
                 "hit.score \(hit.score) vs expected \(expected)")
