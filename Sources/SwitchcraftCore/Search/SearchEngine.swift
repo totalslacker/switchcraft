@@ -519,7 +519,7 @@ public actor SearchEngine {
     /// Sequential evaluation is preserved so summation order — and
     /// therefore the float-bit-equality determinism the spec mandates —
     /// is stable across runs.
-    fileprivate static func matmulQueryTimesRowMajorTranspose(
+    internal static func matmulQueryTimesRowMajorTranspose(
         queryEmbeddings: [Float],
         n: Int,
         rows: [Float],
