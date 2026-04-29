@@ -63,7 +63,8 @@ struct MatrixOpsTests {
         tolerance: Float = 1e-5
     ) {
         #expect(actual.count == expected.count)
-        for i in 0..<min(actual.count, expected.count) {
+        guard actual.count == expected.count else { return }
+        for i in 0..<actual.count {
             let diff = abs(actual[i] - expected[i])
             #expect(diff < tolerance, "index \(i): |\(actual[i]) - \(expected[i])| = \(diff) >= \(tolerance)")
         }
