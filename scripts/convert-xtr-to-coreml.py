@@ -254,17 +254,6 @@ def build_traceable_module(pipeline: ConvertedModel):
     return module
 
 
-# Ops to keep in FP32 even when the rest of the graph runs FP16. The L2-norm
-# region (`torch.linalg.vector_norm` + clamp + divide) decomposes in MIL into:
-#
-#     pow(x, 2) → reduce_sum → pow(sum, 0.5) → maximum(eps) → real_div
-#
-# Without an FP32 carve-out for at least the sum-of-squares step, blanket-FP16
-# conversion silently casts an intermediate constant to inf during the MIL
-# default pipeline ("RuntimeWarning: overflow encountered in cast") — every
-# subsequent op then propagates inf/NaN and the model returns all-zero outputs
-# at MLModel.prediction(_:) time. See ADR 010(c).
-#
 def convert_to_coreml(traceable, out_path: Path, *, revision: str, model_id: str):
     """Convert the wrapped torch module to CoreML and save as .mlpackage.
 
