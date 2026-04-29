@@ -395,13 +395,14 @@ let queries: [(String, Int)] = [
 ]
 ```
 
-Run the same queries in both Rust (Witchcraft) and Swift (Switchcraft), assert:
+Run the same queries in both Rust (Witchcraft) and Swift (Switchcraft), assert (per ADR 010(h), the relaxed FP32-vs-Q4K shape):
 
-- Same documents retrieved
-- Same ranking order
-- Scores within tolerance (±0.01 for floating point differences)
+- Top-1 doc-id: strict equality with Witchcraft
+- Top-3 doc-id set: set equality (membership, not order)
+- Per-doc score: within ±0.025 of the Witchcraft reference for that doc-id
+- Doc order beyond rank 3: best-effort, no assertion
 
-This catches any divergence in embedding, centroid matching, residual codec, or scoring.
+This catches any divergence in embedding, centroid matching, residual codec, or scoring. The tolerance will be tightened back toward ±0.01 once Witchcraft ships a higher-precision quant (Q5/Q8/F16/F32).
 
 #### NFCorpus Benchmark
 
