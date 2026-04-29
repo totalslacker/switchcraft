@@ -2,7 +2,7 @@ diff --git a/src/tests.rs b/src/tests.rs
 index 9d4aec4..ecf71d1 100644
 --- a/src/tests.rs
 +++ b/src/tests.rs
-@@ -54,6 +54,103 @@ mod tests {
+@@ -54,6 +54,105 @@ mod tests {
      ];
      const THRESHOLD: f32 = 0.7;
  
@@ -24,13 +24,16 @@ index 9d4aec4..ecf71d1 100644
 +        let embedder = crate::Embedder::new(&device, &assets).unwrap();
 +
 +        // Same indexing flow as test_end_to_end. We use the original
-+        // FACTS array verbatim (including the duplicate at index 16).
-+        let mut uuids = vec![];
-+        for body in FACTS {
-+            let uuid = Uuid::new_v5(&Uuid::NAMESPACE_OID, body.as_bytes());
-+            uuids.push(uuid.clone());
-+            db.add_doc(&uuid, None, &uuid.to_string(), &body, None)
-+                .unwrap();
++        // FACTS array verbatim (including the duplicate at index 16),
++        // so document identity must be derived from the stable array
++        // index rather than the body text — otherwise the duplicate
++        // collapses into one UUID and the corpus loses a document.
++        // Switchcraft inserts documents with ids "0".."32" without
++        // such collapsing, and this side must match.
++        for (idx, body) in FACTS.iter().enumerate() {
++            let doc_id = idx.to_string();
++            let uuid = Uuid::new_v5(&Uuid::NAMESPACE_OID, doc_id.as_bytes());
++            db.add_doc(&uuid, None, &doc_id, body, None).unwrap();
 +        }
 +        crate::embed_chunks(&db, &embedder, None).unwrap();
 +        crate::index_chunks(&db, &device).unwrap();
@@ -78,17 +81,16 @@ index 9d4aec4..ecf71d1 100644
 +            println!("      \"expected\": [");
 +            for (hi, (score, doc_idx, _sub_idx)) in hits.iter().enumerate() {
 +                // match_centroids returns the document rowid (1-based
-+                // SQLite rowid). Map back to the 0-based insertion
-+                // index by looking up the UUID stored in metadata.
++                // SQLite rowid). The 0-based insertion index is stored
++                // verbatim in the metadata column above, so just read
++                // it back as a string.
 +                let metadata: String = db
 +                    .query("SELECT metadata FROM document WHERE rowid = ?1")
 +                    .unwrap()
 +                    .query_row((*doc_idx,), |row| row.get(0))
 +                    .unwrap();
-+                let uuid = Uuid::parse_str(&metadata).unwrap();
-+                let index = uuids.iter().position(|u| *u == uuid).unwrap();
 +                let comma = if hi + 1 < hits.len() { "," } else { "" };
-+                println!("        {{ \"docId\": \"{index}\", \"score\": {score} }}{comma}");
++                println!("        {{ \"docId\": \"{metadata}\", \"score\": {score} }}{comma}");
 +            }
 +            let qcomma = if qi + 1 < QUERIES.len() { "," } else { "" };
 +            println!("      ]");
