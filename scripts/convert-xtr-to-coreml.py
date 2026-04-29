@@ -255,7 +255,24 @@ def build_traceable_module(pipeline: ConvertedModel):
 
 
 def convert_to_coreml(traceable, out_path: Path, *, revision: str, model_id: str):
-    """Convert the wrapped torch module to CoreML and save as .mlpackage."""
+    """Convert the wrapped torch module to CoreML and save as .mlpackage.
+
+    Compute precision is FP32. A blanket FP16 conversion (the previous
+    `compute_precision=ct.precision.FLOAT16` setting) silently produces
+    NaN-filled outputs at `MLModel.prediction(_:)` time on this graph: T5's
+    well-documented activation outliers and the output L2-norm region both
+    overflow FP16's ~65 504 ceiling — see issue #31 and ADR 010(c). Per-op
+    FP32 carve-outs (around the L2-norm region and even the full T5 RMSNorm
+    block) were not sufficient to stabilise the encoder body, and the same
+    NaN reproduces on coremltools 8/9.
+
+    Outputs are emitted as FP16 to match the Swift wrapper's contract
+    (`Sources/SwitchcraftCoreML/T5CoreMLEmbedder.swift` reads `Float16
+    [1, 512, 128]` and widens to FP32 at the boundary). The asset is larger
+    than ADR 010(c)'s aspirational 80 MB figure because weights stay FP32;
+    the trade-off is correct end-to-end parity vs. PyTorch.
+    """
+    import numpy as np
     import torch
     import coremltools as ct
 
@@ -268,14 +285,14 @@ def convert_to_coreml(traceable, out_path: Path, *, revision: str, model_id: str
             ct.TensorType(
                 name="input_ids",
                 shape=(1, WINDOW_SIZE),
-                dtype="int32",
+                dtype=np.int32,
             ),
         ],
         outputs=[
-            ct.TensorType(name="raw_projected", dtype="fp16"),
-            ct.TensorType(name="normalised", dtype="fp16"),
+            ct.TensorType(name="raw_projected", dtype=np.float16),
+            ct.TensorType(name="normalised", dtype=np.float16),
         ],
-        compute_precision=ct.precision.FLOAT16,
+        compute_precision=ct.precision.FLOAT32,
         convert_to="mlprogram",
         minimum_deployment_target=ct.target.macOS13,
     )

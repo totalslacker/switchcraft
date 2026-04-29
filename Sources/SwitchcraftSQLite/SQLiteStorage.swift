@@ -281,6 +281,18 @@ public actor SQLiteStorage: SwitchcraftStorage {
         guard limit > 0, !query.trimmingCharacters(in: .whitespaces).isEmpty else {
             return []
         }
+        // FTS5's MATCH grammar treats punctuation (".", "(", ":", quotes, etc.)
+        // as syntax. A natural-language query like "I picked some apples." would
+        // raise `SQLITE_ERROR: fts5: syntax error near "."`. Sanitise by
+        // splitting on the same alphanumeric boundary `InMemoryStorage` uses
+        // for its tokeniser, then double-quote each token so FTS5 reserved
+        // keywords (AND/OR/NOT/NEAR) can't be parsed as operators.
+        let ftsTerms = query
+            .split { !$0.isLetter && !$0.isNumber }
+            .map { "\"\(String($0))\"" }
+        guard !ftsTerms.isEmpty else { return [] }
+        let ftsQuery = ftsTerms.joined(separator: " ")
+
         let conn = try requireConnection()
         let clause = filter.lower(tableAlias: "d")
 
@@ -296,7 +308,7 @@ public actor SQLiteStorage: SwitchcraftStorage {
             LIMIT ?
             """
         let stmt = try conn.prepare(sql)
-        var bindings: [SQLValue] = [.text(query)]
+        var bindings: [SQLValue] = [.text(ftsQuery)]
         bindings.append(contentsOf: clause.bindings)
         bindings.append(.int(Int64(limit)))
         try stmt.bind(bindings)

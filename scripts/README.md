@@ -114,8 +114,10 @@ between the marker lines for the runner to capture.
   raw MaxSim mean scores; `crate::search` (Witchcraft) and
   `SwitchcraftStore.search` (Switchcraft) layer FTS + RRF on top, which
   ADR 008 disclaims as a parity target.
-- Switchcraft's CoreML T5 is FP16; Witchcraft's GGUF T5 is Q4K. Some
-  per-token drift is expected; the parity test accepts ±0.01 per
-  ADR 003. If a future model build pushes drift past that, the runner
-  re-records `provenance.computeUnits` / re-pins `witchcraftCommit` and
-  the tolerance discussion happens in the affected PR.
+- Switchcraft's CoreML T5 runs FP32 compute with FP16 output ports
+  (see ADR 010(c) for why blanket FP16 was abandoned); Witchcraft's
+  GGUF T5 is Q4K. Some per-token drift is expected; the parity test
+  accepts ±0.01 per ADR 003. If a future model build pushes drift past
+  that, the runner re-records `provenance.computeUnits` / re-pins
+  `witchcraftCommit` and the tolerance discussion happens in the
+  affected PR.
