@@ -11,6 +11,7 @@ let package = Package(
     products: [
         .library(name: "Switchcraft", targets: ["Switchcraft"]),
         .library(name: "SwitchcraftSQLite", targets: ["SwitchcraftSQLite"]),
+        .library(name: "SwitchcraftCoreML", targets: ["SwitchcraftCoreML"]),
         .library(name: "SwitchcraftStorageTesting", targets: ["SwitchcraftStorageTesting"]),
     ],
     targets: [
@@ -29,6 +30,17 @@ let package = Package(
             path: "Sources/SwitchcraftSQLite"
         ),
         .target(
+            name: "SwitchcraftCoreML",
+            dependencies: ["SwitchcraftCore"],
+            path: "Sources/SwitchcraftCoreML",
+            linkerSettings: [
+                .linkedFramework(
+                    "CoreML",
+                    .when(platforms: [.macOS, .iOS, .visionOS, .tvOS])
+                ),
+            ]
+        ),
+        .target(
             name: "SwitchcraftStorageTesting",
             dependencies: ["SwitchcraftCore"],
             path: "Sources/SwitchcraftStorageTesting"
@@ -38,6 +50,7 @@ let package = Package(
             dependencies: [
                 "Switchcraft",
                 "SwitchcraftSQLite",
+                "SwitchcraftCoreML",
                 "SwitchcraftCore",
                 "SwitchcraftStorageTesting",
             ],
