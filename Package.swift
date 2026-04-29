@@ -25,7 +25,7 @@ let package = Package(
         ),
         .target(
             name: "SwitchcraftSQLite",
-            dependencies: ["SwitchcraftCore"],
+            dependencies: ["SwitchcraftCore", "Switchcraft"],
             path: "Sources/SwitchcraftSQLite"
         ),
         .target(
