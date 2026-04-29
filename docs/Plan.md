@@ -188,65 +188,74 @@ The internal implementation stays close to the Rust original for easier porting 
 
 ### Public API (Async Swift)
 
+The public surface is the `SwitchcraftStore` actor plus the `Embedder`
+protocol. The store wraps a `SwitchcraftStorage` backend, an `Embedder`,
+and the internal `Indexer` and `SearchEngine` actors. See ADR 009 for
+the locked contract.
+
 ```swift
-/// Token-level semantic search engine.
-/// Thread-safe via actor isolation. Uses SQLite for storage
-/// and CoreML/Metal for T5 inference.
+public protocol Embedder: Sendable {
+    var dims: Int { get }
+    var modelIdentifier: String { get }
+    func encode(_ text: String) async throws -> [Float]
+}
+
+public struct StoreConfig: Sendable, Hashable {
+    public var indexer: IndexerConfig
+    public var search:  SearchConfig
+    public var hybrid:  HybridConfig
+    public static let `default`: StoreConfig
+    public static func testing(...) -> StoreConfig
+}
+
 public actor SwitchcraftStore {
 
-    /// Initialize with database path and model assets directory.
-    public init(databasePath: String, assetsPath: String) throws
+    /// General initializer — caller supplies any storage backend.
+    public init(storage: any SwitchcraftStorage,
+                embedder: any Embedder,
+                config: StoreConfig = .default) async throws
 
-    // MARK: - Document Management
+    /// SQLite convenience — declared in `SwitchcraftSQLite`.
+    public static func sqlite(databasePath: String,
+                              embedder: any Embedder,
+                              config: StoreConfig = .default) async throws -> SwitchcraftStore
 
-    /// Add a document to the search index.
-    public func add(
-        id: String,
-        date: Date = Date(),
-        metadata: [String: Any] = [:],
-        body: String
-    ) async throws
+    // MARK: - Document management
 
-    /// Remove a document from the index.
+    public func add(id: String,
+                    date: Date = Date(),
+                    metadata: [String: String] = [:],
+                    body: String) async throws
     public func remove(id: String) async throws
-
-    /// Build/update the search index from pending embeddings.
     public func index() async throws
-
-    /// Remove all documents and index data.
     public func clear() async throws
 
     // MARK: - Search
 
-    /// Hybrid search combining semantic + BM25 via RRF.
-    public func search(
-        query: String,
-        threshold: Float = 0.3,
-        topK: Int = 10,
-        filter: SQLFilter? = nil
-    ) async throws -> [SearchResult]
-
-    /// Score specific text passages against a query.
-    public func score(
-        query: String,
-        passages: [String]
-    ) async throws -> [Float]
+    public func search(query: String,
+                       topK: Int = 10,
+                       filter: StorageFilter = .all) async throws -> [HybridHit]
+    public func score(query: String,
+                      passages: [String]) async throws -> [Float]
 
     // MARK: - Lifecycle
 
-    /// Clean shutdown — flushes pending writes.
-    public func shutdown() async
+    public func shutdown() async throws
 }
 
-public struct SearchResult {
-    public let score: Float
-    public let id: String
-    public let highlights: [String]
-    public let metadata: String
+public enum SwitchcraftStoreError: Error, Equatable, Sendable {
+    case alreadyShutDown
+    case invalidEmbeddingDimensions(Int)
+    case embeddingMismatch(count: Int, dims: Int)
 }
 ```
 
-The caller does not generate embeddings — Switchcraft handles embedding internally (T5 inference + centroid matching + residual scoring). Search is a single call: no separate embedding step on the caller's side.
+The store accepts any `Embedder` (T5/CoreML, llama.cpp, a remote API, a
+deterministic mock for tests). `search` returns `[HybridHit]` from
+`SearchEngine.searchHybrid` directly; per-source rank/score is exposed
+on each hit so callers can explain or re-rank. Hybrid search auto-flushes
+pending L0 embeddings, so the typical caller never has to invoke
+`index()` explicitly.
 
 ---
 
@@ -312,7 +321,7 @@ Track progress by checking off items as they land. Effort estimates and notes fo
 - [x] **LSM-tree index structure** (1 week) — Cascading merge logic
 - [x] **Search pipeline** (1-2 weeks) — Centroid match → residual decode → MaxSim scoring
 - [x] **RRF + FTS5 hybrid** (3-4 days) — Adapt Witchcraft's hybrid fusion
-- [ ] **Async Swift API** (3-4 days) — `SwitchcraftStore` actor wrapper
+- [x] **Async Swift API** (3-4 days) — `SwitchcraftStore` actor wrapper
 - [ ] **Testing + benchmarking** (2-3 weeks) — Correctness + performance validation (see Testing Strategy)
 
 ### Phase 2: Production Optimization
