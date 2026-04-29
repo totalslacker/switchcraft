@@ -99,9 +99,10 @@ contributing no evidence for that token are dropped from the result.
 `cblas_sgemm` is deterministic for a fixed input layout and serial
 evaluation order. The engine never introduces parallelism (no
 `TaskGroup`, no `cblas_set_num_threads` overrides) so identical inputs
-and storage state produce bit-identical `[SearchHit]` output. Tie
-breaks on the final list use `(-score, uuid)` ascending via Swift's
-stable sort.
+and storage state produce bit-identical `[SearchHit]` output. Final
+ordering uses the total order `(-score, uuid)` ascending, so ties are
+broken deterministically without relying on sort stability (Swift's
+`Array.sort` is not guaranteed stable).
 
 ## (g) Bucket-byte vs ranking-level parity
 
