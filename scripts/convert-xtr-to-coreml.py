@@ -491,10 +491,12 @@ def emit_fixtures(
     print(f"Wrote {idx_path}")
 
 
-def parity_check(pipeline: ConvertedModel, mlmodel, tokenizer) -> float:
-    """Encode every fixture through both pipelines and return mean cos-sim."""
-    import numpy as np
-    sims = []
+def parity_check(pipeline: ConvertedModel, mlmodel, tokenizer) -> List[Tuple[str, float]]:
+    """Encode every fixture through both pipelines and return per-fixture
+    cosine similarities as ``[(name, sim), ...]``. Shape mismatches are
+    reported as ``sim = 0.0`` so the caller's per-fixture gate trips.
+    """
+    results: List[Tuple[str, float]] = []
     for name, text in FIXTURE_INPUTS:
         if not text.strip():
             continue  # whitespace-only, no rows to compare.
@@ -506,11 +508,12 @@ def parity_check(pipeline: ConvertedModel, mlmodel, tokenizer) -> float:
                 f"{py.shape} vs {cm.shape}",
                 file=sys.stderr,
             )
-            return 0.0
+            results.append((name, 0.0))
+            continue
         sim = cosine_similarity(py, cm)
         print(f"  parity [{name}]: rows={py.shape[0]} mean cos-sim={sim:.6f}")
-        sims.append(sim)
-    return float(np.mean(sims)) if sims else 1.0
+        results.append((name, sim))
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -593,16 +596,23 @@ def main(argv: List[str] | None = None) -> int:
     import coremltools as ct
     mlmodel = ct.models.MLModel(str(args.out_mlpackage))
     print("Running PyTorch ↔ CoreML parity check…")
-    sim = parity_check(pipeline, mlmodel, tokenizer)
-    print(f"Mean cosine similarity (PyTorch vs CoreML): {sim:.6f}")
-    if sim < args.parity_threshold:
+    results = parity_check(pipeline, mlmodel, tokenizer)
+    failures = [(name, s) for (name, s) in results if s < args.parity_threshold]
+    if failures:
+        for name, s in failures:
+            print(
+                f"PARITY FAILED [{name}]: cos-sim {s:.6f} < threshold "
+                f"{args.parity_threshold}.",
+                file=sys.stderr,
+            )
         print(
-            f"PARITY FAILED: mean cos-sim {sim:.6f} < threshold "
-            f"{args.parity_threshold}. Aborting; do not ship this asset.",
+            f"PARITY FAILED: {len(failures)} of {len(results)} fixtures below "
+            f"threshold {args.parity_threshold}. Aborting; do not ship this asset.",
             file=sys.stderr,
         )
         return 1
-    print("Parity check passed.")
+    worst = min((s for _, s in results), default=1.0)
+    print(f"Parity check passed (worst-fixture cos-sim: {worst:.6f}).")
     return 0
 
 

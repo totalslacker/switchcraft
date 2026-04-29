@@ -76,7 +76,8 @@ public actor T5CoreMLEmbedder: Embedder {
 
         // .mlpackage paths must be compiled before MLModel(contentsOf:) can load
         // them; .mlmodelc paths are already compiled. `MLModel.compileModel(at:)`
-        // is synchronous; running it inside the actor's init is fine.
+        // is async on macOS 13+ / iOS 16+; awaiting it inside the actor's init
+        // is fine because the actor isn't observable until init returns.
         let compiledURL: URL
         let pathExt = modelURL.pathExtension.lowercased()
         if pathExt == "mlmodelc" {

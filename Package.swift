@@ -36,7 +36,7 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework(
                     "CoreML",
-                    .when(platforms: [.macOS, .iOS, .visionOS, .tvOS])
+                    .when(platforms: [.macOS, .iOS, .visionOS])
                 ),
             ]
         ),
