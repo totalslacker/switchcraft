@@ -2,7 +2,7 @@ diff --git a/src/tests.rs b/src/tests.rs
 index 9d4aec4..ecf71d1 100644
 --- a/src/tests.rs
 +++ b/src/tests.rs
-@@ -54,6 +54,105 @@ mod tests {
+@@ -54,6 +54,109 @@ mod tests {
      ];
      const THRESHOLD: f32 = 0.7;
  
@@ -82,9 +82,13 @@ index 9d4aec4..ecf71d1 100644
 +            for (hi, (score, doc_idx, _sub_idx)) in hits.iter().enumerate() {
 +                // match_centroids returns the document rowid (1-based
 +                // SQLite rowid). The 0-based insertion index is stored
-+                // verbatim in the metadata column above, so just read
-+                // it back as a string.
-+                let metadata: String = db
++                // in the metadata column above. SQLite gives the
++                // `metadata JSON` column NUMERIC type affinity, so a
++                // numeric-looking string like "0" is silently coerced
++                // to an integer storage class on insert. Read it back
++                // as i64 and stringify so the docId matches the
++                // Switchcraft "0".."32" insertion-index convention.
++                let metadata: i64 = db
 +                    .query("SELECT metadata FROM document WHERE rowid = ?1")
 +                    .unwrap()
 +                    .query_row((*doc_idx,), |row| row.get(0))

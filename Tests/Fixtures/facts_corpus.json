@@ -1,7 +1,8 @@
 {
   "provenance": {
     "witchcraftCommit": "6ad59e51cfc89bcfb20756e3f05cf9429b7cb55f",
-    "generatedAt": "2026-04-29T16:43:00.413808+00:00",
+    "switchcraftCommit": "27c1e52f07352b8a0cc87a9420b225320381d67a",
+    "generatedAt": "2026-04-29T17:31:46.551718+00:00",
     "computeUnits": "all",
     "k": 32,
     "tPrime": 40000,
@@ -46,46 +47,136 @@
     {
       "query": "a lake with funny colors",
       "expected": [
-        { "docId": "31", "score": 0.82697934 },
-        { "docId": "13", "score": 0.61187065 },
-        { "docId": "3", "score": 0.5828546 },
-        { "docId": "20", "score": 0.5728717 },
-        { "docId": "19", "score": 0.55858654 },
-        { "docId": "4", "score": 0.55008066 },
-        { "docId": "29", "score": 0.5451187 },
-        { "docId": "24", "score": 0.52770305 },
-        { "docId": "15", "score": 0.5212673 },
-        { "docId": "10", "score": 0.51739776 }
+        {
+          "docId": "31",
+          "score": 0.82072735
+        },
+        {
+          "docId": "13",
+          "score": 0.61350185
+        },
+        {
+          "docId": "3",
+          "score": 0.5919511
+        },
+        {
+          "docId": "20",
+          "score": 0.5794583
+        },
+        {
+          "docId": "19",
+          "score": 0.57861775
+        },
+        {
+          "docId": "29",
+          "score": 0.5628395
+        },
+        {
+          "docId": "4",
+          "score": 0.5574932
+        },
+        {
+          "docId": "24",
+          "score": 0.52619255
+        },
+        {
+          "docId": "15",
+          "score": 0.51368356
+        },
+        {
+          "docId": "10",
+          "score": 0.51281995
+        }
       ]
     },
     {
       "query": "A group of flamingos",
       "expected": [
-        { "docId": "15", "score": 0.9595944 },
-        { "docId": "17", "score": 0.60632586 },
-        { "docId": "3", "score": 0.5643703 },
-        { "docId": "8", "score": 0.55852306 },
-        { "docId": "7", "score": 0.552301 },
-        { "docId": "13", "score": 0.5423806 },
-        { "docId": "14", "score": 0.5389535 },
-        { "docId": "23", "score": 0.5346714 },
-        { "docId": "11", "score": 0.5244217 },
-        { "docId": "29", "score": 0.5224263 }
+        {
+          "docId": "15",
+          "score": 0.9656198
+        },
+        {
+          "docId": "17",
+          "score": 0.60534674
+        },
+        {
+          "docId": "8",
+          "score": 0.5554416
+        },
+        {
+          "docId": "3",
+          "score": 0.5514608
+        },
+        {
+          "docId": "14",
+          "score": 0.5445358
+        },
+        {
+          "docId": "13",
+          "score": 0.535562
+        },
+        {
+          "docId": "7",
+          "score": 0.5352333
+        },
+        {
+          "docId": "11",
+          "score": 0.531202
+        },
+        {
+          "docId": "29",
+          "score": 0.5304356
+        },
+        {
+          "docId": "23",
+          "score": 0.5303517
+        }
       ]
     },
     {
       "query": "facts about fruits and berries",
       "expected": [
-        { "docId": "0", "score": 0.8075895 },
-        { "docId": "13", "score": 0.6226757 },
-        { "docId": "9", "score": 0.60994667 },
-        { "docId": "3", "score": 0.59165454 },
-        { "docId": "22", "score": 0.5523051 },
-        { "docId": "6", "score": 0.53128606 },
-        { "docId": "25", "score": 0.5128752 },
-        { "docId": "30", "score": 0.5012597 },
-        { "docId": "17", "score": 0.5010755 },
-        { "docId": "8", "score": 0.49630255 }
+        {
+          "docId": "0",
+          "score": 0.7893616
+        },
+        {
+          "docId": "16",
+          "score": 0.7893616
+        },
+        {
+          "docId": "13",
+          "score": 0.6145094
+        },
+        {
+          "docId": "9",
+          "score": 0.6027462
+        },
+        {
+          "docId": "3",
+          "score": 0.5908967
+        },
+        {
+          "docId": "22",
+          "score": 0.54695576
+        },
+        {
+          "docId": "6",
+          "score": 0.5323735
+        },
+        {
+          "docId": "25",
+          "score": 0.51012146
+        },
+        {
+          "docId": "17",
+          "score": 0.5080366
+        },
+        {
+          "docId": "18",
+          "score": 0.50149834
+        }
       ]
     }
   ]
