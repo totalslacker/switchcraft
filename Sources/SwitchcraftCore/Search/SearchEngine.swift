@@ -516,9 +516,11 @@ public actor SearchEngine {
     ///
     /// Wraps `cblas_sgemm` so callers can reuse the kernel for both the
     /// per-generation centroid pass and the candidate-scoring pass.
-    /// Sequential evaluation is preserved so summation order — and
-    /// therefore the float-bit-equality determinism the spec mandates —
-    /// is stable across runs.
+    /// The Swift-level call shape is deterministic (single sgemm with
+    /// fixed argument order); BLAS internal reduction order is not
+    /// controlled here and may vary across architectures, so callers
+    /// must compare results with an absolute tolerance rather than
+    /// expecting bit-exact equality.
     internal static func matmulQueryTimesRowMajorTranspose(
         queryEmbeddings: [Float],
         n: Int,
