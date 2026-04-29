@@ -369,8 +369,9 @@ public actor SearchEngine {
         }
 
         // 3. Build per-uuid union with 1-indexed ranks and per-source raw
-        //    scores. Iterate in input order so the union map's key order
-        //    is deterministic.
+        //    scores. Dictionary iteration order is unspecified, but the
+        //    final `(score DESC, uuid ASC)` sort below is a total order
+        //    so the fused output is deterministic regardless.
         struct Provenance {
             var vectorRank: Int?
             var vectorScore: Float?

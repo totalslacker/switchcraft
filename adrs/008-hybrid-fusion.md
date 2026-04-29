@@ -55,11 +55,15 @@ matches Cormack & Clarke's original formulation and reads naturally:
 no rank-0 magic constant. With `rrfK = 60`, rank 1 → `1/61`.
 
 Upstream Witchcraft enumerates with Rust's `enumerate()` (0-based) so
-its rank-1 contribution is `1 / (60 + 0) = 1/60`. The numerical
-difference is small (≈1.6%) and uniform across all results, so it
-does not change the relative ordering of fused hits — only the
-absolute scores. Switchcraft prioritises a clean, conventional
-formula over byte parity with upstream's hybrid scores.
+its rank-1 contribution is `1 / (60 + 0) = 1/60`. The per-rank delta
+is small at the head (≈1.6% at rank 1) and shrinks further down the
+list, but it is *not* uniform — `1/(k+r)` is non-linear in `r`, so
+fused scores (sums across sources) can in principle re-order at
+specific rank combinations. In practice ordering changes from this
+shift are rare and limited to near-tied fused scores; the parity gate
+is NDCG@10 within tolerance, not rank-stability vs. upstream.
+Switchcraft prioritises a clean, conventional formula over byte
+parity with upstream's hybrid scores.
 
 ## (e) Equal-weight (no `+3` FTS rank offset)
 

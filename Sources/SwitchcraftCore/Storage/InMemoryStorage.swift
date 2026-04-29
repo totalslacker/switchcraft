@@ -140,13 +140,8 @@ public actor InMemoryStorage: SwitchcraftStorage {
         let queryTerms = Self.tokenize(query)
         guard !queryTerms.isEmpty, limit > 0 else { return [] }
 
-        // Iterate documents in uuid order so iteration is deterministic
-        // before the score sort. Combined with the (-score, uuid) total
-        // order below this gives byte-identical results across runs.
-        let orderedDocuments = documents.values.sorted { $0.uuid < $1.uuid }
-
         var hits: [FullTextHit] = []
-        for document in orderedDocuments where filter.matches(document) {
+        for document in documents.values where filter.matches(document) {
             let bodyTerms = Self.tokenize(document.body)
             guard !bodyTerms.isEmpty else { continue }
 
