@@ -1,12 +1,15 @@
 {
   "provenance": {
     "witchcraftCommit": "6ad59e51cfc89bcfb20756e3f05cf9429b7cb55f",
-    "switchcraftCommit": "27c1e52f07352b8a0cc87a9420b225320381d67a",
-    "generatedAt": "2026-04-29T17:31:46.551718+00:00",
+    "switchcraftCommit": "cfa1284902585faf55af79e65a105fc190cdd989",
+    "generatedAt": "2026-04-29T20:15:00.601287+00:00",
     "computeUnits": "all",
     "k": 32,
     "tPrime": 40000,
-    "threshold": 0.0
+    "threshold": 0.0,
+    "witchcraftPrecision": "Q4K GGUF (matmul) + Q8 attention; per Witchcraft Cargo features t5-quantized + metal",
+    "switchcraftPrecision": "CoreML mlprogram, FP32 compute, FP16 outputs (per ADR 010(c) amended in fix #31)",
+    "toleranceRationale": "matched-precision FP16-vs-Q4K is not achievable on this graph (T5 encoder body NaN under FP16 compute); relaxed score tolerance \u00b10.025 reflects measured FP32-vs-Q4K drift"
   },
   "facts": [
     "Bananas are berries, but strawberries aren't.",
@@ -49,43 +52,43 @@
       "expected": [
         {
           "docId": "31",
-          "score": 0.82072735
+          "score": 0.8127303
         },
         {
           "docId": "13",
-          "score": 0.61350185
+          "score": 0.6139158
         },
         {
           "docId": "3",
-          "score": 0.5919511
-        },
-        {
-          "docId": "20",
-          "score": 0.5794583
+          "score": 0.58937013
         },
         {
           "docId": "19",
-          "score": 0.57861775
+          "score": 0.56537354
         },
         {
           "docId": "29",
-          "score": 0.5628395
+          "score": 0.5648132
+        },
+        {
+          "docId": "20",
+          "score": 0.56212384
         },
         {
           "docId": "4",
-          "score": 0.5574932
+          "score": 0.5547543
         },
         {
           "docId": "24",
-          "score": 0.52619255
-        },
-        {
-          "docId": "15",
-          "score": 0.51368356
+          "score": 0.5255321
         },
         {
           "docId": "10",
-          "score": 0.51281995
+          "score": 0.52403665
+        },
+        {
+          "docId": "15",
+          "score": 0.51697206
         }
       ]
     },
@@ -94,43 +97,43 @@
       "expected": [
         {
           "docId": "15",
-          "score": 0.9656198
+          "score": 0.9615977
         },
         {
           "docId": "17",
-          "score": 0.60534674
-        },
-        {
-          "docId": "8",
-          "score": 0.5554416
+          "score": 0.60727566
         },
         {
           "docId": "3",
-          "score": 0.5514608
+          "score": 0.55304915
         },
         {
-          "docId": "14",
-          "score": 0.5445358
-        },
-        {
-          "docId": "13",
-          "score": 0.535562
+          "docId": "8",
+          "score": 0.54783535
         },
         {
           "docId": "7",
-          "score": 0.5352333
+          "score": 0.54422754
         },
         {
-          "docId": "11",
-          "score": 0.531202
+          "docId": "22",
+          "score": 0.54358256
         },
         {
-          "docId": "29",
-          "score": 0.5304356
+          "docId": "13",
+          "score": 0.5431903
+        },
+        {
+          "docId": "14",
+          "score": 0.54151946
         },
         {
           "docId": "23",
-          "score": 0.5303517
+          "score": 0.541183
+        },
+        {
+          "docId": "29",
+          "score": 0.5343071
         }
       ]
     },
@@ -139,43 +142,43 @@
       "expected": [
         {
           "docId": "0",
-          "score": 0.7893616
+          "score": 0.81453955
         },
         {
           "docId": "16",
-          "score": 0.7893616
+          "score": 0.81453955
         },
         {
           "docId": "13",
-          "score": 0.6145094
+          "score": 0.64776915
         },
         {
           "docId": "9",
-          "score": 0.6027462
+          "score": 0.6224407
         },
         {
           "docId": "3",
-          "score": 0.5908967
+          "score": 0.59604937
         },
         {
           "docId": "22",
-          "score": 0.54695576
+          "score": 0.5527963
         },
         {
           "docId": "6",
-          "score": 0.5323735
+          "score": 0.54522884
         },
         {
           "docId": "25",
-          "score": 0.51012146
+          "score": 0.5173878
         },
         {
           "docId": "17",
-          "score": 0.5080366
+          "score": 0.5136213
         },
         {
-          "docId": "18",
-          "score": 0.50149834
+          "docId": "8",
+          "score": 0.5080168
         }
       ]
     }

@@ -202,3 +202,37 @@ without subclassing or rebuilding the asset. Per-call float-equality
 is only required *within the same loaded model instance* — switching
 compute units across instances may produce last-bit drift, which is
 acceptable.
+
+## (h) Parity-testing tolerance
+
+Cross-implementation parity tests (e.g. `FactsCorpusParityTests`)
+compare Switchcraft's CoreML output against Witchcraft's GGUF output
+on the same inputs. The two stacks do not run at matched precision:
+
+- **Switchcraft side**: per (c), `compute_precision=ct.precision.FLOAT32`
+  with FP16 output ports. Full FP16 compute on the T5 encoder graph
+  produces NaN (see fix #31); per-op FP32 carve-outs do not stabilise
+  the encoder body either. FP32 compute is the smallest configuration
+  where the model returns finite values.
+- **Witchcraft side**: Q4K-quantised GGUF (matmul) with Q8 attention.
+  No FP16 or FP32 GGUF is currently shipped by Witchcraft.
+
+Because the precision pair is FP32 vs Q4K — not the FP16 vs Q4K the
+original ±0.01 tolerance assumed — parity tests use a relaxed
+acceptance shape:
+
+| Property                       | Bound                                  |
+| ------------------------------ | -------------------------------------- |
+| Top-1 document identity        | strict equality with Witchcraft        |
+| Top-3 document set             | set equality (membership, not order)   |
+| Per-rank score                 | within ±0.025 of Witchcraft reference  |
+| Document order beyond rank 3   | best-effort (no assertion)             |
+
+Worst observed Δ in the 33-fact corpus is ≈0.024 on the duplicated
+body (`FACTS[0]`/`FACTS[16]`). The ±0.025 bound is calibrated against
+that measurement with a small ε of headroom.
+
+Future cross-implementation parity tests cite this section rather
+than re-litigating tolerance. If a future Witchcraft build raises its
+quant precision (Q5/Q8/F16/F32), the tolerance should be tightened
+back toward ±0.01 in the same commit that updates the references.

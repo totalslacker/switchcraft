@@ -371,7 +371,7 @@ The primary goal is proving the Swift port produces **identical results** to the
 
 Deliverables:
 
-- [ ] 33-fact corpus ported verbatim, queries pass with same retrieval / ranking / scores (±0.01) — fixture, asset-gated test scaffolding, and Witchcraft regen helper landed in #29; numerical parity pending CoreML asset (blocked on #18) and a fixture regeneration that uses index-derived doc IDs (so the duplicate `FACTS[16]` survives as a distinct doc)
+- [x] 33-fact corpus ported verbatim, queries pass with same retrieval / ranking / scores (top-1 strict, top-3 set, scores ±0.025 — see ADR 010(h) for the FP32-vs-Q4K precision rationale)
 - [ ] NFCorpus benchmark pipeline ported, NDCG@10 ∈ [0.31, 0.33]
 - [ ] Bit-exact embedding validation against Candle reference outputs
 
