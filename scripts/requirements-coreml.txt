@@ -1,0 +1,21 @@
+# Pinned dependencies for scripts/convert-xtr-to-coreml.py.
+#
+# These versions are the ones used to produce the canonical
+# Tests/Fixtures/xtr-base-en.embeddings.bin reference fixtures and the
+# .mlpackage referenced by ADR 010. Bumping any version requires
+# regenerating the fixtures and re-running the conversion-script parity
+# check (mean cosine similarity ≥ 0.999 on the reference inputs).
+#
+# coremltools has historically had encoder-only T5 conversion bugs in
+# older releases; 7.2 is the first version where the canonical conversion
+# path is stable for fixed [1, 512] int32 inputs.
+#
+# Install with:
+#     pip install -r scripts/requirements-coreml.txt
+
+torch==2.2.2
+transformers==4.41.2
+safetensors==0.4.3
+tokenizers==0.19.1
+coremltools==7.2
+numpy<2.0
