@@ -315,7 +315,7 @@ Track progress by checking off items as they land. Effort estimates and notes fo
 - [x] **Storage protocol** — `SwitchcraftStorage` and conformance test suite (must precede backend work)
 - [x] **SQLite backend** (1-2 weeks) — reference implementation of the storage protocol; native sqlite3
 - [x] **Unigram (SentencePiece) tokenizer** (1-2 weeks) — Port from HuggingFace tokenizer.json; identical token IDs vs Rust
-- [ ] **T5 encoder → CoreML** (1-2 weeks) — Model conversion + Swift wrapper
+- [x] **T5 encoder → CoreML** (1-2 weeks) — Model conversion + Swift wrapper
 - [x] **K-means clustering** (1 week) — Standard algorithm, use Accelerate
 - [x] **4-bit residual codec** (1 week) — ~200 lines, bit-level packing; round-trip property tests
 - [x] **LSM-tree index structure** (1 week) — Cascading merge logic
@@ -538,7 +538,7 @@ Tests/Fixtures/
 Fixture deliverables:
 
 - [ ] `facts_corpus.json`
-- [ ] `reference_embeddings.bin`
+- [x] `reference_embeddings.bin` (committed as `xtr-base-en.embeddings.bin` + index JSON; produced by `scripts/convert-xtr-to-coreml.py`)
 - [ ] `reference_centroids.bin`
 - [ ] `reference_residuals.bin`
 - [ ] `nfcorpus_queries.tsv`
