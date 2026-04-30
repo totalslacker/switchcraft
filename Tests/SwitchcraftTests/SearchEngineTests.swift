@@ -343,17 +343,4 @@ struct SearchEngineTests {
         #expect(scores[0] >= scores[1])
         #expect(scores[0] >= scores[2])
     }
-
-    // MARK: - Deferred parity slot
-
-    @Test(
-        "XTR parity: NFCorpus NDCG@10 ∈ [0.31, 0.33]",
-        .disabled("XTR parity: awaiting NFCorpus fixture")
-    )
-    func nfcorpusNDCGParity() async throws {
-        // Slot reserved for the cross-implementation parity test once
-        // Tests/Fixtures/nfcorpus/ lands. Per ADR 006 this is the gate
-        // that locks Switchcraft's MaxSim aggregation to Witchcraft.
-        Issue.record("NFCorpus reference fixture is not yet committed")
-    }
 }

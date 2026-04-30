@@ -372,7 +372,7 @@ The primary goal is proving the Swift port produces **identical results** to the
 Deliverables:
 
 - [x] 33-fact corpus ported verbatim, queries pass with same retrieval / ranking / scores (top-1 strict, top-3 set, scores ±0.025 — see ADR 010(h) for the FP32-vs-Q4K precision rationale)
-- [ ] NFCorpus benchmark pipeline ported, NDCG@10 ∈ [0.31, 0.33]
+- [x] NFCorpus benchmark pipeline ported, NDCG@10 ∈ [0.31, 0.33]
 - [ ] Bit-exact embedding validation against Candle reference outputs
 
 #### Port Witchcraft's 33-Fact Corpus Verbatim
@@ -531,9 +531,7 @@ Tests/Fixtures/
 ├── facts_corpus.json           # 33 facts with expected search results
 ├── reference_embeddings.bin    # T5 token embeddings for known inputs
 ├── reference_centroids.bin     # K-means centroids for known corpus
-├── reference_residuals.bin     # Q4 residuals for codec validation
-├── nfcorpus_queries.tsv        # NFCorpus test queries
-└── nfcorpus_expected.json      # Expected NDCG@10 scores
+└── reference_residuals.bin     # Q4 residuals for codec validation
 ```
 
 Fixture deliverables:
@@ -542,8 +540,7 @@ Fixture deliverables:
 - [x] `reference_embeddings.bin` (committed as `xtr-base-en.embeddings.bin` + index JSON; produced by `scripts/convert-xtr-to-coreml.py`)
 - [ ] `reference_centroids.bin`
 - [ ] `reference_residuals.bin`
-- [ ] `nfcorpus_queries.tsv`
-- [ ] `nfcorpus_expected.json`
+- [x] NFCorpus setup script + README documenting `SWITCHCRAFT_NFCORPUS_DIR` (academic-use-only dataset; not committed — `scripts/fetch-nfcorpus.sh` populates a developer-supplied directory)
 
 This allows the Swift tests to validate correctness without running the Rust implementation — just compare against the committed reference data.
 
