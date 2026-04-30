@@ -16,7 +16,11 @@
 //     swift test -c release --filter PerformanceTests
 //
 // Debug builds pay for stdlib bounds checks, ARC traffic, and unoptimised
-// inlining; the floors still hold but headroom is much smaller.
+// inlining, which makes the latency floors flap on shared CI runners. The
+// suite is therefore **gated to release builds only** via an `assert`-based
+// runtime detection (see `isReleaseBuild`); under `swift test` (debug) the
+// three tests are skipped with a clear reason. The release-mode CI job in
+// `.github/workflows/ci.yml` is the authoritative perf gate.
 //
 // ## Corpus tuning
 //
@@ -45,7 +49,20 @@ import Testing
 import Darwin.Mach
 #endif
 
-@Suite("PerformanceTests", .serialized)
+/// `true` when compiled with optimisations (`swift test -c release`),
+/// `false` under a debug build. Uses the standard `assert` trick: the
+/// closure runs only when assertions are enabled, which the optimiser
+/// strips out in release. Used by the perf suite to skip itself in debug
+/// builds where measurements are too noisy to defend a floor against.
+private let isReleaseBuild: Bool = {
+    var debug = false
+    assert({ debug = true; return true }())
+    return !debug
+}()
+
+@Suite("PerformanceTests", .serialized,
+       .enabled(if: isReleaseBuild,
+                "Performance suite is release-only (run with `swift test -c release`)"))
 struct PerformanceTests {
 
     // MARK: - Fixture
