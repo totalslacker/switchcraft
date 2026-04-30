@@ -61,6 +61,39 @@ struct CoreMLInferenceTests {
         }
     }
 
+    // MARK: - Cosine-similarity helper
+
+    /// Mean cosine similarity between row-major actual embeddings and the
+    /// reference rows. Bounded by `min(actualRows, referenceRows.count)`
+    /// so a row-count mismatch reported by `#expect` upstream cannot turn
+    /// into an out-of-bounds crash here.
+    private func meanCosineSimilarity(
+        actualFlat: [Float],
+        referenceRows: [[Float]],
+        dims: Int
+    ) -> Float {
+        let actualRows = actualFlat.count / dims
+        let n = min(actualRows, referenceRows.count)
+        guard n > 0 else { return 0 }
+        var simSum: Float = 0
+        for r in 0..<n {
+            let ref = referenceRows[r]
+            var dot: Float = 0
+            var na: Float = 0
+            var nb: Float = 0
+            for d in 0..<dims {
+                let a = actualFlat[r * dims + d]
+                let b = ref[d]
+                dot += a * b
+                na += a * a
+                nb += b * b
+            }
+            let sim = dot / (na.squareRoot() * nb.squareRoot() + 1e-12)
+            simSum += sim
+        }
+        return simSum / Float(n)
+    }
+
     // MARK: - Strict full-pipeline parity
 
     @Test(
@@ -77,6 +110,10 @@ struct CoreMLInferenceTests {
                 for: fixture, blob: blob, dims: index.dims
             )
             let actualFlat = try await embedder.encode(fixture.input)
+            #expect(
+                actualFlat.count % index.dims == 0,
+                "\(fixture.name): output length \(actualFlat.count) is not a multiple of dims \(index.dims)"
+            )
             let actualRows = actualFlat.count / index.dims
             #expect(
                 actualRows == fixture.rows,
@@ -84,23 +121,11 @@ struct CoreMLInferenceTests {
             )
             if actualRows == 0 { continue }
 
-            var simSum: Float = 0
-            for r in 0..<actualRows {
-                let ref = referenceRows[r]
-                var dot: Float = 0
-                var na: Float = 0
-                var nb: Float = 0
-                for d in 0..<index.dims {
-                    let a = actualFlat[r * index.dims + d]
-                    let b = ref[d]
-                    dot += a * b
-                    na += a * a
-                    nb += b * b
-                }
-                let sim = dot / (na.squareRoot() * nb.squareRoot() + 1e-12)
-                simSum += sim
-            }
-            let meanSim = simSum / Float(actualRows)
+            let meanSim = meanCosineSimilarity(
+                actualFlat: actualFlat,
+                referenceRows: referenceRows,
+                dims: index.dims
+            )
             #expect(
                 meanSim >= 0.999,
                 "\(fixture.name): mean cosine similarity \(meanSim) < 0.999"
@@ -139,6 +164,10 @@ struct CoreMLInferenceTests {
             for: fixture, blob: blob, dims: index.dims
         )
         let actualFlat = try await embedder.encode(fixture.input)
+        #expect(
+            actualFlat.count % index.dims == 0,
+            "\(fixture.name): output length \(actualFlat.count) is not a multiple of dims \(index.dims)"
+        )
         let actualRows = actualFlat.count / index.dims
         #expect(
             actualRows == fixture.rows,
@@ -146,23 +175,11 @@ struct CoreMLInferenceTests {
         )
         guard actualRows > 0 else { return }
 
-        var simSum: Float = 0
-        for r in 0..<actualRows {
-            let ref = referenceRows[r]
-            var dot: Float = 0
-            var na: Float = 0
-            var nb: Float = 0
-            for d in 0..<index.dims {
-                let a = actualFlat[r * index.dims + d]
-                let b = ref[d]
-                dot += a * b
-                na += a * a
-                nb += b * b
-            }
-            let sim = dot / (na.squareRoot() * nb.squareRoot() + 1e-12)
-            simSum += sim
-        }
-        let meanSim = simSum / Float(actualRows)
+        let meanSim = meanCosineSimilarity(
+            actualFlat: actualFlat,
+            referenceRows: referenceRows,
+            dims: index.dims
+        )
         #expect(
             meanSim >= 0.999,
             "\(fixture.name): sliding-window mean cosine similarity \(meanSim) < 0.999"
