@@ -45,9 +45,7 @@ import Testing
 @testable import Switchcraft
 @testable import SwitchcraftCore
 
-#if canImport(Darwin)
 import Darwin.Mach
-#endif
 
 /// `true` when compiled with optimisations (`swift test -c release`),
 /// `false` under a debug build. Uses the standard `assert` trick: the
@@ -146,8 +144,10 @@ struct PerformanceTests {
         }
 
         samplesNs.sort()
-        let p50ns = samplesNs[iterations / 2]                // 25th sample
-        let p95ns = samplesNs[Int(Double(iterations) * 0.95)] // 47th sample
+        // Nearest-rank percentile, 0-based: idx = clamp(ceil(p * n) - 1, 0, n-1).
+        // For n=50: p50 → idx 24 (25th-ranked sample), p95 → idx 47 (48th-ranked).
+        let p50ns = samplesNs[Self.percentileIndex(0.50, count: iterations)]
+        let p95ns = samplesNs[Self.percentileIndex(0.95, count: iterations)]
 
         let p50ms = Double(p50ns) / 1_000_000.0
         let p95ms = Double(p95ns) / 1_000_000.0
@@ -200,13 +200,19 @@ struct PerformanceTests {
         // Warm-up: paged-in caches stabilise the baseline reading.
         _ = try await store.search(query: Self.probeQuery, topK: 10)
 
-        let baseline = Self.currentResidentBytes()
+        let baselineOpt = Self.currentResidentBytes()
+        try #require(baselineOpt != nil,
+                     "baseline RSS measurement (task_info) failed")
+        let baseline = baselineOpt!
         var peak: UInt64 = baseline
 
         let iterations = 50
         for _ in 0..<iterations {
             _ = try await store.search(query: Self.probeQuery, topK: 10)
-            let now = Self.currentResidentBytes()
+            let nowOpt = Self.currentResidentBytes()
+            try #require(nowOpt != nil,
+                         "RSS measurement (task_info) failed mid-loop")
+            let now = nowOpt!
             if now > peak { peak = now }
         }
 
@@ -231,13 +237,23 @@ struct PerformanceTests {
         return secNs &+ attoNs
     }
 
+    /// Nearest-rank percentile index over a 0-based sorted array of `count`
+    /// samples. Returns `clamp(ceil(p * n) - 1, 0, n - 1)`. For `n = 50`:
+    /// p50 → index 24 (25th-ranked), p95 → index 47 (48th-ranked). Defined
+    /// once so the same definition holds if `iterations` ever changes.
+    fileprivate static func percentileIndex(_ p: Double, count: Int) -> Int {
+        precondition(count > 0, "percentileIndex requires count > 0")
+        let raw = Int((p * Double(count)).rounded(.up)) - 1
+        return min(max(raw, 0), count - 1)
+    }
+
     /// Resident set size in bytes via `task_info(MACH_TASK_BASIC_INFO)`.
-    /// Returns `0` on failure (so an assertion fails rather than the test
-    /// crashing). Darwin-only; the surrounding `#if canImport(Darwin)`
-    /// guard makes this trivially compile-safe on hypothetical non-Darwin
-    /// builds even though `Package.swift` only targets Apple platforms.
-    fileprivate static func currentResidentBytes() -> UInt64 {
-        #if canImport(Darwin)
+    /// Returns `nil` on `task_info` failure so the caller can fail the
+    /// test explicitly with `#require`, rather than silently treating a
+    /// failed measurement as a passing 0-byte reading. Darwin-only; the
+    /// package targets Apple platforms exclusively (no `#if canImport`
+    /// guard needed).
+    fileprivate static func currentResidentBytes() -> UInt64? {
         var info = mach_task_basic_info()
         var count = mach_msg_type_number_t(
             MemoryLayout<mach_task_basic_info>.size / MemoryLayout<natural_t>.size
@@ -252,10 +268,7 @@ struct PerformanceTests {
                 )
             }
         }
-        guard result == KERN_SUCCESS else { return 0 }
+        guard result == KERN_SUCCESS else { return nil }
         return UInt64(info.resident_size)
-        #else
-        return 0
-        #endif
     }
 }
