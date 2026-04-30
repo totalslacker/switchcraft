@@ -36,6 +36,8 @@ public struct IndexerConfig: Sendable, Hashable {
     /// Seed for the indexer's deterministic `SplitMix64`.
     public var seed: UInt64
 
+    /// Build an `IndexerConfig`. `l0Capacity` and `lsmFanout` are
+    /// required; the rest default to upstream Witchcraft values.
     public init(
         l0Capacity: Int,
         lsmFanout: Int,

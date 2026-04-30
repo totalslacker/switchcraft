@@ -4,7 +4,8 @@ import Accelerate
 
 /// Spherical k-means clustering for L2-normalised row vectors.
 ///
-/// Port of upstream Witchcraft's `kmeans` in `lib.rs`. Algorithm:
+/// Port of upstream Witchcraft's `kmeans` in `lib.rs` (see `NOTICE`).
+/// Algorithm:
 ///
 ///  1. Initialise `k` centroids by sampling `k` distinct rows of `data`.
 ///  2. For `maxIterations` passes:
@@ -17,6 +18,8 @@ import Accelerate
 /// No convergence check — iteration count is fixed by the caller.
 public enum KMeans {
 
+    /// Output of one `cluster(...)` run: the centroids and the
+    /// per-row cluster assignments.
     public struct Result: Sendable {
         /// Row-major `clusters * dims` centroids, L2-normalised.
         public let centroids: [Float]

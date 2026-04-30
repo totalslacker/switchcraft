@@ -37,6 +37,8 @@ public struct HybridConfig: Sendable, Hashable {
     /// might be lifted by the other.
     public var perSourceBudget: Int
 
+    /// Build a `HybridConfig`. Defaults match the canonical RRF
+    /// constant (60) and a per-source budget large enough for `topK ≤ 10`.
     public init(rrfK: Int = 60, perSourceBudget: Int = 50) {
         precondition(rrfK > 0, "rrfK must be positive")
         precondition(perSourceBudget > 0, "perSourceBudget must be positive")

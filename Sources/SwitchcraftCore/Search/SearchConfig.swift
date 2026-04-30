@@ -26,6 +26,8 @@ public struct SearchConfig: Sendable, Hashable {
     /// it to filter low-confidence hits.
     public var threshold: Float
 
+    /// Build a `SearchConfig`. All arguments default to upstream
+    /// Witchcraft's reference constants.
     public init(k: Int = 32, tPrime: Int = 40_000, threshold: Float = 0) {
         precondition(k > 0, "k must be positive")
         precondition(tPrime > 0, "tPrime must be positive")

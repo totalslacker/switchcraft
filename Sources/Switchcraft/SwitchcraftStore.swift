@@ -46,6 +46,16 @@ public actor SwitchcraftStore {
     /// ledger if the caller intends to add new documents — that scenario
     /// can throw `Indexer.Error.ledgerOutOfSync` on the next flush. A
     /// reopened store can serve `search` against the existing index.
+    ///
+    /// - Parameters:
+    ///   - storage: backend implementation of `SwitchcraftStorage`.
+    ///   - embedder: model used for both write-time and query-time encodes.
+    ///     `dims` must be positive and even.
+    ///   - config: tunables for the indexer, search engine, and hybrid
+    ///     fusion stages. Defaults match upstream Witchcraft.
+    /// - Throws: `SwitchcraftStoreError.invalidEmbeddingDimensions` if the
+    ///   embedder reports a non-positive or odd `dims`; any error thrown
+    ///   by `storage.open()`.
     public init(
         storage: any SwitchcraftStorage,
         embedder: any Embedder,
@@ -71,6 +81,16 @@ public actor SwitchcraftStore {
     ///
     /// `metadata` is JSON-encoded with sorted keys so byte-identical input
     /// produces byte-identical `DocumentRecord.metadata`.
+    ///
+    /// - Parameters:
+    ///   - id: caller-supplied document identifier (UUID, slug, etc.).
+    ///   - date: date associated with the document. Defaults to `now`.
+    ///   - metadata: opaque key/value pairs filterable via `StorageFilter`.
+    ///   - body: searchable text. Embedded by the configured `Embedder`.
+    /// - Throws: `SwitchcraftStoreError.alreadyShutDown` if the store has
+    ///   been shut down; `SwitchcraftStoreError.embeddingMismatch` if the
+    ///   embedder returns a buffer length that is not a multiple of `dims`;
+    ///   storage- or embedder-originated errors otherwise.
     public func add(
         id: String,
         date: Date = Date(),
@@ -136,6 +156,9 @@ public actor SwitchcraftStore {
     /// content chunk and its buffered embeddings are left in place — the
     /// search engine drops orphan chunks because no document maps to the
     /// chunk's hash.
+    ///
+    /// - Parameter id: document identifier supplied to `add(id:body:)`.
+    /// - Throws: `SwitchcraftStoreError.alreadyShutDown`; storage errors.
     public func remove(id: String) async throws {
         try ensureRunning()
         try await storage.deleteDocument(uuid: id)
@@ -144,6 +167,8 @@ public actor SwitchcraftStore {
     /// Flush any pending L0 embeddings into the LSM tree. Called
     /// automatically before every `search` and `score`, so most callers
     /// never need to invoke it directly.
+    ///
+    /// - Throws: `SwitchcraftStoreError.alreadyShutDown`; indexer errors.
     public func index() async throws {
         try ensureRunning()
         try await indexer.flush()
@@ -151,6 +176,8 @@ public actor SwitchcraftStore {
 
     /// Wipe all documents, chunks, and LSM generations. The backing
     /// storage file is left in place (tables are emptied).
+    ///
+    /// - Throws: `SwitchcraftStoreError.alreadyShutDown`; storage errors.
     public func clear() async throws {
         try ensureRunning()
         try await indexer.clearIndex()
@@ -161,6 +188,14 @@ public actor SwitchcraftStore {
 
     /// Hybrid vector + BM25 search via Reciprocal Rank Fusion. Calls
     /// `index()` internally so callers never need to flush manually.
+    ///
+    /// - Parameters:
+    ///   - query: free-text query.
+    ///   - topK: maximum number of fused hits to return. Defaults to 10.
+    ///   - filter: document predicate applied before fusion.
+    /// - Returns: hits sorted by `(score DESC, uuid ASC)`.
+    /// - Throws: `SwitchcraftStoreError.alreadyShutDown` /
+    ///   `embeddingMismatch`; storage and embedder errors.
     public func search(
         query: String,
         topK: Int = 10,
@@ -187,6 +222,13 @@ public actor SwitchcraftStore {
 
     /// Score `passages` against `query`. Returns one MaxSim score per
     /// passage in input order. Reproducible for the same `Embedder`.
+    ///
+    /// - Parameters:
+    ///   - query: free-text query.
+    ///   - passages: candidate passages, in caller-controlled order.
+    /// - Returns: per-passage MaxSim scores aligned with `passages`.
+    /// - Throws: `SwitchcraftStoreError.alreadyShutDown` /
+    ///   `embeddingMismatch`; embedder errors.
     public func score(query: String, passages: [String]) async throws -> [Float] {
         try ensureRunning()
         try await indexer.flush()
@@ -221,6 +263,8 @@ public actor SwitchcraftStore {
     /// store as shut down. Idempotent: a second call is a no-op. After
     /// shutdown, every other public method throws
     /// `SwitchcraftStoreError.alreadyShutDown`.
+    ///
+    /// - Throws: indexer or storage errors raised during flush/close.
     public func shutdown() async throws {
         if isShutDown { return }
         // Set the flag before any `await` so calls that arrive while

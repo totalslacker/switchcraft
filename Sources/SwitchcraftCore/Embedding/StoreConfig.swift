@@ -6,10 +6,15 @@ import Foundation
 /// Bundles the `Indexer`, `SearchEngine`, and hybrid-fusion configs so
 /// callers can tune the public store without reaching into the engines.
 public struct StoreConfig: Sendable, Hashable {
+    /// Indexer (LSM tree, k-means, residual codec) tunables.
     public var indexer: IndexerConfig
+    /// Search engine (centroid match, top-k, score floor) tunables.
     public var search: SearchConfig
+    /// Hybrid (vector + BM25 RRF) fusion tunables.
     public var hybrid: HybridConfig
 
+    /// Build a `StoreConfig` from individual engine configs. All
+    /// arguments default to production-tuned values.
     public init(
         indexer: IndexerConfig = .production,
         search: SearchConfig = SearchConfig(),

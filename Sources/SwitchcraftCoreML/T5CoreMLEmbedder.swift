@@ -57,6 +57,19 @@ public actor T5CoreMLEmbedder: Embedder {
     // MARK: - Init
 
     /// Load a CoreML model from a `.mlpackage` URL (or compiled `.mlmodelc`).
+    ///
+    /// - Parameters:
+    ///   - modelURL: filesystem URL of the `.mlpackage` or `.mlmodelc`.
+    ///     `.mlpackage` paths are compiled in-process before load.
+    ///   - tokenizer: HuggingFace `Tokenizer` matching the model's vocab.
+    ///   - computeUnits: CoreML compute selector (CPU/GPU/ANE).
+    ///   - modelIdentifier: stable string written to every `ChunkRecord.model`.
+    ///   - dims: projection output dimensionality. Must be positive and even.
+    ///   - windowSize: maximum tokens per inference (model fixed length).
+    ///   - stride: sliding-window stride; must satisfy `0 < stride ≤ windowSize`.
+    ///   - minNorm: pre-normalisation L2 norm threshold; positions below
+    ///     this are dropped.
+    /// - Throws: any error from `MLModel.compileModel(at:)` or `MLModel(contentsOf:)`.
     public init(
         modelURL: URL,
         tokenizer: Tokenizer,
@@ -133,6 +146,12 @@ public actor T5CoreMLEmbedder: Embedder {
 
     // MARK: - Embedder
 
+    /// Encode `text` to a flat row-major `m × dims` `[Float]`. Returns
+    /// an empty array for empty / whitespace-only input.
+    ///
+    /// - Throws: `T5CoreMLEmbedderError.missingOutput` if the CoreML
+    ///   model does not produce the expected feature dictionary; any
+    ///   tokenizer- or CoreML-originated error.
     public func encode(_ text: String) async throws -> [Float] {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { return [] }
