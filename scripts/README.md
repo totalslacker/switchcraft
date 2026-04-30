@@ -285,17 +285,27 @@ reachable from an external crate. Adding `#[ignore]`d tests inside
 upstream `src/tests.rs` reuses the existing `FACTS` constants and
 private-API access without requiring upstream to publish anything.
 
-### Notes on score comparability
+### Per-fixture tolerance summary
 
-- `match_centroids` is the closest analogue of Switchcraft's
-  `SearchEngine.search(queryEmbeddings:dims:topK:filter:)`. Both return
-  raw MaxSim mean scores; `crate::search` (Witchcraft) and
-  `SwitchcraftStore.search` (Switchcraft) layer FTS + RRF on top, which
-  ADR 008 disclaims as a parity target.
-- Switchcraft's CoreML T5 runs FP32 compute with FP16 output ports
-  (see ADR 010(c) for why blanket FP16 was abandoned); Witchcraft's
-  GGUF T5 is Q4K. Some per-token drift is expected; the parity test
-  accepts ±0.01 per ADR 003. If a future model build pushes drift past
-  that, the runner re-records `provenance.computeUnits` / re-pins
-  `witchcraftCommit` and the tolerance discussion happens in the
-  affected PR.
+ADR 013(d) is the canonical reference. Quick recap so the runner knows
+what each Swift parity test is asserting against the regenerated
+fixture:
+
+- `reference_centroids.bin`: Swift k-means on the embedded `inputs`
+  region must produce centroids that, for each Swift centroid, find a
+  reference centroid with cosine ≥ 0.99 (ADR 013(d)). The bound is
+  loose because Lloyd's iteration on the small 33-fact corpus is
+  init-sensitive and Swift / Rust don't share an RNG.
+- `reference_residuals.bin`: byte-exact encoder parity (Swift
+  `encodeResiduals` ≡ Witchcraft `to_q4_bytes`) plus MSE ≤ 1e-3
+  decoder parity, both per ADR 003(a).
+- `reference_embeddings.bin`: per-token absolute diff ≤ 0.025 between
+  Switchcraft FP32 CoreML output and Witchcraft Q4K GGUF output, per
+  ADR 010(h). The bound is the measured FP32-vs-Q4K drift on the XTR
+  T5 graph; matched-precision FP16-vs-Q4K is not achievable on this
+  graph (ADR 010(c)).
+
+If a regenerated fixture pushes any of these tolerances, the runner
+re-records `provenance.witchcraftCommit` (and `provenance.computeUnits`
+for the embeddings fixture) and the tolerance discussion happens in
+the PR that bumps the pin.
