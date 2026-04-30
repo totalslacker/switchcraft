@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// A single entry from `tokenizer.json`'s `added_tokens` array. These are tokens

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// SQL DDL for the SQLite reference backend.
 ///
 /// The schema mirrors `docs/Plan.md`. FTS5 maintenance is wired via triggers

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// Helpers for encoding/decoding the few non-primitive fields that travel

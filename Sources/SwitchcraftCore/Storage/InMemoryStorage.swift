@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// In-memory reference implementation of `SwitchcraftStorage`.
