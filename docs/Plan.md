@@ -12,7 +12,7 @@ High-level phases. Detailed checklists live in each section below — keep both 
 
 - [x] **Phase 1: MVP** — port Witchcraft to Swift, SQLite-backed, passing the upstream test corpus
 - [ ] **Phase 2: Production optimization** — Metal kernels, caching, concurrency improvements
-- [ ] **Open source release** — Apache 2.0 Swift package on SPM
+- [x] **Open source release** — Apache 2.0 Swift package on SPM (v0.1.0)
 
 ## Motivation
 
@@ -558,13 +558,17 @@ This allows the Swift tests to validate correctness without running the Rust imp
 
 ## Open Source Release
 
-Switchcraft is intended to be released as a standalone Swift package, the **first native Apple platform implementation** of XTR-Warp token-level semantic search.
+Switchcraft is released as a standalone Swift package, the **first native Apple platform implementation** of XTR-Warp token-level semantic search.
 
-Release plan:
+Shipped in **v0.1.0** (issue #41):
 
 - **Standalone Swift package** distributed via Swift Package Manager
 - **Apache 2.0 license** — matching Witchcraft's license, maximally permissive
-- **Cross-platform within Apple**: macOS, iOS, iPadOS, visionOS
+- **Cross-platform within Apple**: macOS 13+, iOS 16+, visionOS 1+
+- `NOTICE` file with Apache 2.0 §4(d) attributions, SPDX file headers
+  across `Sources/`, `CHANGELOG.md`, `CONTRIBUTING.md`, DocC comments
+  on the full public API surface, and `Package.swift` product-intent
+  comments.
 
 The framework is useful for any app that needs local semantic search: note-taking apps, document managers, email clients, code editors, personal knowledge bases.
 
