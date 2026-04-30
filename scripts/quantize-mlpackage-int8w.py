@@ -76,6 +76,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import sys
 from pathlib import Path
 from typing import List, Tuple
@@ -181,9 +182,35 @@ def quantize_mlpackage(input_path: Path, output_path: Path) -> int:
     ).strip()
     quantised.author = src.author or "Switchcraft project (Apache 2.0)"
 
+    # `.mlpackage` is a directory; `MLModel.save` does not overwrite an
+    # existing one cleanly (depending on coremltools version it either
+    # raises or leaves stale files mixed with the fresh save). Remove
+    # any prior output before saving so the asset is always self-consistent.
+    if output_path.exists():
+        shutil.rmtree(output_path)
     print(f"Saving INT8w .mlpackage → {output_path}")
     quantised.save(str(output_path))
     return dequantize_count
+
+
+def _directory_size_bytes(path: Path) -> int:
+    """Recursively sum the size of every regular file under ``path``.
+    Used to report the final on-disk size of the saved `.mlpackage`."""
+    total = 0
+    for entry in path.rglob("*"):
+        if entry.is_file():
+            total += entry.stat().st_size
+    return total
+
+
+def _format_size(num_bytes: int) -> str:
+    if num_bytes >= 1024 * 1024 * 1024:
+        return f"{num_bytes / (1024 ** 3):.2f} GB"
+    if num_bytes >= 1024 * 1024:
+        return f"{num_bytes / (1024 ** 2):.1f} MB"
+    if num_bytes >= 1024:
+        return f"{num_bytes / 1024:.1f} KB"
+    return f"{num_bytes} B"
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +402,9 @@ def main(argv: List[str] | None = None) -> int:
         )
 
     quantize_mlpackage(args.input, args.output)
+
+    output_size = _directory_size_bytes(args.output)
+    print(f"INT8w .mlpackage on-disk size: {_format_size(output_size)}")
 
     if args.skip_parity:
         print("Skipping parity check (--skip-parity).")
