@@ -225,18 +225,21 @@ Each test prints two stdout sections, framed by markers:
 ---SWITCHCRAFT-<NAME>-BIN-BASE64-END---
 ```
 
-Run all three at once:
+Run all three at once. Rust's libtest harness only accepts a single
+filter string, so we pass the common prefix `dump_reference_` and let
+it match all three tests:
 
 ```bash
 WITCHCRAFT_COMMIT=$(git rev-parse HEAD) cargo test \
     --features t5-quantized \
     --lib \
+    dump_reference_ \
     -- --nocapture --include-ignored \
-    tests::tests::dump_reference_centroids_fixture \
-    tests::tests::dump_reference_residuals_fixture \
-    tests::tests::dump_reference_embeddings_fixture \
     > /tmp/switchcraft-fixtures.out 2>&1
 ```
+
+Alternatively run them as three separate commands (one filter each)
+and concatenate the outputs into `/tmp/switchcraft-fixtures.out`.
 
 ### Extract
 
@@ -257,10 +260,15 @@ for NAME in CENTROIDS RESIDUALS EMBEDDINGS; do
     awk -v b="---SWITCHCRAFT-${NAME}-BIN-BASE64-BEGIN---" \
         -v e="---SWITCHCRAFT-${NAME}-BIN-BASE64-END---" \
         '$0==b{flag=1; next} $0==e{flag=0} flag' "$SRC" \
-        | base64 --decode \
+        | openssl base64 -d -A \
         > "$DEST/reference_${LOWER}.bin"
 done
 ```
+
+`openssl base64 -d -A` is portable across macOS and Linux. If you
+prefer the `base64` CLI, use `base64 -D` on macOS / BSD or
+`base64 --decode` on GNU coreutils (the flags differ; the form above
+avoids the split).
 
 Validate:
 
