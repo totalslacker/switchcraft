@@ -2,13 +2,21 @@ import Foundation
 
 /// Resolves the canonical XTR-base-en `.mlpackage` for asset-gated tests.
 ///
-/// The model asset (~80 MB) is **not committed** to the repository. To
-/// exercise the integration tests:
+/// The model asset is **not committed** to the repository. The FP32
+/// default ships at ~430 MB (per ADR 010(c)); the optional INT8
+/// weight-only variant produced by `scripts/quantize-mlpackage-int8w.py`
+/// ships at ~110 MB (per ADR 010(i)). Both sizes exceed reasonable git
+/// limits and Git LFS is incompatible with SwiftPM's resolver.
+///
+/// To exercise the integration tests:
 ///
 ///   1. Run `python3 scripts/convert-xtr-to-coreml.py …` to produce the
-///      `.mlpackage` (see README.md → Getting Started).
+///      FP32 `.mlpackage` (see README.md → CoreML setup).
 ///   2. Set `SWITCHCRAFT_XTR_MLPACKAGE=<absolute-path-to-mlpackage>`.
-///   3. `swift test`.
+///   3. (Optional) Run `python3 scripts/quantize-mlpackage-int8w.py`
+///      and set `SWITCHCRAFT_XTR_MLPACKAGE_INT8W=<absolute-path-to-int8w>`
+///      to enable `CoreMLInt8wParityTests`.
+///   4. `swift test`.
 ///
 /// When the env var is unset or points to a non-existent path, the
 /// asset-gated tests skip cleanly via Swift Testing's `.enabled(if:)`
@@ -24,6 +32,46 @@ enum CoreMLAsset {
 
     /// Resolved URL of the `.mlpackage` (or `.mlmodelc`), or `nil` when
     /// the env var is unset / the path does not exist.
+    static var url: URL? {
+        guard
+            let raw = ProcessInfo.processInfo.environment[envVar],
+            !raw.isEmpty
+        else {
+            return nil
+        }
+        let url = URL(fileURLWithPath: raw)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return nil
+        }
+        return url
+    }
+}
+
+/// Resolves the optional INT8 weight-only `.mlpackage` variant for
+/// `CoreMLInt8wParityTests`.
+///
+/// The INT8w asset is produced by post-processing the FP32 asset:
+///
+///   1. Build the FP32 asset (see ``CoreMLAsset``).
+///   2. Run `python3 scripts/quantize-mlpackage-int8w.py` to produce
+///      a sibling `.mlpackage` at ~110 MB (per ADR 010(i)).
+///   3. Set `SWITCHCRAFT_XTR_MLPACKAGE_INT8W=<absolute-path-to-int8w>`.
+///
+/// Mirrors the gating shape of ``CoreMLAsset``: when the env var is
+/// unset or points to a non-existent path, asset-gated tests skip
+/// cleanly. Fresh checkouts stay green.
+enum CoreMLAssetInt8w {
+    /// Environment variable consulted by `CoreMLInt8wParityTests`.
+    /// Documented in README.md and `scripts/quantize-mlpackage-int8w.py`.
+    static let envVar = "SWITCHCRAFT_XTR_MLPACKAGE_INT8W"
+
+    /// `true` iff the env var is set and resolves to an existing path.
+    static var isAvailable: Bool {
+        url != nil
+    }
+
+    /// Resolved URL of the INT8w `.mlpackage` (or `.mlmodelc`), or
+    /// `nil` when the env var is unset / the path does not exist.
     static var url: URL? {
         guard
             let raw = ProcessInfo.processInfo.environment[envVar],

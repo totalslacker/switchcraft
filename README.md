@@ -113,71 +113,133 @@ callers that bring their own embedder).
 The pieces below are the minimum needed to run an end-to-end search with the
 real `T5CoreMLEmbedder`.
 
-### 1. Build the CoreML asset
+### Variants
 
-The `google/xtr-base-en` `.mlpackage` is ~80 MB and is not committed to the
-repository (Git LFS is incompatible with SwiftPM's resolver; see
-[ADR 010](adrs/010-embedder-model-and-asset-distribution.md) for the full
-distribution rationale).
+`T5CoreMLEmbedder` accepts any `.mlpackage` whose graph matches the
+contract defined in [ADR 010(c)](adrs/010-embedder-model-and-asset-distribution.md).
+Two variants are supported:
 
-To produce it once:
+| Variant | Asset | Compute | Use case | Env var | `modelIdentifier` |
+|---|---|---|---|---|---|
+| **FP32 (default)** | `xtr-base-en.mlpackage` (~430 MB) | FP32 GPU/CPU | Maximum precision; production default | `SWITCHCRAFT_XTR_MLPACKAGE` | `google/xtr-base-en@v1` |
+| **INT8 weight-only** | `xtr-base-en-int8w.mlpackage` (~110 MB) | FP32 GPU/CPU | Size-constrained (iOS, edge, OTA); opt-in | `SWITCHCRAFT_XTR_MLPACKAGE_INT8W` | `google/xtr-base-en@v1-int8w` |
+
+The INT8w variant compresses Linear-op weights to INT8 with per-channel
+scales; weights are dequantised back to FP32 just before each matmul,
+so compute precision is unchanged and the within-stack parity contract
+is mean cosine similarity ≥ 0.998 vs the PyTorch FP32 reference. It
+ships **alongside** the FP32 default — neither variant replaces the
+other. See [ADR 010(i)](adrs/010-embedder-model-and-asset-distribution.md)
+for the full contract.
+
+> **Important — `modelIdentifier`**: the two variants MUST be
+> initialised with **different** `modelIdentifier` strings (recommended:
+> the values in the table above). `T5CoreMLEmbedder` records the
+> identifier verbatim on every persisted chunk; if the same identifier
+> is used for both variants, chunks indexed under one cannot be
+> distinguished from chunks indexed under the other and ADR 010(f)'s
+> mismatch detection silently passes through. The API does not enforce
+> distinct identifiers — it is a usage contract for operators.
+
+Neither asset is committed to the repository: both exceed reasonable
+git limits and Git LFS is incompatible with SwiftPM's resolver. See
+[ADR 010(d)](adrs/010-embedder-model-and-asset-distribution.md) for
+the full distribution rationale.
+
+### 1. Build the CoreML assets
+
+Producing the FP32 default is a one-time step. The INT8w variant is
+optional and is produced by a second post-processing step against the
+FP32 asset.
 
 ```bash
-# 1. Install the conversion-script dependencies.
+# 1. Install the conversion-script dependencies (used by both scripts).
 pip install -r scripts/requirements-coreml.txt
 
-# 2. Run the conversion. Use the HuggingFace commit SHA you want pinned
-#    into the asset's metadata (recorded in ADR 010).
+# 2. Build the FP32 default. Use the HuggingFace commit SHA you want
+#    pinned into the asset's metadata (recorded in ADR 010).
 python3 scripts/convert-xtr-to-coreml.py \
     --revision <huggingface-commit-sha> \
     --tokenizer Tests/Fixtures/xtr-base-en.tokenizer.json \
     --out-mlpackage Tests/Fixtures/xtr-base-en.mlpackage \
     --out-fixtures Tests/Fixtures
+
+# 3. (Optional) Build the INT8 weight-only sibling. Defaults --input
+#    to $SWITCHCRAFT_XTR_MLPACKAGE; defaults --output to a sibling
+#    `<input-stem>-int8w.mlpackage` next to the FP32 asset.
+python3 scripts/quantize-mlpackage-int8w.py \
+    --input Tests/Fixtures/xtr-base-en.mlpackage \
+    --output Tests/Fixtures/xtr-base-en-int8w.mlpackage
 ```
 
-The script:
+The conversion script:
 - Loads the encoder + the `2_Dense/` projection layer.
-- Produces an `.mlpackage` whose graph emits both the raw projection
+- Produces an FP32 `.mlpackage` whose graph emits both the raw projection
   (for the `MIN_NORM` filter) and the L2-normalised vectors.
 - Runs a PyTorch ↔ CoreML parity check (mean cosine similarity ≥ 0.999)
   and aborts non-zero if it fails.
 - Writes `Tests/Fixtures/xtr-base-en.embeddings.{bin,json}` — the
-  reference fixtures Swift integration tests compare against.
+  PyTorch reference fixtures Swift integration tests compare both
+  variants against.
 
-### 2. Place the asset and point the test suite at it
+The quantisation script:
+- Applies `coremltools.optimize.coreml.linear_quantize_weights`
+  (per-channel symmetric INT8) to the FP32 asset.
+- Asserts that at least one weight tensor was actually quantised
+  (a sanity check against silent no-op'ing).
+- Runs an INT8w-vs-FP32 CoreML parity check (mean cosine similarity
+  ≥ 0.998) and aborts non-zero if it fails.
 
-The conventional location is `Tests/Fixtures/xtr-base-en.mlpackage/`,
-but any path works. The test suite reads `SWITCHCRAFT_XTR_MLPACKAGE`:
+### 2. Place the asset(s) and point the test suite at them
+
+The conventional location is `Tests/Fixtures/`, but any path works.
+The test suite reads `SWITCHCRAFT_XTR_MLPACKAGE` for the FP32 suite
+and `SWITCHCRAFT_XTR_MLPACKAGE_INT8W` for the INT8w suite:
 
 ```bash
 export SWITCHCRAFT_XTR_MLPACKAGE=$PWD/Tests/Fixtures/xtr-base-en.mlpackage
+# Optional — only needed to run CoreMLInt8wParityTests.
+export SWITCHCRAFT_XTR_MLPACKAGE_INT8W=$PWD/Tests/Fixtures/xtr-base-en-int8w.mlpackage
 swift test
 ```
 
-When the env var is unset or points to a non-existent path,
-asset-gated tests skip cleanly via Swift Testing's `.enabled(if:)`
-trait — fresh checkouts stay green.
+When either env var is unset or points to a non-existent path, the
+corresponding asset-gated tests skip cleanly via Swift Testing's
+`.enabled(if:)` trait — fresh checkouts stay green regardless of which
+variants are present.
 
 ### 3. Wire the embedder into a store
+
+The same `T5CoreMLEmbedder` API loads both variants — pick a `modelURL`
+and pass the matching `modelIdentifier`:
 
 ```swift
 import Switchcraft
 import SwitchcraftSQLite
 import SwitchcraftCoreML
 
-let modelURL  = URL(fileURLWithPath: "/path/to/xtr-base-en.mlpackage")
 let tokenizer = try Tokenizer(contentsOf: "/path/to/xtr-base-en.tokenizer.json")
 
-let embedder = try await T5CoreMLEmbedder(
-    modelURL: modelURL,
+// FP32 default — maximum precision.
+let fp32Embedder = try await T5CoreMLEmbedder(
+    modelURL: URL(fileURLWithPath: "/path/to/xtr-base-en.mlpackage"),
     tokenizer: tokenizer,
     computeUnits: .all,                            // .cpuOnly on constrained HW
     modelIdentifier: "google/xtr-base-en@v1"       // recorded on every chunk
 )
 
+// INT8 weight-only — ~3.9× smaller, FP32 compute unchanged. Note the
+// distinct modelIdentifier (REQUIRED — see "Variants" above).
+let int8wEmbedder = try await T5CoreMLEmbedder(
+    modelURL: URL(fileURLWithPath: "/path/to/xtr-base-en-int8w.mlpackage"),
+    tokenizer: tokenizer,
+    computeUnits: .all,
+    modelIdentifier: "google/xtr-base-en@v1-int8w"
+)
+
 let store = try await SwitchcraftStore.sqlite(
     databasePath: "/path/to/store.db",             // or ":memory:"
-    embedder: embedder
+    embedder: fp32Embedder                         // or int8wEmbedder
 )
 
 try await store.add(id: "doc-a", body: "Apples and bananas are popular fruits.")

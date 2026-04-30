@@ -12,6 +12,22 @@ suitable for `T5CoreMLEmbedder`. See `README.md` (project root) for the
 end-to-end "Getting Started" instructions and the
 `SWITCHCRAFT_XTR_MLPACKAGE` env-var contract.
 
+## `quantize-mlpackage-int8w.py`
+
+Post-processes the FP32 `.mlpackage` produced by
+`convert-xtr-to-coreml.py` into an INT8 weight-only sibling
+(~430 MB → ~110 MB). Compute precision stays at FP32; only Linear-op
+weight storage changes. Runs an INT8w-vs-FP32 CoreML parity check
+(mean cosine similarity ≥ 0.998 by default) before exiting non-zero.
+
+The resulting asset is opt-in via `SWITCHCRAFT_XTR_MLPACKAGE_INT8W`
+and MUST be initialised with a distinct `modelIdentifier`
+(recommended `"google/xtr-base-en@v1-int8w"`) to avoid silent
+collisions in `ChunkRecord.model` mismatch detection. See
+[ADR 010(i)](../adrs/010-embedder-model-and-asset-distribution.md) for
+the full contract and `python3 scripts/quantize-mlpackage-int8w.py --help`
+for the workflow.
+
 ## `regenerate-tokenizer-fixtures.py`
 
 Regenerates the cached HuggingFace tokenizer fixture used by
