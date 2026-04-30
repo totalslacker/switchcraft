@@ -61,6 +61,16 @@ public actor Indexer {
     private var pendingMaxChunkID: Int64?
     private var pendingCount: Int = 0
 
+    /// True while the leader's `performFlush()` body is running. Concurrent
+    /// `flush()` callers observe this and join `flushWaiters` instead of
+    /// racing past the `pendingCount > 0` gate themselves. See `flush()`.
+    private var flushInProgress: Bool = false
+
+    /// Continuations for concurrent `flush()` callers waiting on the
+    /// leader's in-flight flush. Resumed (with the leader's success or
+    /// the leader's thrown error) when the leader's body returns.
+    private var flushWaiters: [CheckedContinuation<Void, Swift.Error>] = []
+
     // MARK: - Init
 
     public init(
@@ -82,6 +92,23 @@ public actor Indexer {
     /// can be delta-encoded as in upstream Witchcraft (see ADR for
     /// bucket indices encoding).
     public func add(chunkID: Int64, embeddings: [Float], dims: Int) async throws {
+        // Wait for any in-flight flush before mutating the ledger. The
+        // leader's `performFlush()` body has multiple `await` points and
+        // computes its row count from the ledger range; without this
+        // gate, an `add` racing into a leader's suspension can add rows
+        // to a chunkID that falls within the leader's captured
+        // [pendingMin, pendingMax] window (chunk IDs reach
+        // `indexer.add` out of order, since `SwitchcraftStore.add`
+        // assigns the chunkID in `storage.upsertChunk` strictly before
+        // it calls `indexer.add`, with an `await` in between). The
+        // leader would then see m > expected and throw
+        // `Error.ledgerOutOfSync`. Same waiter pattern as `flush()`.
+        while flushInProgress {
+            try await withCheckedThrowingContinuation { c in
+                flushWaiters.append(c)
+            }
+        }
+
         precondition(dims > 0, "dims must be positive")
         precondition(dims % 2 == 0, "dims must be even (Q4Codec evenness precondition)")
         precondition(embeddings.count % dims == 0,
@@ -115,7 +142,74 @@ public actor Indexer {
     /// Drain any buffered embeddings into a new generation, cascading
     /// through higher levels as required by `IndexerConfig`. No-op when
     /// the buffer is empty.
+    ///
+    /// Concurrent callers serialise: the first caller becomes the leader
+    /// and runs the flush body; subsequent callers that arrive while the
+    /// leader is in-flight join a waiter list and resume when the leader
+    /// returns. This is required because `performFlush()` has multiple
+    /// `await` points (`storage.generations()`, `insertGeneration`, N ×
+    /// `insertBucket`, M × `deleteGeneration`); without the guard, two
+    /// concurrent callers can both pass the `pendingCount > 0` check and
+    /// both write generations covering overlapping ledger rows. A later
+    /// flush would then double-count those generations in `levelSums` and
+    /// throw `Error.ledgerOutOfSync` even though the ledger is intact.
+    ///
+    /// **Error propagation policy**: if the leader throws, the same
+    /// error is rethrown to *every* waiter (and to the leader's caller).
+    /// All concurrent callers see one consistent outcome.
+    ///
+    /// **Fast path**: when `pendingCount == 0` and no flush is in flight,
+    /// callers return immediately without taking the leader/waiter slow
+    /// path. (When a flush is in flight, even pending=0 callers wait,
+    /// because the in-flight flush is exactly the one their data needs.)
     public func flush() async throws {
+        // Fast path: nothing to flush AND no in-flight flush.
+        if pendingCount == 0 && !flushInProgress { return }
+
+        // If a leader is already running, queue and wait for its result.
+        // The leader rethrows its error to every waiter; on success
+        // every waiter resumes with `()` and returns.
+        if flushInProgress {
+            try await withCheckedThrowingContinuation { c in
+                flushWaiters.append(c)
+            }
+            return
+        }
+
+        // Re-check the empty-pending guard now that we know we are the
+        // leader candidate. The only way pendingCount can have changed
+        // between the fast-path check and here is if we suspended — and
+        // we have not. This guard preserves the original early-return
+        // semantics for the no-pending case.
+        guard pendingCount > 0, self.dims != nil,
+              pendingMinChunkID != nil,
+              pendingMaxChunkID != nil
+        else {
+            return
+        }
+
+        // Become the leader. Run the body; on completion (success or
+        // throw), drain the waiter list with the same outcome.
+        flushInProgress = true
+        do {
+            try await performFlush()
+        } catch {
+            let waiters = flushWaiters
+            flushWaiters.removeAll()
+            flushInProgress = false
+            for w in waiters { w.resume(throwing: error) }
+            throw error
+        }
+        let waiters = flushWaiters
+        flushWaiters.removeAll()
+        flushInProgress = false
+        for w in waiters { w.resume(returning: ()) }
+    }
+
+    /// Body of the flush operation. Must only be invoked by `flush()`,
+    /// which holds the `flushInProgress` leader guard. Concurrent calls
+    /// to this method would re-introduce the race documented on `flush()`.
+    private func performFlush() async throws {
         guard pendingCount > 0, let dims = self.dims,
               let pendingMin = pendingMinChunkID,
               let pendingMax = pendingMaxChunkID
