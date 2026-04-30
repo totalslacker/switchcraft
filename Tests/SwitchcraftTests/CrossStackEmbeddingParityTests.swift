@@ -6,7 +6,7 @@ import Testing
 import CoreML
 @testable import SwitchcraftCoreML
 
-/// Cross-stack embedding parity (issue #28 / ADR 013(h-bis)):
+/// Cross-stack embedding parity (issue #28 / ADR 013(d), (g)):
 /// Witchcraft GGUF (Q4K) per-token embeddings vs Switchcraft CoreML
 /// FP32 per-token embeddings, on the same input strings.
 ///
@@ -63,6 +63,10 @@ struct CrossStackEmbeddingParityTests {
                 for: fixture, blob: blob, dims: index.dims
             )
             let actualFlat = try await embedder.encode(fixture.input)
+            #expect(
+                actualFlat.count % index.dims == 0,
+                "\(fixture.name): embedder output length \(actualFlat.count) is not a multiple of dims \(index.dims)"
+            )
             let actualRows = actualFlat.count / index.dims
             #expect(
                 actualRows == fixture.rows,

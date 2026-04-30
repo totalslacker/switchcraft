@@ -196,12 +196,14 @@ struct KMeansTests {
 
     /// Cross-implementation k-means parity: re-run Swift KMeans on the
     /// SAME float inputs Witchcraft fed to its kmeans, and verify each
-    /// Swift centroid finds a near-match in the reference centroid set.
+    /// Swift centroid finds a UNIQUE near-match in the reference centroid
+    /// set (one-to-one assignment, no reuse).
     ///
-    /// We compare via "every Swift centroid has a reference centroid
-    /// with cosine ≥ threshold" rather than a fixed permutation, because
-    /// k-means cluster ordering is implementation-defined. Threshold is
-    /// 0.99 (per the plan-stage risk note: cluster count for the 33-fact
+    /// We compare via greedy one-to-one matching rather than a fixed
+    /// permutation because k-means cluster ordering is implementation-
+    /// defined. Forbidding reuse catches collapsed/duplicate Swift
+    /// centroids that a many-to-one match would miss. Threshold is 0.99
+    /// (per the plan-stage risk note: cluster count for the 33-fact
     /// corpus is small enough that Lloyd's iteration may converge to
     /// different local minima across Swift and Rust). ADR 013 documents
     /// the chosen tolerance.
@@ -237,25 +239,52 @@ struct KMeansTests {
             rng: &rng
         )
 
-        // For each Swift centroid, find the closest reference centroid
-        // by cosine similarity. Inputs are pre-normalised (Witchcraft's
-        // kmeans expects L2-normalised vectors) so cosine == dot.
-        var minMaxCosine: Float = 1.0
+        // Build the full cosine matrix between Swift centroids (rows) and
+        // reference centroids (cols). Inputs are pre-normalised
+        // (Witchcraft's kmeans expects L2-normalised vectors) so cosine
+        // == dot.
+        var cosine = [Float](repeating: 0, count: clusters * clusters)
         for s in 0..<clusters {
-            var best: Float = -.infinity
             for r in 0..<clusters {
                 var dot: Float = 0
                 for d in 0..<dims {
                     dot += result.centroids[s * dims + d]
                         * referenceCentroids[r * dims + d]
                 }
-                if dot > best { best = dot }
+                cosine[s * clusters + r] = dot
             }
-            if best < minMaxCosine { minMaxCosine = best }
+        }
+
+        // Greedy one-to-one assignment: repeatedly pick the highest
+        // remaining (Swift, reference) pair, lock both out, and record
+        // the cosine. After `clusters` rounds every Swift centroid is
+        // matched to a distinct reference centroid. The minimum matched
+        // cosine is the parity statistic.
+        var swiftUsed = [Bool](repeating: false, count: clusters)
+        var refUsed = [Bool](repeating: false, count: clusters)
+        var minMatchedCosine: Float = 1.0
+        for _ in 0..<clusters {
+            var best: Float = -.infinity
+            var bestS = -1
+            var bestR = -1
+            for s in 0..<clusters where !swiftUsed[s] {
+                for r in 0..<clusters where !refUsed[r] {
+                    let c = cosine[s * clusters + r]
+                    if c > best {
+                        best = c
+                        bestS = s
+                        bestR = r
+                    }
+                }
+            }
+            #expect(bestS >= 0 && bestR >= 0, "greedy matching exhausted before all clusters paired")
+            swiftUsed[bestS] = true
+            refUsed[bestR] = true
+            if best < minMatchedCosine { minMatchedCosine = best }
         }
         #expect(
-            minMaxCosine >= 0.99,
-            "min-over-Swift-centroids of max-cosine-to-reference = \(minMaxCosine) < 0.99"
+            minMatchedCosine >= 0.99,
+            "minimum one-to-one matched cosine = \(minMatchedCosine) < 0.99"
         )
     }
 }

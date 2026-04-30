@@ -197,9 +197,17 @@ struct Q4CodecTests {
 
             // Decoder parity: MSE within ADR 003(a) bound.
             let swiftDequant = Q4Codec.decodeResiduals(referenceQ4)
-            #expect(swiftDequant.count == referenceDequant.count)
+            guard
+                swiftDequant.count == referenceDequant.count,
+                !swiftDequant.isEmpty
+            else {
+                Issue.record(
+                    "\(entry.name): decoder length mismatch — Swift \(swiftDequant.count), Witchcraft \(referenceDequant.count)"
+                )
+                continue
+            }
             var sse: Double = 0
-            for i in 0..<min(swiftDequant.count, referenceDequant.count) {
+            for i in 0..<swiftDequant.count {
                 let d = Double(swiftDequant[i] - referenceDequant[i])
                 sse += d * d
             }
