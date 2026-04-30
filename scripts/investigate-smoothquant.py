@@ -1191,8 +1191,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     valid = [r for r in results if r.usable]
     best = max(valid, key=lambda r: r.mean_cosine, default=None)
     if best is None:
-        best_alpha = args.alpha
-        print("No NaN-free α found in sweep; defaulting to --alpha for figures.")
+        # No usable α: fall back to the smallest swept value so the
+        # downstream post-smoothing figures and absorbed/carveout passes
+        # land at a deterministic, sweep-anchored α (rather than depending
+        # on the --alpha flag, which may not appear in --alpha-sweep at
+        # all). Matches the committed figures directory naming.
+        best_alpha = sweep[0]
+        print(
+            f"No usable α found in sweep; defaulting to sweep[0]={best_alpha} "
+            "for downstream figures and confirming passes."
+        )
     else:
         best_alpha = best.alpha
         print(f"Best α (hook formulation): {best_alpha}  mean cos={best.mean_cosine:.6f}")
@@ -1230,7 +1238,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     # ---- Carve-out experiments at best α ----
-    if not args.skip_carveouts and valid:
+    # Run unconditionally on a no-go result too — the carve-out's "all
+    # variants behave the same" data is part of the report's evidence.
+    if not args.skip_carveouts:
         # 1) smooth body only, leave projection alone (the projection is
         #    not in our target list anyway, so this is equivalent to the
         #    main hooks run — record it for completeness).
@@ -1256,7 +1266,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         results.append(carve)
 
     # ---- LayerNorm-absorbed confirming pass at best α ----
-    if not args.skip_absorbed and valid:
+    # Run unconditionally on a no-go result too — confirming the absorbed
+    # formulation behaves the same as hooks is part of the report's
+    # evidence even when both fail.
+    if not args.skip_absorbed:
         absorbed = run_one_attempt(
             pipeline_orig=pipeline,
             profile=pre_profile,
