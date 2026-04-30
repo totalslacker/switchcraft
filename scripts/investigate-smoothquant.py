@@ -308,29 +308,41 @@ def materialise_windows(
 # we don't have to retain every input tensor.
 # ---------------------------------------------------------------------------
 
-TARGET_SUBLAYERS = {
-    "self_attn.q": ("layer", 0, "SelfAttention", "q"),
-    "self_attn.k": ("layer", 0, "SelfAttention", "k"),
-    "self_attn.v": ("layer", 0, "SelfAttention", "v"),
-    "self_attn.o": ("layer", 0, "SelfAttention", "o"),
-    "ff.wi":       ("layer", 1, "DenseReluDense", "wi"),
-    "ff.wo":       ("layer", 1, "DenseReluDense", "wo"),
-}
-
-
 def iter_target_linears(encoder):
     """Yield ``(name, module)`` pairs for every encoder Linear we smooth.
 
     `name` is a stable string of the form ``block-{i:02d}/{sublayer}``.
+
+    The FFN sublayer set depends on the model: T5-base / T5-small use
+    ungated ``T5DenseActDense`` (wi → relu → wo, two Linears); T5v1.1 /
+    XTR-base-en use gated ``T5DenseGatedActDense`` (wi_0 + wi_1 → gelu
+    → wo, three Linears). We detect this at runtime so the same script
+    works on either checkpoint.
     """
     blocks = encoder.encoder.block  # transformers.models.t5.modeling_t5
     for i, block in enumerate(blocks):
-        for short, (kind, idx, attr1, attr2) in TARGET_SUBLAYERS.items():
-            assert kind == "layer"
-            sub = block.layer[idx]
-            mod = getattr(sub, attr1)
-            linear = getattr(mod, attr2)
-            yield (f"block-{i:02d}/{short}", linear)
+        attn = block.layer[0].SelfAttention
+        for sub in ("q", "k", "v", "o"):
+            yield (f"block-{i:02d}/self_attn.{sub}", getattr(attn, sub))
+        ffn = block.layer[1].DenseReluDense
+        ffn_attrs = [n for n, _ in ffn.named_children()]
+        if "wi_0" in ffn_attrs and "wi_1" in ffn_attrs:
+            yield (f"block-{i:02d}/ff.wi_0", ffn.wi_0)
+            yield (f"block-{i:02d}/ff.wi_1", ffn.wi_1)
+            yield (f"block-{i:02d}/ff.wo", ffn.wo)
+        else:
+            yield (f"block-{i:02d}/ff.wi", ffn.wi)
+            yield (f"block-{i:02d}/ff.wo", ffn.wo)
+
+
+def target_sublayer_names(encoder) -> List[str]:
+    """The sub-layer suffixes present in this model, in canonical order."""
+    out: List[str] = []
+    for name, _ in iter_target_linears(encoder):
+        suffix = name.split("/", 1)[1]
+        if suffix not in out:
+            out.append(suffix)
+    return out
 
 
 @dataclass
@@ -626,19 +638,40 @@ def apply_smoothquant_absorbed(
                 )
                 linear.weight.data = linear.weight.data * residual.unsqueeze(0)
 
-        # FFN input: wi sits behind block.layer[1].layer_norm.
+        # FFN input: wi (or wi_0/wi_1 for gated) sits behind
+        # block.layer[1].layer_norm.
         ffn_norm = block.layer[1].layer_norm
-        wi = block.layer[1].DenseReluDense.wi
-        s_wi = scales[f"block-{i:02d}/ff.wi"].to(ffn_norm.weight.device)
-        with torch.no_grad():
-            ffn_norm.weight.data = ffn_norm.weight.data / s_wi
-            wi.weight.data = wi.weight.data * s_wi.unsqueeze(0).to(wi.weight.dtype)
+        ffn = block.layer[1].DenseReluDense
+        ffn_attrs = [n for n, _ in ffn.named_children()]
+        if "wi_0" in ffn_attrs and "wi_1" in ffn_attrs:
+            # Gated FFN — wi_0 and wi_1 share the post-norm input. Fold
+            # the geometric mean of their scales into the norm and carry
+            # the per-Linear residual on each Linear.
+            s_wi0 = scales[f"block-{i:02d}/ff.wi_0"]
+            s_wi1 = scales[f"block-{i:02d}/ff.wi_1"]
+            s_mean_ffn = (s_wi0 * s_wi1).pow(0.5)
+            with torch.no_grad():
+                ffn_norm.weight.data = ffn_norm.weight.data / s_mean_ffn.to(ffn_norm.weight.device)
+                for sub, s_ind in (("wi_0", s_wi0), ("wi_1", s_wi1)):
+                    linear = getattr(ffn, sub)
+                    # Already not multiplied yet — apply s_ind directly so
+                    # the effective input scale becomes s_mean (from norm)
+                    # * (s_ind / s_mean). We achieve s_ind end-to-end by
+                    # scaling weight by s_ind (NOT residual), since the
+                    # norm divides by s_mean for both.
+                    linear.weight.data = linear.weight.data * s_ind.unsqueeze(0).to(linear.weight.dtype)
+        else:
+            wi = ffn.wi
+            s_wi = scales[f"block-{i:02d}/ff.wi"].to(ffn_norm.weight.device)
+            with torch.no_grad():
+                ffn_norm.weight.data = ffn_norm.weight.data / s_wi
+                wi.weight.data = wi.weight.data * s_wi.unsqueeze(0).to(wi.weight.dtype)
 
-        # `o` (post-attention) and `wo` (post-FFN-relu) cannot be
+        # `o` (post-attention) and `wo` (post-FFN gate/act) cannot be
         # absorbed; smooth via hook + weight scaling.
         for sub_name, mod in (
             (f"block-{i:02d}/self_attn.o", block.layer[0].SelfAttention.o),
-            (f"block-{i:02d}/ff.wo", block.layer[1].DenseReluDense.wo),
+            (f"block-{i:02d}/ff.wo", ffn.wo),
         ):
             s_lin = scales[sub_name].to(mod.weight.device).to(mod.weight.dtype)
             with torch.no_grad():
@@ -816,12 +849,19 @@ def render_per_block_heatmaps(
     import numpy as np
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    sublayers = list(TARGET_SUBLAYERS.keys())
+    sublayers = sorted({n.split("/", 1)[1] for n in profile})
     blocks = sorted({n.split("/")[0] for n in profile})
+    n_sub = len(sublayers)
+    n_cols = 3 if n_sub <= 6 else 4
+    n_rows = max(1, math.ceil(n_sub / n_cols))
     for block in blocks:
-        fig, axes = plt.subplots(2, 3, figsize=(15, 6), sharey=False)
-        axes = axes.flatten()
-        for ax, sub in zip(axes, sublayers):
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 3 * n_rows), sharey=False)
+        axes = axes.flatten() if hasattr(axes, "flatten") else [axes]
+        for idx, ax in enumerate(axes):
+            if idx >= len(sublayers):
+                ax.axis("off")
+                continue
+            sub = sublayers[idx]
             name = f"{block}/{sub}"
             entry = profile.get(name)
             if not entry:
@@ -848,7 +888,7 @@ def render_summary_heatmap(profile: Dict[str, dict], out_path: Path, title: str)
     import numpy as np
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    sublayers = list(TARGET_SUBLAYERS.keys())
+    sublayers = sorted({n.split("/", 1)[1] for n in profile})
     blocks = sorted({n.split("/")[0] for n in profile})
     grid = np.zeros((len(blocks), len(sublayers)), dtype=np.float32)
     for i, block in enumerate(blocks):
@@ -877,9 +917,11 @@ def render_summary_heatmap(profile: Dict[str, dict], out_path: Path, title: str)
 class SweepResult:
     label: str
     alpha: float
-    nan_free: bool
+    nan_free: bool          # no NaN/Inf observed in raw or normalised outputs
+    usable: bool            # CoreML produced ≥1 row past the MIN_NORM gate
     convert_error: Optional[str]
     per_fixture_cosine: Dict[str, float]
+    per_fixture_rows: Dict[str, Tuple[int, int]]
     mean_cosine: float
 
     def as_row(self) -> str:
@@ -889,8 +931,9 @@ class SweepResult:
             else "NaN"
         )
         nan = "yes" if self.nan_free else "NO"
+        usable = "yes" if self.usable else "NO"
         err = self.convert_error or ""
-        return f"| {self.label} | {self.alpha} | {nan} | {cos} | {err} |"
+        return f"| {self.label} | {self.alpha} | {nan} | {usable} | {cos} | {err} |"
 
 
 def run_one_attempt(
@@ -955,7 +998,9 @@ def run_one_attempt(
         traceback.print_exc()
 
     per_fixture: Dict[str, float] = {}
+    per_fixture_rows: Dict[str, Tuple[int, int]] = {}
     saw_any_nan = False
+    any_usable = False
     if mlmodel is not None:
         for name, text in fixture_inputs:
             if not text.strip():
@@ -964,10 +1009,14 @@ def run_one_attempt(
                 ref = encode_pytorch_reference(pipeline_orig, tokenizer, text)
                 cm, saw_nan = encode_coreml(mlmodel, tokenizer, text)
                 saw_any_nan = saw_any_nan or saw_nan
+                per_fixture_rows[name] = (int(ref.shape[0]), int(cm.shape[0]))
+                if cm.shape[0] > 0:
+                    any_usable = True
                 if ref.shape != cm.shape:
                     print(
                         f"  parity FAIL [{name}]: shapes differ "
-                        f"{ref.shape} vs {cm.shape}",
+                        f"{ref.shape} vs {cm.shape}  (CoreML zero-rows or "
+                        f"MIN_NORM-filtered all positions)",
                         file=sys.stderr,
                     )
                     per_fixture[name] = 0.0
@@ -994,16 +1043,18 @@ def run_one_attempt(
         label=label,
         alpha=alpha,
         nan_free=nan_free,
+        usable=any_usable,
         convert_error=convert_error,
         per_fixture_cosine=per_fixture,
+        per_fixture_rows=per_fixture_rows,
         mean_cosine=mean,
     )
 
 
 def render_sweep_table(results: List[SweepResult]) -> str:
     header = (
-        "| Label | α | NaN-free? | Mean cos vs FP32 PyTorch | Notes |\n"
-        "|---|---|---|---|---|\n"
+        "| Label | α | NaN-free? | Produces rows? | Mean cos vs FP32 PyTorch | Notes |\n"
+        "|---|---|---|---|---|---|\n"
     )
     return header + "\n".join(r.as_row() for r in results) + "\n"
 
@@ -1133,8 +1184,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         results.append(res)
 
     # Pick the best α for downstream experiments and post-smoothing
-    # figures: NaN-free wins; tie-break by mean cosine.
-    valid = [r for r in results if r.nan_free]
+    # figures: usable (≥1 row produced) wins; tie-break by mean cosine.
+    # A "NaN-free" run that produces zero usable rows (because all
+    # positions are MIN_NORM-filtered out due to FP16 underflow) is not
+    # a winner — we want a CoreML model that actually works.
+    valid = [r for r in results if r.usable]
     best = max(valid, key=lambda r: r.mean_cosine, default=None)
     if best is None:
         best_alpha = args.alpha
@@ -1223,15 +1277,19 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     summary = {
         "best_alpha": best_alpha,
-        "best_alpha_nan_free": best is not None,
+        "best_alpha_usable": best is not None,
         "best_alpha_mean_cosine": best.mean_cosine if best else float("nan"),
         "results": [
             {
                 "label": r.label,
                 "alpha": r.alpha,
                 "nan_free": r.nan_free,
+                "usable": r.usable,
                 "convert_error": r.convert_error,
                 "per_fixture_cosine": r.per_fixture_cosine,
+                "per_fixture_rows": {
+                    k: list(v) for k, v in r.per_fixture_rows.items()
+                },
                 "mean_cosine": r.mean_cosine,
             }
             for r in results

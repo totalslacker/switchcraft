@@ -425,6 +425,25 @@ Reasons:
   revisited with concrete data. Until then, branching adds bookkeeping
   without unlocking anything.
 
+##### Before declaring no-go
+
+A borderline result from the feasibility investigation does not have
+to fall straight through to the post-SmoothQuant ladder below. The
+in-SmoothQuant escalation lever — to be exhausted before "no-go" is
+declared — is **per-layer α tuning**.
+
+Standard SmoothQuant uses a single α for every Linear in the model.
+T5-base may have layer-specific outlier behaviour (e.g. early-layer
+attention vs. late-layer FFN) that benefits from a non-uniform α
+policy: a higher α where outliers are extreme, lower α where weight
+magnitudes dominate. The feasibility report's per-layer outlier
+heatmaps + the α-sweep mean-cosine table are the data we need to
+decide whether per-layer tuning is worth pursuing. If the global
+sweep produces a NaN-free run with mean cosine in [0.99, 0.999), try
+per-layer α before declaring no-go. If the global sweep is NaN-flooded
+across the board, per-layer α is unlikely to rescue it and the post-
+SmoothQuant ladder applies.
+
 ##### If SmoothQuant fails
 
 The investigation produces a definitive go/no-go signal. If no-go,
