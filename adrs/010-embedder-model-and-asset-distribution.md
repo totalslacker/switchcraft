@@ -113,6 +113,11 @@ would halve the asset to ~215 MB. Treat the current 430 MB size as
 correctness-first; size optimisation is deferred. See issue #31 for
 the full diagnostic and decision log.
 
+For the cross-stack rationale — *why* this Switchcraft-side choice
+sits at a different point on the precision/size curve than
+Witchcraft's Q4K + Q8 attention configuration, and what would have
+to change to collapse the asymmetry — see **ADR 014**.
+
 ## (d) Distribution = local placement + env-var test gate
 
 The `.mlpackage` is **not committed** to the repository:
