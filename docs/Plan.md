@@ -327,6 +327,7 @@ Track progress by checking off items as they land. Effort estimates and notes fo
 ### Phase 2: Production Optimization
 
 - [ ] **SmoothQuant FP16 conversion path** (size + speed + ANE eligibility) — see "SmoothQuant FP16 path" below
+- [x] **INT8 weight-only `.mlpackage` variant** (rung 1 of "If SmoothQuant fails" ladder, ~110 MB) — see ADR 010(i); ships alongside FP32 default, opt-in via `SWITCHCRAFT_XTR_MLPACKAGE_INT8W`
 - [ ] Metal compute shaders for hot paths (Q4 dequant + matmul, centroid similarity, residual scoring)
 - [ ] LRU caching for query embeddings
 - [ ] Background indexing pipeline

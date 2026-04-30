@@ -241,3 +241,122 @@ Future cross-implementation parity tests cite this section rather
 than re-litigating tolerance. If a future Witchcraft build raises its
 quant precision (Q5/Q8/F16/F32), the tolerance should be tightened
 back toward ±0.01 in the same commit that updates the references.
+
+### Cross-stack tolerance for the INT8 weight-only variant
+
+The INT8 weight-only variant introduced in (i) keeps FP32 compute and
+FP32 activations; only the *storage* of Linear weights changes to INT8
+with per-channel scales. Cross-stack drift vs Witchcraft Q4K is
+therefore **comparable to FP32**, not tighter — INT8w weight rounding
+adds small noise on the Switchcraft side but does not meaningfully
+close the FP32 ↔ Q4K precision gap that drives the ±0.025 bound. The
+table above applies to the INT8w variant unchanged; no separate
+cross-stack reference fixture or tolerance is required.
+
+Within-stack parity (INT8w-CoreML vs the **PyTorch FP32 reference** at
+`Tests/Fixtures/xtr-base-en.embeddings.{bin,json}`) is a separate gate
+documented in (i). It runs at **mean cosine similarity ≥ 0.998** —
+strictly tighter than the cross-stack ±0.025, because both sides of
+that comparison live inside the Switchcraft stack and share the same
+PyTorch ground truth. Do not collapse the two gates: a future regression
+in INT8w drift could pass the cross-stack ±0.025 while failing the
+within-stack ≥ 0.998 contract.
+
+## (i) INT8 weight-only variant (`xtr-base-en-int8w.mlpackage`)
+
+The first production-side step from `docs/Plan.md`'s "If SmoothQuant
+fails" ladder, rung 1. SmoothQuant was investigated in issue #43 / PR #44
+and definitively returned no-go (residual-stream magnitudes entering
+RMSNorm overflow FP16, which SmoothQuant's per-Linear re-parameterisation
+cannot fix — see `docs/investigations/smoothquant-feasibility.md`). INT8
+weight-only quantisation sidesteps the FP16 question entirely and is the
+smallest correctness-preserving step that reduces asset size.
+
+### Asset shape
+
+- **Format**: `.mlpackage` (mlprogram backend), produced by
+  post-processing the FP32 asset from (c) with
+  `coremltools.optimize.coreml.linear_quantize_weights` (per-channel
+  symmetric INT8, `linear_symmetric` mode, the coremltools 7.2 default).
+  Conv / Linear weight tensors above coremltools' default 2048-element
+  threshold are replaced with `constexpr_affine_dequantize` ops feeding
+  the original matmul; this covers every Linear in the T5 encoder body
+  and the 768→128 projection layer.
+- **Size**: ~110 MB on disk (~3.9× smaller than the ~430 MB FP32 default).
+- **Compute precision**: FP32 throughout (unchanged from (c)). Weights
+  are dequantised to FP32 just before each matmul; activations and
+  accumulators stay at FP32. The graph's I/O contract is unchanged:
+  `input_ids` Int32 [1, 512]; outputs `raw_projected` and `normalised`
+  as FP16 [1, 512, 128].
+- **ANE eligibility**: not eligible. ANE requires FP16 weights *and*
+  FP16 activations; INT8w gives ANE neither, so dispatch stays on
+  GPU/CPU. Speed is therefore comparable to FP32 — the win is purely
+  size.
+
+### Quality contract
+
+- **Within-stack** (the primary gate): mean cosine similarity ≥ 0.998
+  vs the committed PyTorch FP32 reference fixtures
+  (`Tests/Fixtures/xtr-base-en.embeddings.{bin,json}`). Enforced by
+  `CoreMLInt8wParityTests.fixtureParity998` and by the
+  `quantize-mlpackage-int8w.py` script's built-in INT8w-vs-FP32-CoreML
+  parity check. The 0.998 floor was chosen per the issue #45 spec; if a
+  future operator measures actual drift reliably below 0.001 (cosine
+  ≥ 0.999) on a real asset, the threshold may be ratcheted up in both
+  the script default and the Swift assertion in the same commit.
+- **Cross-stack** (vs Witchcraft Q4K): see (h) — the existing ±0.025
+  tolerance applies unchanged. INT8w weight rounding does not close the
+  FP32 ↔ Q4K gap.
+
+### Production default and opt-in
+
+The FP32 build remains the production default (per (c)). The INT8w
+variant is **opt-in**: callers select it explicitly by passing the
+INT8w `.mlpackage` URL to `T5CoreMLEmbedder.init` along with the
+distinct identifier described below. There is no default-variant
+resolver inside `T5CoreMLEmbedder`; variant selection is consumer-side.
+
+The asset is referenced by the env var
+`SWITCHCRAFT_XTR_MLPACKAGE_INT8W` (parallel to
+`SWITCHCRAFT_XTR_MLPACKAGE` for FP32). The Swift test suite
+`CoreMLInt8wParityTests` is gated on this env var and skips cleanly on
+fresh checkouts.
+
+### `modelIdentifier` convention (mandatory)
+
+The INT8w variant **MUST** be initialised with a `modelIdentifier`
+distinct from the FP32 default. The recommended identifier is:
+
+```
+google/xtr-base-en@v1-int8w
+```
+
+(vs the FP32 default `"google/xtr-base-en@v1"`). Per (f),
+`ChunkRecord.model` records the identifier verbatim and the
+mismatch-detection logic compares strings. If the same identifier is
+reused for both variants, chunks indexed under one variant cannot be
+distinguished from chunks indexed under the other, and the mismatch
+check silently passes through. This is a documentation contract — the
+API does not enforce it — and is reproduced in the README and the
+`scripts/quantize-mlpackage-int8w.py --help` output.
+
+### Workflow
+
+1. Run `scripts/convert-xtr-to-coreml.py --revision <sha>` to produce
+   the FP32 `.mlpackage` and the committed PyTorch reference fixtures.
+2. Run `scripts/quantize-mlpackage-int8w.py` on that FP32 asset to
+   produce a sibling `xtr-base-en-int8w.mlpackage`. The script runs
+   the in-script INT8w-vs-FP32 CoreML parity check before exiting.
+3. Place the asset wherever convenient and set
+   `SWITCHCRAFT_XTR_MLPACKAGE_INT8W=<path>` so the asset-gated Swift
+   tests can find it.
+
+### Why this rung first
+
+The ladder in `docs/Plan.md` lists INT8w as rung 1 of "If SmoothQuant
+fails" because it has the smallest possible scope: a post-processing
+pass over the existing FP32 asset, no PyTorch modifications, no
+custom MIL pass, no new precision-sensitive code paths, and identical
+runtime contract to the FP32 default. ADR 014(g) explicitly anticipated
+this work as Phase 2 quantisation that "expands the trade-off space
+without changing the FP32 build's parity contract".
