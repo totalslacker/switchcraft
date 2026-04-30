@@ -224,13 +224,14 @@ solving FP16:
   rather than the Linear inputs, anticipated by ADR 014(g)'s "model
   surgery to clip outliers pre-conversion" phrasing. Not investigated.
 
-ADR 014(g)'s ratchet condition for collapsing the FP32/FP16
-asymmetry — "custom MIL pass that injects FP32 promotion at the
-specific points where outliers actually happen" — is **falsified for
-this model**: the points where outliers happen are inside FP16
-Linears, not at points a MIL pass can isolate without extending the
-FP32 island to the entire encoder body. The ADR is not amended by
-this report; a future ADR-update PR may want to refine the phrasing.
+ADR 014(g) names "a custom MIL pass" alongside model surgery and
+distilled-model swaps as a ratchet condition for collapsing the
+FP32/FP16 asymmetry. The custom-MIL-pass leg of that condition is
+**falsified for this model**: the points where outliers actually
+happen are inside FP16 Linears, not at points a MIL pass can isolate
+without extending the FP32 island to the entire encoder body. The
+ADR is not amended by this report; a future ADR-update PR may want
+to refine the phrasing.
 
 ## References
 
