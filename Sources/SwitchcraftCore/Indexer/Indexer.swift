@@ -66,10 +66,16 @@ public actor Indexer {
     /// racing past the `pendingCount > 0` gate themselves. See `flush()`.
     private var flushInProgress: Bool = false
 
-    /// Continuations for concurrent `flush()` callers waiting on the
-    /// leader's in-flight flush. Resumed (with the leader's success or
-    /// the leader's thrown error) when the leader's body returns.
-    private var flushWaiters: [CheckedContinuation<Void, Swift.Error>] = []
+    /// Continuations for callers waiting on the leader's in-flight flush.
+    /// Holds both concurrent `flush()` callers and `add()` callers that
+    /// arrived while a flush was in progress (see `add()` for the
+    /// rationale on why `add` waits too). Resumed (with the leader's
+    /// success or the leader's thrown error) when the leader's body
+    /// returns. Element type matches `withCheckedThrowingContinuation`'s
+    /// yielded `CheckedContinuation<_, any Error>`. The `Swift.` prefix
+    /// is required because the unqualified `Error` would resolve to the
+    /// nested `Indexer.Error` enum in this scope.
+    private var flushWaiters: [CheckedContinuation<Void, any Swift.Error>] = []
 
     // MARK: - Init
 
