@@ -599,7 +599,22 @@ def apply_smoothquant_absorbed(
     handles = []
     blocks = pipeline.encoder.encoder.block
     for i, block in enumerate(blocks):
-        # layer[0] is SelfAttention, preceded by block.layer[0].layer_norm
+        # layer[0] is SelfAttention, preceded by block.layer[0].layer_norm.
+        # q/k/v share the post-norm input, so a single LayerNorm cannot
+        # express three distinct per-Linear input scales exactly. The
+        # absorbed pass therefore folds the geometric-mean scale s_mean
+        # into the norm and compensates each Linear's weight by
+        # `(s_mean / s_ind)` so the end-to-end product reproduces the
+        # un-smoothed model's output exactly:
+        #   Y_j = (X / s_mean) · (W_j · s_ind · (s_mean / s_ind))^T
+        #       = (X / s_mean) · (W_j · s_mean)^T
+        #       = X · W_j   (un-smoothed)
+        # This is mathematically equivalent to the un-smoothed model,
+        # which is also the property the hook formulation has by
+        # construction. The two formulations differ only in the
+        # *intermediate* magnitudes that flow through coremltools' FP16
+        # lowering — which is the whole point of running the confirming
+        # pass in this investigation.
         attn_norm = block.layer[0].layer_norm
         attn = block.layer[0].SelfAttention
         for sub in ("q", "k", "v"):
@@ -608,17 +623,6 @@ def apply_smoothquant_absorbed(
             linear = getattr(attn, sub)
             with torch.no_grad():
                 linear.weight.data = linear.weight.data * s.unsqueeze(0)
-                # Absorb 1/s into the preceding LayerNorm's per-channel
-                # weight. We can do this for the q/k/v group because
-                # they share the same input (post layer_norm). For the
-                # absorbed pass we use the elementwise mean of the three
-                # scales — the cleanest single-norm absorption — and
-                # leave the residual (s_indiv / s_mean) on the Linear
-                # weight by adjusting it again after the mean folding.
-                pass
-        # Fold the geometric-mean of (q,k,v) scales into the norm so all
-        # three Linears share the same upstream scaling, then carry the
-        # per-Linear residual on the Linear weight.
         s_q = scales[f"block-{i:02d}/self_attn.q"]
         s_k = scales[f"block-{i:02d}/self_attn.k"]
         s_v = scales[f"block-{i:02d}/self_attn.v"]
@@ -627,12 +631,6 @@ def apply_smoothquant_absorbed(
             attn_norm.weight.data = attn_norm.weight.data / s_mean.to(attn_norm.weight.device)
             for sub, s_ind in (("q", s_q), ("k", s_k), ("v", s_v)):
                 linear = getattr(attn, sub)
-                # We already multiplied weight by s_ind above; now divide
-                # by s_mean / 1 because the norm now divides by s_mean
-                # for all three. Net effective input-side scaling for
-                # sub `j` is s_mean (from norm) * (s_ind / s_mean) =
-                # s_ind. So we need linear.weight to carry an additional
-                # factor of s_mean / s_ind so the product matches.
                 residual = (s_mean / s_ind).to(linear.weight.device).to(
                     linear.weight.dtype
                 )
@@ -946,6 +944,8 @@ def run_one_attempt(
     tokenizer,
     out_dir: Path,
     keep_mlpackages: bool,
+    model_id: str = "google/xtr-base-en",
+    revision: str = DEFAULT_REVISION,
     formulation: str = "hooks",
     smooth_filter: Optional[set] = None,
 ) -> SweepResult:
@@ -990,8 +990,8 @@ def run_one_attempt(
         mlmodel = convert_to_coreml_fp16(
             traceable,
             out_path,
-            model_id="google/xtr-base-en",
-            revision=DEFAULT_REVISION,
+            model_id=model_id,
+            revision=revision,
         )
     except Exception as exc:  # noqa: BLE001
         convert_error = f"{type(exc).__name__}: {exc}"
@@ -1123,6 +1123,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not sweep:
         parser.error("--alpha-sweep produced no α values")
 
+    # Seed RNG so percentile sub-sampling in LayerStats and any downstream
+    # randomness is deterministic across runs — required so the committed
+    # profile JSON / heatmaps are reproducible.
+    import random as _random
+    import torch as _torch
+    _random.seed(0)
+    _torch.manual_seed(0)
+
     print(f"Loading {args.model_id} @ {args.revision}…")
     t0 = time.time()
     pipeline = build_pytorch_pipeline(args.model_id, args.revision)
@@ -1179,6 +1187,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             tokenizer=tokenizer,
             out_dir=args.out_dir,
             keep_mlpackages=args.keep_mlpackages,
+            model_id=args.model_id,
+            revision=args.revision,
             formulation="hooks",
         )
         results.append(res)
@@ -1198,8 +1208,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         # all). Matches the committed figures directory naming.
         best_alpha = sweep[0]
         print(
-            f"No usable α found in sweep; defaulting to sweep[0]={best_alpha} "
-            "for downstream figures and confirming passes."
+            f"No α produced usable rows in sweep (every variant's CoreML "
+            f"output was filtered out by MIN_NORM); defaulting to "
+            f"sweep[0]={best_alpha} for downstream figures and confirming "
+            "passes."
         )
     else:
         best_alpha = best.alpha
@@ -1237,17 +1249,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         f"Per-Linear global max|x| (post α={best_alpha})",
     )
 
-    # ---- Carve-out experiments at best α ----
-    # Run unconditionally on a no-go result too — the carve-out's "all
-    # variants behave the same" data is part of the report's evidence.
+    # ---- Carve-out experiment at best α ----
+    # Filtering every encoder Linear means no SmoothQuant is applied at
+    # all (the post-encoder projection is not in iter_target_linears, so
+    # "smooth nothing in the body" reduces to "smooth nothing"). This is
+    # the un-smoothed FP16 baseline — the configuration ADR 010(c) called
+    # out as broken. We keep it in the sweep as the no-smoothing control.
+    # Run unconditionally on a no-go result too: the control's "same zero
+    # output as every smoothed variant" reading is part of the report's
+    # evidence that the bottleneck is downstream of SmoothQuant, not
+    # inside it.
     if not args.skip_carveouts:
-        # 1) smooth body only, leave projection alone (the projection is
-        #    not in our target list anyway, so this is equivalent to the
-        #    main hooks run — record it for completeness).
-        # 2) un-smoothed body, smoothed projection only — control. Since
-        #    `projection` is outside the target set, "smoothed projection"
-        #    is implemented as: smooth nothing in body, hook only the
-        #    projection. We do that by filtering all encoder Linears.
         body_layer_names = {
             n for n, _ in iter_target_linears(pipeline.encoder)
         }
@@ -1255,11 +1267,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             pipeline_orig=pipeline,
             profile=pre_profile,
             alpha=best_alpha,
-            label=f"carveout-projection-only-alpha{best_alpha}",
+            label=f"baseline-no-smoothing-alpha{best_alpha}",
             fixture_inputs=parity_inputs,
             tokenizer=tokenizer,
             out_dir=args.out_dir,
             keep_mlpackages=args.keep_mlpackages,
+            model_id=args.model_id,
+            revision=args.revision,
             formulation="hooks",
             smooth_filter=body_layer_names,
         )
@@ -1279,6 +1293,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             tokenizer=tokenizer,
             out_dir=args.out_dir,
             keep_mlpackages=args.keep_mlpackages,
+            model_id=args.model_id,
+            revision=args.revision,
             formulation="absorbed",
         )
         results.append(absorbed)
