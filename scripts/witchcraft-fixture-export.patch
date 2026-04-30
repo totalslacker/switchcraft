@@ -1,0 +1,383 @@
+diff --git a/src/tests.rs b/src/tests.rs
+index 9d4aec4..f000fff 100644
+--- a/src/tests.rs
++++ b/src/tests.rs
+@@ -54,6 +54,373 @@ mod tests {
+     ];
+     const THRESHOLD: f32 = 0.7;
+
++    // -------------------------------------------------------------------------
++    // Switchcraft cross-stack fixture export (issue #28).
++    //
++    // Three `#[ignore]`d tests below produce the binary fixtures committed
++    // in the Switchcraft repository under `Tests/Fixtures/`:
++    //
++    //   * reference_centroids.{bin,json} — K-means centroids from the
++    //     33-fact corpus (the bucket `center` column, FP32 LE).
++    //   * reference_residuals.{bin,json} — deterministic input vectors
++    //     fed through `to_q4_bytes` / `from_companded_q4_bytes`, giving
++    //     ground-truth Q4 byte sequences and the corresponding
++    //     dequantised floats.
++    //   * reference_embeddings.{bin,json} — Witchcraft GGUF per-token
++    //     embeddings for a fixed set of inputs.
++    //
++    // Each test prints two stdout sections:
++    //
++    //   ---SWITCHCRAFT-<NAME>-JSON-BEGIN---  …JSON metadata…  ---END---
++    //   ---SWITCHCRAFT-<NAME>-BIN-BASE64-BEGIN---  …base64…  ---END---
++    //
++    // Distinct markers per fixture so the runner can extract each blob
++    // independently. See `scripts/witchcraft-fixture-export.patch`,
++    // `scripts/README.md`, and Switchcraft `adrs/013-reference-fixture-provenance.md`
++    // for the full regeneration procedure.
++    // -------------------------------------------------------------------------
++
++    /// Hex-encode a byte slice with lowercase digits.
++    fn hex_encode(bytes: &[u8]) -> String {
++        const HEX: &[u8; 16] = b"0123456789abcdef";
++        let mut out = String::with_capacity(bytes.len() * 2);
++        for b in bytes {
++            out.push(HEX[(b >> 4) as usize] as char);
++            out.push(HEX[(b & 0x0F) as usize] as char);
++        }
++        out
++    }
++
++    /// Encode an FP32 slice as little-endian raw bytes.
++    fn floats_to_le_bytes(values: &[f32]) -> Vec<u8> {
++        let mut out = Vec::with_capacity(values.len() * 4);
++        for v in values {
++            out.extend_from_slice(&v.to_le_bytes());
++        }
++        out
++    }
++
++    /// Minimal RFC 4648 base64 encoder. Inlined so the patch needs no
++    /// extra crate dependency in upstream Witchcraft's Cargo.toml.
++    fn base64_encode(input: &[u8]) -> String {
++        const ALPHABET: &[u8; 64] =
++            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
++        let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
++        let mut i = 0;
++        while i + 3 <= input.len() {
++            let n = ((input[i] as u32) << 16)
++                | ((input[i + 1] as u32) << 8)
++                | (input[i + 2] as u32);
++            out.push(ALPHABET[((n >> 18) & 0x3F) as usize] as char);
++            out.push(ALPHABET[((n >> 12) & 0x3F) as usize] as char);
++            out.push(ALPHABET[((n >> 6) & 0x3F) as usize] as char);
++            out.push(ALPHABET[(n & 0x3F) as usize] as char);
++            i += 3;
++        }
++        let remaining = input.len() - i;
++        if remaining == 1 {
++            let n = (input[i] as u32) << 16;
++            out.push(ALPHABET[((n >> 18) & 0x3F) as usize] as char);
++            out.push(ALPHABET[((n >> 12) & 0x3F) as usize] as char);
++            out.push('=');
++            out.push('=');
++        } else if remaining == 2 {
++            let n = ((input[i] as u32) << 16) | ((input[i + 1] as u32) << 8);
++            out.push(ALPHABET[((n >> 18) & 0x3F) as usize] as char);
++            out.push(ALPHABET[((n >> 12) & 0x3F) as usize] as char);
++            out.push(ALPHABET[((n >> 6) & 0x3F) as usize] as char);
++            out.push('=');
++        }
++        out
++    }
++
++    /// Emit centroid fixture: index the 33-fact corpus, dump (a) the
++    /// per-chunk embeddings fed to k-means and (b) the resulting bucket
++    /// centroids. The two regions live in one .bin so the Swift parity
++    /// test can re-run KMeans.cluster on identical floating-point inputs
++    /// (isolating the kmeans algorithm from cross-stack embedder drift).
++    ///
++    /// The .bin layout is:
++    ///
++    ///     [ inputs (rows × dims FP32 LE) ][ centroids (clusters × dims FP32 LE) ]
++    ///
++    /// The companion JSON describes both regions with byte offsets.
++    ///
++    /// NOTE: the SQL below assumes Witchcraft's per-chunk embeddings live
++    /// in an `embedding` table with a `value` BLOB column of FP32 LE
++    /// bytes. The actual schema may differ — adjust the SELECT to match
++    /// upstream. The patch fails the test if the byte length isn't a
++    /// multiple of `dims * 4`.
++    #[test]
++    #[ignore]
++    fn dump_reference_centroids_fixture() -> std::io::Result<()> {
++        let dir = tempdir().unwrap();
++        let path: PathBuf = dir.path().join("warp");
++        let mut db = DB::new(path.clone()).unwrap();
++        let device = crate::make_device();
++        let assets = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/assets"));
++        let embedder = crate::Embedder::new(&device, &assets).unwrap();
++
++        for (idx, body) in FACTS.iter().enumerate() {
++            let doc_id = idx.to_string();
++            let uuid = Uuid::new_v5(&Uuid::NAMESPACE_OID, doc_id.as_bytes());
++            db.add_doc(&uuid, None, &doc_id, body, None).unwrap();
++        }
++        crate::embed_chunks(&db, &embedder, None).unwrap();
++
++        let dims: usize = 128;
++
++        // Snapshot per-chunk per-token embeddings BEFORE indexing — this
++        // is what `index_chunks` will hand to k-means.
++        //
++        // Adjust column / table names below to match upstream Witchcraft's
++        // actual schema. Common variants seen in the codebase: `embedding`
++        // table with a `value` or `vector` BLOB column. The expected byte
++        // payload per row is `tokens * dims * 4`.
++        let mut inputs_blob = Vec::<u8>::new();
++        {
++            let mut stmt = db
++                .query("SELECT value FROM embedding ORDER BY rowid")
++                .unwrap();
++            let mut rows = stmt.query(()).unwrap();
++            while let Some(row) = rows.next().unwrap() {
++                let bytes: Vec<u8> = row.get(0).unwrap();
++                assert_eq!(
++                    bytes.len() % (dims * 4),
++                    0,
++                    "embedding payload length not a multiple of dims*4"
++                );
++                inputs_blob.extend_from_slice(&bytes);
++            }
++        }
++        let input_rows = inputs_blob.len() / (dims * 4);
++        assert!(input_rows > 0, "no embeddings dumped — adjust SELECT to match upstream schema");
++
++        // Now run indexing to produce centroids.
++        crate::index_chunks(&db, &device).unwrap();
++
++        // Pull centroids out of the bucket table. Per ADR 005 `center`
++        // is dims-bound FP32 LE. Stable order: rowid ascending.
++        let mut centroids_blob = Vec::<u8>::new();
++        let mut clusters = 0usize;
++        {
++            let mut stmt = db.query("SELECT center FROM bucket ORDER BY rowid").unwrap();
++            let mut rows = stmt.query(()).unwrap();
++            while let Some(row) = rows.next().unwrap() {
++                let center: Vec<u8> = row.get(0).unwrap();
++                centroids_blob.extend_from_slice(&center);
++                clusters += 1;
++            }
++        }
++        assert_eq!(
++            centroids_blob.len(),
++            clusters * dims * 4,
++            "bucket center byte length mismatch"
++        );
++
++        // Assemble combined blob: inputs first, then centroids.
++        let inputs_offset = 0usize;
++        let inputs_length = inputs_blob.len();
++        let centroids_offset = inputs_length;
++        let centroids_length = centroids_blob.len();
++        let mut blob = Vec::<u8>::with_capacity(inputs_length + centroids_length);
++        blob.extend_from_slice(&inputs_blob);
++        blob.extend_from_slice(&centroids_blob);
++
++        let commit = std::env::var("WITCHCRAFT_COMMIT")
++            .unwrap_or_else(|_| "UNKNOWN".to_string());
++        let now = chrono::Utc::now().to_rfc3339();
++
++        println!("---SWITCHCRAFT-CENTROIDS-JSON-BEGIN---");
++        println!("{{");
++        println!("  \"dims\": {dims},");
++        println!("  \"corpus\": \"facts_corpus.json\",");
++        println!("  \"inputs\": {{");
++        println!("    \"rows\": {input_rows},");
++        println!("    \"byteOffset\": {inputs_offset},");
++        println!("    \"byteLength\": {inputs_length}");
++        println!("  }},");
++        println!("  \"centroids\": {{");
++        println!("    \"clusters\": {clusters},");
++        println!("    \"byteOffset\": {centroids_offset},");
++        println!("    \"byteLength\": {centroids_length}");
++        println!("  }},");
++        println!("  \"provenance\": {{");
++        println!("    \"witchcraftCommit\": \"{commit}\",");
++        println!("    \"generatedAt\": \"{now}\",");
++        println!("    \"source\": \"embedding.value (input) + bucket.center (output) after index_chunks(33-fact corpus)\",");
++        println!("    \"k\": 32,");
++        println!("    \"tPrime\": 40000");
++        println!("  }}");
++        println!("}}");
++        println!("---SWITCHCRAFT-CENTROIDS-JSON-END---");
++
++        println!("---SWITCHCRAFT-CENTROIDS-BIN-BASE64-BEGIN---");
++        println!("{}", base64_encode(&blob));
++        println!("---SWITCHCRAFT-CENTROIDS-BIN-BASE64-END---");
++
++        db.clear();
++        db.shutdown();
++        Ok(())
++    }
++
++    /// Emit Q4 residual fixture: for a fixed deterministic set of input
++    /// vectors in residual-typical range, run `to_q4_bytes` (encoder)
++    /// and `from_companded_q4_bytes` (decoder), and emit both the
++    /// per-vector hex (input, q4 bytes) and the concatenated dequantised
++    /// floats blob.
++    #[test]
++    #[ignore]
++    fn dump_reference_residuals_fixture() -> std::io::Result<()> {
++        let dims: usize = 128;
++
++        // Hand-picked, deterministic input set. No RNG: keeps the
++        // fixture byte-stable across regenerations regardless of the
++        // host `rand` crate version. Each vector is length 128.
++        let mut vectors: Vec<(String, Vec<f32>)> = Vec::new();
++
++        // 1. All zeros — boundary case, every nibble should land on 7/8.
++        vectors.push(("zeros".to_string(), vec![0.0_f32; dims]));
++
++        // 2. Linearly-spaced sweep across the codec's operating range
++        //    [-0.25, 0.25]. Exercises every quantization bucket at least
++        //    once.
++        let mut sweep = Vec::with_capacity(dims);
++        for i in 0..dims {
++            let t = (i as f32) / ((dims - 1) as f32);
++            sweep.push((t - 0.5) * 0.5);
++        }
++        vectors.push(("sweep_neg025_to_025".to_string(), sweep));
++
++        // 3. Alternating ±0.1 — covers symmetric near-zero residuals.
++        let alt: Vec<f32> = (0..dims)
++            .map(|i| if i % 2 == 0 { 0.1 } else { -0.1 })
++            .collect();
++        vectors.push(("alternating_pm01".to_string(), alt));
++
++        // 4. Saturating endpoints — values beyond ±0.25 should clamp
++        //    cleanly. Half the row is +0.5, half is -0.5.
++        let mut sat = Vec::with_capacity(dims);
++        for i in 0..dims {
++            sat.push(if i < dims / 2 { 0.5 } else { -0.5 });
++        }
++        vectors.push(("saturating_pm05".to_string(), sat));
++
++        let commit = std::env::var("WITCHCRAFT_COMMIT")
++            .unwrap_or_else(|_| "UNKNOWN".to_string());
++        let now = chrono::Utc::now().to_rfc3339();
++
++        // Build dequantised floats blob (concatenated row-major) and a
++        // per-vector index entry.
++        let mut dequant_blob = Vec::<u8>::new();
++        let mut entries = Vec::<String>::new();
++        let mut byte_offset = 0usize;
++        for (name, input) in &vectors {
++            let q4: Vec<u8> = crate::to_q4_bytes(input);
++            let dequant: Vec<f32> = crate::from_companded_q4_bytes(&q4);
++            assert_eq!(dequant.len(), input.len());
++            let dequant_bytes = floats_to_le_bytes(&dequant);
++            let byte_length = dequant_bytes.len();
++            let input_bytes = floats_to_le_bytes(input);
++            entries.push(format!(
++                "    {{\n      \"name\": \"{name}\",\n      \"dims\": {dims},\n      \"inputFloatsHex\": \"{input_hex}\",\n      \"q4BytesHex\": \"{q4_hex}\",\n      \"byteOffset\": {byte_offset},\n      \"byteLength\": {byte_length}\n    }}",
++                input_hex = hex_encode(&input_bytes),
++                q4_hex = hex_encode(&q4),
++            ));
++            dequant_blob.extend_from_slice(&dequant_bytes);
++            byte_offset += byte_length;
++        }
++
++        println!("---SWITCHCRAFT-RESIDUALS-JSON-BEGIN---");
++        println!("{{");
++        println!("  \"dims\": {dims},");
++        println!("  \"vectors\": [");
++        for (i, e) in entries.iter().enumerate() {
++            let comma = if i + 1 < entries.len() { "," } else { "" };
++            println!("{e}{comma}");
++        }
++        println!("  ],");
++        println!("  \"provenance\": {{");
++        println!("    \"witchcraftCommit\": \"{commit}\",");
++        println!("    \"generatedAt\": \"{now}\",");
++        println!("    \"source\": \"to_q4_bytes / from_companded_q4_bytes (packops.rs)\"");
++        println!("  }}");
++        println!("}}");
++        println!("---SWITCHCRAFT-RESIDUALS-JSON-END---");
++
++        println!("---SWITCHCRAFT-RESIDUALS-BIN-BASE64-BEGIN---");
++        println!("{}", base64_encode(&dequant_blob));
++        println!("---SWITCHCRAFT-RESIDUALS-BIN-BASE64-END---");
++
++        Ok(())
++    }
++
++    /// Emit GGUF embedding fixture: run Witchcraft's Embedder against a
++    /// subset of the inputs already present in the Switchcraft PyTorch
++    /// fixture (`xtr-base-en.embeddings.json`). Per-token rows.
++    #[test]
++    #[ignore]
++    fn dump_reference_embeddings_fixture() -> std::io::Result<()> {
++        let device = crate::make_device();
++        let assets = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/assets"));
++        let embedder = crate::Embedder::new(&device, &assets).unwrap();
++
++        // Subset of `Tests/Fixtures/xtr-base-en.embeddings.json` inputs.
++        // Keep this list in sync with the Switchcraft side; ADR 013
++        // documents the binding to the PyTorch fixture's named entries.
++        let inputs: &[(&str, &str)] = &[
++            ("short", "the apple is red and round"),
++            ("paragraph", "Witchcraft is a Rust reimplementation of XTR-Warp. It implements token-level semantic search with sub-linear retrieval. Switchcraft is its Swift port, targeting Apple platforms."),
++        ];
++
++        let dims: usize = 128;
++        let mut blob = Vec::<u8>::new();
++        let mut entries = Vec::<String>::new();
++        let mut byte_offset = 0usize;
++        for (name, input) in inputs {
++            let (rows_2d, _) = embedder.embed(input).unwrap();
++            // `embed` returns Vec<Vec<f32>> with one inner vector per
++            // token (sliding window already applied). Concatenate.
++            let mut flat: Vec<f32> = Vec::new();
++            for row in rows_2d.iter() {
++                flat.extend_from_slice(row);
++            }
++            let row_count = flat.len() / dims;
++            assert_eq!(flat.len(), row_count * dims, "embedding row length not a multiple of dims");
++            let bytes = floats_to_le_bytes(&flat);
++            let byte_length = bytes.len();
++            let escaped = input.replace('\\', "\\\\").replace('"', "\\\"");
++            entries.push(format!(
++                "    {{\n      \"name\": \"{name}\",\n      \"input\": \"{escaped}\",\n      \"rows\": {row_count},\n      \"byteOffset\": {byte_offset},\n      \"byteLength\": {byte_length}\n    }}"
++            ));
++            blob.extend_from_slice(&bytes);
++            byte_offset += byte_length;
++        }
++
++        let commit = std::env::var("WITCHCRAFT_COMMIT")
++            .unwrap_or_else(|_| "UNKNOWN".to_string());
++        let now = chrono::Utc::now().to_rfc3339();
++
++        println!("---SWITCHCRAFT-EMBEDDINGS-JSON-BEGIN---");
++        println!("{{");
++        println!("  \"dims\": {dims},");
++        println!("  \"fixtures\": [");
++        for (i, e) in entries.iter().enumerate() {
++            let comma = if i + 1 < entries.len() { "," } else { "" };
++            println!("{e}{comma}");
++        }
++        println!("  ],");
++        println!("  \"provenance\": {{");
++        println!("    \"witchcraftCommit\": \"{commit}\",");
++        println!("    \"generatedAt\": \"{now}\",");
++        println!("    \"source\": \"crate::Embedder::embed (Q4K GGUF)\",");
++        println!("    \"computeUnits\": \"all (Metal on Apple Silicon, fbgemm elsewhere)\"");
++        println!("  }}");
++        println!("}}");
++        println!("---SWITCHCRAFT-EMBEDDINGS-JSON-END---");
++
++        println!("---SWITCHCRAFT-EMBEDDINGS-BIN-BASE64-BEGIN---");
++        println!("{}", base64_encode(&blob));
++        println!("---SWITCHCRAFT-EMBEDDINGS-BIN-BASE64-END---");
++
++        Ok(())
++    }
++
+     #[test]
+     fn test_end_to_end() -> std::io::Result<()> {
+         let dir = tempdir().unwrap();

@@ -156,4 +156,106 @@ struct KMeansTests {
             #expect(abs(Self.l2Norm(slice) - 1.0) < 1e-5)
         }
     }
+
+    // MARK: - Cross-stack reference parity (issue #28 / ADR 013)
+
+    /// Validate that the committed Witchcraft reference centroids are
+    /// well-formed: shape matches the JSON index, and every centroid is
+    /// L2-normalised within FP tolerance (Witchcraft writes
+    /// L2-normalised centroids per its kmeans definition).
+    ///
+    /// Skips when `reference_centroids.{bin,json}` are not present in
+    /// the test bundle (fresh checkout where fixtures haven't been
+    /// regenerated yet — see `adrs/013-reference-fixture-provenance.md`
+    /// and `scripts/witchcraft-fixture-export.patch`).
+    @Test(
+        "reference centroids fixture is well-formed (L2-normalised, dims-consistent)",
+        .enabled(if: ReferenceCentroidsFixture.isAvailable)
+    )
+    func referenceCentroidsStructure() throws {
+        let index = try ReferenceCentroidsFixture.loadIndex()
+        let blob = try ReferenceCentroidsFixture.loadBlob()
+
+        let centroids = ReferenceCentroidsFixture.centroids(index: index, blob: blob)
+        let dims = index.dims
+        guard let clusters = index.centroids.clusters else {
+            Issue.record("centroids region missing clusters count")
+            return
+        }
+        #expect(centroids.count == clusters * dims)
+
+        for c in 0..<clusters {
+            let slice = centroids[(c * dims)..<((c + 1) * dims)]
+            let norm = Self.l2Norm(slice)
+            #expect(
+                abs(norm - 1.0) < 1e-3,
+                "centroid \(c) not L2-normalised: ‖·‖ = \(norm)"
+            )
+        }
+    }
+
+    /// Cross-implementation k-means parity: re-run Swift KMeans on the
+    /// SAME float inputs Witchcraft fed to its kmeans, and verify each
+    /// Swift centroid finds a near-match in the reference centroid set.
+    ///
+    /// We compare via "every Swift centroid has a reference centroid
+    /// with cosine ≥ threshold" rather than a fixed permutation, because
+    /// k-means cluster ordering is implementation-defined. Threshold is
+    /// 0.99 (per the plan-stage risk note: cluster count for the 33-fact
+    /// corpus is small enough that Lloyd's iteration may converge to
+    /// different local minima across Swift and Rust). ADR 013 documents
+    /// the chosen tolerance.
+    @Test(
+        "Swift k-means on the reference inputs matches Witchcraft centroids (cosine ≥ 0.99)",
+        .enabled(if: ReferenceCentroidsFixture.isAvailable)
+    )
+    func referenceCentroidsParity() throws {
+        let index = try ReferenceCentroidsFixture.loadIndex()
+        let blob = try ReferenceCentroidsFixture.loadBlob()
+
+        let dims = index.dims
+        guard
+            let inputRows = index.inputs.rows,
+            let clusters = index.centroids.clusters
+        else {
+            Issue.record("centroids fixture missing rows/clusters metadata")
+            return
+        }
+        let inputs = ReferenceCentroidsFixture.inputs(index: index, blob: blob)
+        let referenceCentroids = ReferenceCentroidsFixture.centroids(
+            index: index, blob: blob
+        )
+        #expect(inputs.count == inputRows * dims)
+        #expect(referenceCentroids.count == clusters * dims)
+
+        var rng = SplitMix64(seed: 0xC02_8C0DE_CAFE)
+        let result = KMeans.cluster(
+            data: inputs,
+            dims: dims,
+            clusters: clusters,
+            maxIterations: 25,
+            rng: &rng
+        )
+
+        // For each Swift centroid, find the closest reference centroid
+        // by cosine similarity. Inputs are pre-normalised (Witchcraft's
+        // kmeans expects L2-normalised vectors) so cosine == dot.
+        var minMaxCosine: Float = 1.0
+        for s in 0..<clusters {
+            var best: Float = -.infinity
+            for r in 0..<clusters {
+                var dot: Float = 0
+                for d in 0..<dims {
+                    dot += result.centroids[s * dims + d]
+                        * referenceCentroids[r * dims + d]
+                }
+                if dot > best { best = dot }
+            }
+            if best < minMaxCosine { minMaxCosine = best }
+        }
+        #expect(
+            minMaxCosine >= 0.99,
+            "min-over-Swift-centroids of max-cosine-to-reference = \(minMaxCosine) < 0.99"
+        )
+    }
 }

@@ -153,4 +153,61 @@ struct Q4CodecTests {
         let b = Q4Codec.encodeResiduals(values)
         #expect(a == b)
     }
+
+    // MARK: - Cross-stack reference parity (issue #28 / ADR 013)
+
+    /// Cross-implementation Q4 codec parity. For each fixture vector:
+    ///
+    ///   1. Encoder parity: `Q4Codec.encodeResiduals(input)` must equal
+    ///      Witchcraft's `to_q4_bytes(input)` byte-for-byte.
+    ///   2. Decoder parity: `Q4Codec.decodeResiduals(q4_bytes)` must
+    ///      MSE-match Witchcraft's `from_companded_q4_bytes(q4_bytes)`
+    ///      within the round-trip MSE bound (≤1e-3 per ADR 003(a) and
+    ///      this suite's existing `residualRoundTripMSE` test).
+    ///
+    /// Skips when `reference_residuals.{bin,json}` are not present in
+    /// the test bundle (fresh checkout where fixtures haven't been
+    /// regenerated yet).
+    @Test(
+        "Q4 codec matches Witchcraft reference: byte-exact encode + MSE ≤ 1e-3 decode",
+        .enabled(if: ReferenceResidualsFixture.isAvailable)
+    )
+    func referenceResidualsParity() throws {
+        let index = try ReferenceResidualsFixture.loadIndex()
+        let blob = try ReferenceResidualsFixture.loadBlob()
+
+        for entry in index.vectors {
+            let input = ReferenceFixtureHex.decodeFloats(
+                entry.inputFloatsHex, count: entry.dims
+            )
+            guard let referenceQ4 = ReferenceFixtureHex.decode(entry.q4BytesHex) else {
+                Issue.record("\(entry.name): malformed q4BytesHex")
+                continue
+            }
+            let referenceDequant = ReferenceResidualsFixture.dequantisedFloats(
+                for: entry, blob: blob
+            )
+
+            // Encoder parity: byte-exact.
+            let swiftQ4 = Q4Codec.encodeResiduals(input)
+            #expect(
+                swiftQ4 == referenceQ4,
+                "\(entry.name): Q4 byte mismatch — Swift produced \(swiftQ4.count) bytes, Witchcraft \(referenceQ4.count)"
+            )
+
+            // Decoder parity: MSE within ADR 003(a) bound.
+            let swiftDequant = Q4Codec.decodeResiduals(referenceQ4)
+            #expect(swiftDequant.count == referenceDequant.count)
+            var sse: Double = 0
+            for i in 0..<min(swiftDequant.count, referenceDequant.count) {
+                let d = Double(swiftDequant[i] - referenceDequant[i])
+                sse += d * d
+            }
+            let mse = sse / Double(swiftDequant.count)
+            #expect(
+                mse < 1e-3,
+                "\(entry.name): decoder MSE \(mse) ≥ 1e-3"
+            )
+        }
+    }
 }

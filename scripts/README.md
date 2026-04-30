@@ -159,6 +159,132 @@ the way `test_end_to_end` does, runs every query through
 post-processing roll), and prints the captured `(docId, score)` lists
 between the marker lines for the runner to capture.
 
+## `witchcraft-fixture-export.patch` — regenerating cross-stack reference fixtures
+
+Three Switchcraft tests (`KMeansTests.referenceCentroidsParity`,
+`Q4CodecTests.referenceResidualsParity`,
+`CrossStackEmbeddingParityTests.referenceEmbeddingsParity`) compare
+Switchcraft's k-means / Q4 codec / CoreML embedder against ground-truth
+reference data produced by upstream Witchcraft. The reference data
+lives in:
+
+* `Tests/Fixtures/reference_centroids.{bin,json}`
+* `Tests/Fixtures/reference_residuals.{bin,json}`
+* `Tests/Fixtures/reference_embeddings.{bin,json}`
+
+This patch regenerates all three fixture pairs in one Witchcraft test
+run.
+
+See `adrs/013-reference-fixture-provenance.md` for the full provenance,
+tolerance policy, and rationale for the patch-based generator.
+
+### Setup
+
+Same one-time setup as `witchcraft-fact-dump.patch` above:
+
+```bash
+WITCHCRAFT_COMMIT=6ad59e51cfc89bcfb20756e3f05cf9429b7cb55f
+git clone https://github.com/dropbox/witchcraft /tmp/witchcraft
+cd /tmp/witchcraft
+git checkout "$WITCHCRAFT_COMMIT"
+make download                       # ~62 MB GGUF + tokenizer + config
+git apply /path/to/switchcraft/scripts/witchcraft-fixture-export.patch
+```
+
+> The fact-dump patch and the fixture-export patch insert at the **same
+> anchor** in `src/tests.rs`. Apply only one at a time. To regenerate
+> both fact and fixture data, apply one, run, `git stash` or `git
+> checkout src/tests.rs`, then apply the other.
+
+> **`pub(crate)` visibility note**: the patch calls `crate::to_q4_bytes`
+> and `crate::from_companded_q4_bytes` directly. If upstream renames or
+> re-scopes those items, add a `#[cfg(test)] pub use` shim inside the
+> patch (still a single-file diff). The `dump_reference_centroids_fixture`
+> SQL also assumes `embedding.value` and `bucket.center` are the input/
+> output BLOB columns — adjust the SELECT statements if the schema has
+> moved.
+
+### Run
+
+The patch adds three `#[ignore]`d tests:
+
+| Fixture                        | Test name                              |
+|-------------------------------|----------------------------------------|
+| `reference_centroids.{bin,json}` | `dump_reference_centroids_fixture`     |
+| `reference_residuals.{bin,json}` | `dump_reference_residuals_fixture`     |
+| `reference_embeddings.{bin,json}`| `dump_reference_embeddings_fixture`    |
+
+Each test prints two stdout sections, framed by markers:
+
+```
+---SWITCHCRAFT-<NAME>-JSON-BEGIN---
+…JSON metadata…
+---SWITCHCRAFT-<NAME>-JSON-END---
+---SWITCHCRAFT-<NAME>-BIN-BASE64-BEGIN---
+…base64-encoded raw FP32 LE blob…
+---SWITCHCRAFT-<NAME>-BIN-BASE64-END---
+```
+
+Run all three at once:
+
+```bash
+WITCHCRAFT_COMMIT=$(git rev-parse HEAD) cargo test \
+    --features t5-quantized \
+    --lib \
+    -- --nocapture --include-ignored \
+    tests::tests::dump_reference_centroids_fixture \
+    tests::tests::dump_reference_residuals_fixture \
+    tests::tests::dump_reference_embeddings_fixture \
+    > /tmp/switchcraft-fixtures.out 2>&1
+```
+
+### Extract
+
+Per-fixture extraction follows the same `awk`-between-markers pattern
+as `witchcraft-fact-dump.patch`. JSON regions go to `.json` files,
+base64 regions decode into `.bin` files:
+
+```bash
+DEST=/path/to/switchcraft/Tests/Fixtures
+SRC=/tmp/switchcraft-fixtures.out
+
+for NAME in CENTROIDS RESIDUALS EMBEDDINGS; do
+    LOWER=$(echo "$NAME" | tr A-Z a-z)
+    awk -v b="---SWITCHCRAFT-${NAME}-JSON-BEGIN---" \
+        -v e="---SWITCHCRAFT-${NAME}-JSON-END---" \
+        '$0==b{flag=1; next} $0==e{flag=0} flag' "$SRC" \
+        > "$DEST/reference_${LOWER}.json"
+    awk -v b="---SWITCHCRAFT-${NAME}-BIN-BASE64-BEGIN---" \
+        -v e="---SWITCHCRAFT-${NAME}-BIN-BASE64-END---" \
+        '$0==b{flag=1; next} $0==e{flag=0} flag' "$SRC" \
+        | base64 --decode \
+        > "$DEST/reference_${LOWER}.bin"
+done
+```
+
+Validate:
+
+```bash
+cd /path/to/switchcraft
+for f in reference_centroids reference_residuals reference_embeddings; do
+    python3 -m json.tool < "Tests/Fixtures/${f}.json" > /dev/null
+    test -s "Tests/Fixtures/${f}.bin"
+done
+swift test --filter "Reference"
+```
+
+If `swift test` is silent on the new tests, double-check the JSON files
+contain a valid `provenance.witchcraftCommit` matching the pin above —
+the loaders fail-fast on missing provenance fields.
+
+### Why patch-based instead of a Cargo binary
+
+ADR 013(b) is the long form. Short version: Witchcraft's `kmeans`, Q4
+codec, and bucket-centroid SQLite accessors are `pub(crate)` and not
+reachable from an external crate. Adding `#[ignore]`d tests inside
+upstream `src/tests.rs` reuses the existing `FACTS` constants and
+private-API access without requiring upstream to publish anything.
+
 ### Notes on score comparability
 
 - `match_centroids` is the closest analogue of Switchcraft's
