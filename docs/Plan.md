@@ -528,18 +528,28 @@ Generate reference data from the Rust implementation once and commit to the test
 
 ```
 Tests/Fixtures/
-├── facts_corpus.json           # 33 facts with expected search results
-├── reference_embeddings.bin    # T5 token embeddings for known inputs
-├── reference_centroids.bin     # K-means centroids for known corpus
-└── reference_residuals.bin     # Q4 residuals for codec validation
+├── facts_corpus.json                # 33 facts with expected search results
+├── xtr-base-en.embeddings.bin       # PyTorch reference T5 token embeddings (CoreML ≈ PyTorch gate)
+├── reference_centroids.bin          # Witchcraft GGUF: kmeans inputs + bucket centroids
+├── reference_residuals.bin          # Witchcraft Q4 codec round-trip ground truth
+└── reference_embeddings.bin         # Witchcraft GGUF per-token embeddings (cross-stack parity)
 ```
+
+Two distinct embedding fixtures live under this tree:
+
+- `xtr-base-en.embeddings.bin` — produced by `scripts/convert-xtr-to-coreml.py`. **Source: PyTorch.** Used by `T5CoreMLEmbedderTests.fixtureParity` to gate CoreML output against the PyTorch reference (≥0.999 mean cosine).
+- `reference_embeddings.bin` — produced by `scripts/witchcraft-fixture-export.patch`. **Source: Rust Witchcraft / Q4K GGUF.** Used by `CrossStackEmbeddingParityTests` to gate Switchcraft's CoreML output against the Witchcraft GGUF stack (±0.025 per ADR 010(h)).
+
+See `adrs/013-reference-fixture-provenance.md` for the full provenance, regeneration policy, and tolerance bounds.
 
 Fixture deliverables:
 
 - [x] `facts_corpus.json`
-- [x] `reference_embeddings.bin` (committed as `xtr-base-en.embeddings.bin` + index JSON; produced by `scripts/convert-xtr-to-coreml.py`)
-- [ ] `reference_centroids.bin`
-- [ ] `reference_residuals.bin`
+- [x] `xtr-base-en.embeddings.bin` — PyTorch-side T5 token embedding reference (committed; produced by `scripts/convert-xtr-to-coreml.py`)
+- [x] Reference fixtures scaffolding (loaders, parity tests, generator patch, ADR 013) — see issue #28
+- [ ] `reference_centroids.bin` — produced by `scripts/witchcraft-fixture-export.patch` (regenerate on a Witchcraft checkout per `scripts/README.md`)
+- [ ] `reference_residuals.bin` — produced by `scripts/witchcraft-fixture-export.patch`
+- [ ] `reference_embeddings.bin` — produced by `scripts/witchcraft-fixture-export.patch`
 - [x] NFCorpus setup script + README documenting `SWITCHCRAFT_NFCORPUS_DIR` (academic-use-only dataset; not committed — `scripts/fetch-nfcorpus.sh` populates a developer-supplied directory)
 
 This allows the Swift tests to validate correctness without running the Rust implementation — just compare against the committed reference data.
