@@ -10,7 +10,7 @@ No Swift, Go, Java, Kotlin, or TypeScript ports of XTR-Warp / Witchcraft current
 
 High-level phases. Detailed checklists live in each section below — keep both in sync.
 
-- [ ] **Phase 1: MVP** — port Witchcraft to Swift, SQLite-backed, passing the upstream test corpus
+- [x] **Phase 1: MVP** — port Witchcraft to Swift, SQLite-backed, passing the upstream test corpus
 - [ ] **Phase 2: Production optimization** — Metal kernels, caching, concurrency improvements
 - [ ] **Open source release** — Apache 2.0 Swift package on SPM
 
@@ -373,7 +373,7 @@ Deliverables:
 
 - [x] 33-fact corpus ported verbatim, queries pass with same retrieval / ranking / scores (top-1 strict, top-3 set, scores ±0.025 — see ADR 010(h) for the FP32-vs-Q4K precision rationale)
 - [x] NFCorpus benchmark pipeline ported, NDCG@10 ∈ [0.31, 0.33]
-- [ ] Bit-exact embedding validation against Candle reference outputs
+- [x] Embedding parity validation: PyTorch ≥0.999 cosine (per `T5CoreMLEmbedderTests.fixtureParity`, ADR 010(c)) + Witchcraft GGUF ±0.025 cross-stack (per `CrossStackEmbeddingParityTests`, ADR 010(h)). Bit-exact against Candle is unreachable by construction — Switchcraft runs FP32 compute / FP16 outputs, Witchcraft runs Q4K GGUF + Q8 attention; the precision pair cannot produce bit-equal floats. The two tolerances above are the strongest correctness gates the precision pair admits.
 
 #### Port Witchcraft's 33-Fact Corpus Verbatim
 
