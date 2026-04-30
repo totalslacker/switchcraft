@@ -326,11 +326,124 @@ Track progress by checking off items as they land. Effort estimates and notes fo
 
 ### Phase 2: Production Optimization
 
+- [ ] **SmoothQuant FP16 conversion path** (size + speed + ANE eligibility) — see "SmoothQuant FP16 path" below
 - [ ] Metal compute shaders for hot paths (Q4 dequant + matmul, centroid similarity, residual scoring)
 - [ ] LRU caching for query embeddings
 - [ ] Background indexing pipeline
 - [ ] Parallel bucket search
 - [ ] Batch document processing
+
+#### SmoothQuant FP16 path
+
+The current `.mlpackage` ships at FP32 compute / FP16 outputs / ~430 MB
+because blanket FP16 conversion of `google/xtr-base-en` produces NaN
+on this graph (T5 activation outliers + L2-norm overflow; see ADRs
+010(c) and 014 for the full rationale). The strategic fix is
+**SmoothQuant** (Xiao et al., NeurIPS 2023) — a pre-conversion
+PyTorch transform that re-parameterises the model so activations
+don't have outliers anymore, unblocking FP16 conversion.
+
+If SmoothQuant works on `google/xtr-base-en`, the resulting model is
+**simultaneously**:
+
+- ~80 MB on disk (matches Witchcraft) — 5× smaller than the current
+  FP32 build.
+- ~2× faster matmul on Apple GPU (FP16 ops are double-throughput).
+- **ANE-eligible** — FP16 weights + FP16 activations is the Apple
+  Neural Engine's happy path, dramatically faster and more
+  power-efficient than GPU compute for transformer encoders.
+- Tighter cross-stack parity with Witchcraft (FP16-vs-Q4K is closer
+  than FP32-vs-Q4K), so ADR 010(h)'s ±0.025 tolerance can ratchet
+  back toward ±0.01.
+
+Three wins for one investment, which is why this is the strategic
+top-of-Phase-2 item.
+
+##### Phasing
+
+1. **Investigation issue** (separate, file before any other work):
+   profile activation distributions in the encoder, implement
+   SmoothQuant scaling in PyTorch, attempt coremltools FP16 export of
+   the smoothed model, run parity vs FP32 PyTorch reference. Output:
+   feasibility report + go/no-go signal + recommended parameters
+   (α value, per-layer policy, calibration set size). **Touches no
+   `Sources/` code; produces a `scripts/investigate-smoothquant.py`
+   plus a short report under `docs/investigations/`.**
+2. **Implementation issues** (only if investigation says go):
+   modify `scripts/convert-xtr-to-coreml.py` to apply SmoothQuant
+   before export; build the FP16 `.mlpackage` variant; ship it
+   alongside the existing FP32 variant; update parity gates; amend
+   ADR 010(c) with the new precision contract.
+3. **Default flip** (final PR): switch the default
+   `T5CoreMLEmbedder.init` to use the FP16 variant; deprecate / remove
+   the FP32 variant per a documented migration window.
+
+##### Multi-variant `.mlpackage` shipping
+
+Throughout the campaign, **the FP32 build remains the default**. The
+FP16 variant is opt-in via init parameter or env var until the very
+last "default flip" PR. This keeps `main` continuously usable for
+downstream consumers (e.g. SafariUnfucker) — they can build against
+`main` at any commit during the SmoothQuant campaign without their
+embeddings becoming stale until they explicitly opt in.
+
+The cost of switching variants for a downstream consumer is
+**reindexing the corpus** — embeddings stored against the FP32 model
+are not interchangeable with embeddings stored against the FP16
+model (precision pair differs). This is the standard "model swap =
+reindex" deal documented elsewhere; consumers know to plan for it.
+
+The intended end state is shipping multiple variants that consumers
+can choose between based on their constraints:
+
+| Variant | Asset | Compute | Use case |
+|---|---|---|---|
+| `xtr-base-en-fp32.mlpackage` | ~430 MB | FP32 GPU/CPU | Maximum precision, server-side macOS |
+| `xtr-base-en-fp16.mlpackage` (post-SmoothQuant) | ~80 MB | FP16 ANE/GPU | iOS apps, max speed + power |
+| `xtr-base-en-int8w.mlpackage` (fallback if SmoothQuant fails) | ~110 MB | FP32 GPU/CPU | Size-constrained, current latency |
+
+##### Branching strategy
+
+Despite the multi-PR shape, **all SmoothQuant work lands directly to
+`main`** rather than a long-lived `main-smoothquant` feature branch.
+Reasons:
+
+- The Phase 1 pattern — every PR green, every commit ADR-aligned,
+  pre-commit + pre-merge hard rules — relies on `main` being the
+  single integration target. Re-targeting Fabrik tooling, CI
+  triggers, project board automation, and yolo-merge logic at a side
+  branch costs engineering time that's better spent on SmoothQuant
+  itself.
+- The "FP16 variant is opt-in until the final flip" pattern preserves
+  `main` as continuously usable for downstream consumers without the
+  isolation a side branch would provide. ADR 010(c) is not amended
+  until the implementation issue lands a working FP16 variant; until
+  then the precision contract on `main` is unchanged.
+- If during step 2 the implementation work turns out to be much
+  bigger than expected (e.g. coremltools beta upgrade, model surgery
+  beyond SmoothQuant, 10+ PR rewrite), branch strategy can be
+  revisited with concrete data. Until then, branching adds bookkeeping
+  without unlocking anything.
+
+##### If SmoothQuant fails
+
+The investigation produces a definitive go/no-go signal. If no-go,
+options in order of preference:
+
+1. **INT8 weight-only quantisation** via
+   `coremltools.optimize.coreml.linear_quantize_weights()`. Gives
+   ~110 MB asset, no compute speedup, no ANE eligibility. Bounded
+   scope, well-understood. Ships a size-only win.
+2. **Custom MIL pass** that injects FP32 promotion at exactly the
+   T5 outlier sites coremltools' op_selector can't reach. Higher
+   risk; depends on coremltools internals.
+3. **Switch model** (e.g. distilled MiniLM-128). Reluctant choice —
+   loses comparability with Witchcraft, the NDCG@10 reference point,
+   and most cross-stack parity gates. Only legitimate if upstream
+   Witchcraft also switches.
+4. **Accept FP32 as the long-term answer.** Document the size and
+   ANE limitations; lean on Phase 2's other optimisations (Metal
+   shaders, parallel bucket search) for performance gains.
 
 ---
 
