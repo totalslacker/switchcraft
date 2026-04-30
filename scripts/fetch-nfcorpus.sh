@@ -78,7 +78,7 @@ for entry in "${FILES[@]}"; do
 
     echo "  → ${remote}"
     curl --fail --silent --show-error --location --output "$compressed" "$url"
-    zstd --decompress --quiet --force --output-file "$out" "$compressed"
+    zstd --decompress --stdout --quiet --force "$compressed" >"$out"
 done
 
 echo "Done. Files written:"
