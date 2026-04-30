@@ -46,7 +46,7 @@ import shutil
 import sys
 import time
 import traceback
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
@@ -1081,7 +1081,7 @@ def run_island(
     )
     return ConversionRecord(
         label=label,
-        island=island if island and island != "__fp32__" else island,
+        island=island,
         convert_seconds=convert_seconds,
         n_promoted=n_promoted,
         n_total_ops=n_total_ops,
