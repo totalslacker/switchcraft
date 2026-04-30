@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// Metaspace decoder: reconstructs text from token strings by reversing the ▁ encoding.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// TemplateProcessing post-processor: appends special tokens per a single/pair template.

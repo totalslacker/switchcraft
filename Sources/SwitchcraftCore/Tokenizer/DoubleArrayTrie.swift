@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// DoubleArray trie decoder for the `precompiled_charsmap` binary embedded in

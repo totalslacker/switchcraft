@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// Swift port of the HuggingFace `tokenizers` Unigram (SentencePiece) pipeline for

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// One entry in a bucket's `indices` blob: a `(chunkID, tokenOffset)` tuple

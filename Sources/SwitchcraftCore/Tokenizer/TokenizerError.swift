@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 public enum TokenizerError: Error, @unchecked Sendable {
     case fileNotFound(path: String)
     case ioError(path: String, underlying: any Error)

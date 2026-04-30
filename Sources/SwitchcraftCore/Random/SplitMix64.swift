@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// SplitMix64 — small, fast, seedable 64-bit PRNG.
 ///
 /// Used as the default seedable RNG in algorithms that take an `inout
