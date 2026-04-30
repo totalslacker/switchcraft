@@ -1,0 +1,64 @@
+Switchcraft
+Copyright 2026 The Switchcraft Authors.
+
+This product includes software developed by The Switchcraft Authors and is
+licensed under the Apache License, Version 2.0 (the "License"); you may not
+use this product except in compliance with the License. You may obtain a copy
+of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+This product includes or derives from the following third-party software,
+each licensed under the Apache License, Version 2.0. Per §4(d) of that
+license, the original attribution notices are reproduced below.
+
+------------------------------------------------------------------------
+1. Witchcraft (Dropbox, Inc.)
+------------------------------------------------------------------------
+Source:  https://github.com/dropbox/witchcraft
+License: Apache License 2.0
+Copyright: Copyright (c) Dropbox, Inc. and the Witchcraft authors.
+
+Switchcraft is a Swift port of Witchcraft, the Rust reimplementation of
+XTR-Warp. Algorithmic structure, the LSM-tree indexer layout, the k-means
+training loop, the Q4 residual codec, the index-key compression scheme, the
+hybrid RRF fusion strategy, the sliding-window long-input embedder, and
+several configuration constants are derived from upstream Witchcraft. Files
+that contain ported logic preserve inline "Port of upstream Witchcraft"
+attributions (see, in particular, Sources/SwitchcraftCore/KMeans/KMeans.swift,
+Sources/SwitchcraftCore/Indexer/{Indexer,IndexerConfig,IndicesCodec}.swift,
+Sources/SwitchcraftCore/Search/{SearchEngine,SearchConfig,HybridConfig}.swift,
+Sources/SwitchcraftCore/Codec/Q4Codec.swift,
+Sources/SwitchcraftCore/Embedding/StoreConfig.swift, and
+Sources/SwitchcraftCoreML/{SlidingWindow,T5CoreMLEmbedder}.swift).
+
+------------------------------------------------------------------------
+2. google/xtr-base-en
+------------------------------------------------------------------------
+Source:  https://huggingface.co/google/xtr-base-en
+License: Apache License 2.0
+Copyright: Copyright (c) Google LLC.
+
+Switchcraft's reference Embedder (`SwitchcraftCoreML.T5CoreMLEmbedder`)
+loads the `google/xtr-base-en` T5 encoder and `2_Dense/` projection layer,
+converted to a CoreML `.mlpackage` by `scripts/convert-xtr-to-coreml.py`.
+The model architecture, weights, and projection layer are governed by the
+upstream Apache 2.0 license. The `.mlpackage` asset is built locally and
+not redistributed in this repository.
+
+------------------------------------------------------------------------
+3. HuggingFace tokenizers
+------------------------------------------------------------------------
+Source:  https://github.com/huggingface/tokenizers
+License: Apache License 2.0
+Copyright: Copyright (c) HuggingFace, Inc. and the tokenizers authors.
+
+Switchcraft's `Tokenizer` (Sources/SwitchcraftCore/Tokenizer/) is a Swift
+port of the HuggingFace `tokenizers` Unigram (SentencePiece) pipeline. The
+`tokenizer.json` schema, the Unigram lattice algorithm, the added-tokens
+pre-segmentation pass, the Precompiled normalizer's double-array trie, and
+the BPE/Unigram/Decoder/PostProcessor pipeline match upstream semantics.
+Files that contain ported logic preserve inline attributions (see, in
+particular, Sources/SwitchcraftCore/Tokenizer/{Tokenizer,UnigramModel,
+AddedTokens,DoubleArrayTrie,Normalizer,PreTokenizer,PostProcessor,
+Decoder}.swift).
