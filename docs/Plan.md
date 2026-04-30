@@ -430,7 +430,7 @@ Tests that Witchcraft doesn't have but Switchcraft must. Each suite below is a d
 - [x] Matrix Operations suite (GEMM, matmul_t, batched argmax, packed/fused GEMM)
 - [x] Residual Codec suite (round-trip, sizing, range, batch parity)
 - [x] Concurrency suite (concurrent reads during indexing, reader/writer visibility, simultaneous searches)
-- [ ] CoreML Inference suite (parity vs Candle, tokenizer parity, sliding window, low-signal filtering)
+- [x] CoreML Inference suite (parity vs Candle, tokenizer parity, sliding window, low-signal filtering)
 - [ ] Edge Cases suite (empty/short queries, very long docs, stopwords, Unicode, dedup, removal)
 - [ ] Performance Regression suite (search latency, indexing throughput, memory)
 
