@@ -48,7 +48,7 @@ import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 # Heavy imports are deferred into the functions that need them so
 # `python scripts/investigate-mil-fp32-promote.py --help` works without
@@ -72,20 +72,13 @@ DEFAULT_REVISION = "f40cd399e67dfc8ec974e922ad828610e3c83a36"
 # constants are anchor op-types used by the structural matcher.
 ISLANDS: Tuple[str, ...] = ("A", "B", "C", "D", "E")
 
-# Op types that mark the centre / boundary of each FP32 island. The
-# structural matcher walks parents/children from these anchors.
+# Op types used by the structural matcher to identify the RMSNorm
+# centre and its tail multiplication boundary. Inline op-type
+# allowlists for the parent walk (epsilon `add`, `reduce_mean`/
+# `reduce_sum`/`real_div`, squaring) and the L2-norm tail anchor
+# (`real_div`) live in the matcher functions where they are used.
 RMSNORM_ANCHOR_OP = "rsqrt"
 RMSNORM_TAIL_MUL_OPS: Tuple[str, ...] = ("mul",)
-RMSNORM_BODY_OPS: Tuple[str, ...] = (
-    "pow",
-    "mul",          # mul(x, x) variant of squaring
-    "reduce_mean",
-    "reduce_sum",   # some traces emit reduce_sum + real_div(N) instead of reduce_mean
-    "real_div",
-    "add",          # epsilon add
-    "rsqrt",
-)
-L2_TAIL_ANCHOR_OPS: Tuple[str, ...] = ("real_div",)
 
 
 # ---------------------------------------------------------------------------

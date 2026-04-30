@@ -249,9 +249,14 @@ to refine the phrasing.
   `mil.passes.defs.quantization` (`FP16ComputePrecision`);
   `mil.passes.pass_pipeline` (`PassPipeline.insert_pass`);
   `mil.passes.pass_registry` (`register_pass`).
-- Reproducing: `pip install -r scripts/requirements-investigation.txt
-  && python scripts/investigate-mil-fp32-promote.py`. Outputs land
-  under `--out-dir` (default
+- Reproducing:
+
+  ```sh
+  pip install -r scripts/requirements-investigation.txt
+  python scripts/investigate-mil-fp32-promote.py
+  ```
+
+  Outputs land under `--out-dir` (default
   `/tmp/switchcraft-mil-fp32-promote-investigation/`); committed
   figures under `docs/investigations/mil-fp32-promote-figures/`. Wall
   clock on Apple Silicon: ~4 minutes (~30 s × 7 islands plus model
