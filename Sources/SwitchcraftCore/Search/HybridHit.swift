@@ -12,13 +12,22 @@ import Foundation
 /// Hits are returned sorted by `(score DESC, uuid ASC)` — see
 /// `adrs/008-hybrid-fusion.md`.
 public struct HybridHit: Sendable, Hashable {
+    /// Document UUID, as supplied to `SwitchcraftStore.add(id:body:)`.
     public var uuid: String
+    /// Fused RRF score (higher is better).
     public var score: Float
+    /// 1-indexed rank in the vector pipeline, or `nil` if the document
+    /// did not appear in the vector source's top candidates.
     public var vectorRank: Int?
+    /// Raw MaxSim score from the vector pipeline, or `nil` if absent.
     public var vectorScore: Float?
+    /// 1-indexed rank in the FTS/BM25 pipeline, or `nil` if absent.
     public var ftsRank: Int?
+    /// Raw BM25 score from the FTS pipeline, or `nil` if absent.
     public var ftsScore: Float?
 
+    /// Build a `HybridHit`. Per-source rank and score arguments are
+    /// optional so callers can construct mock fixtures.
     public init(
         uuid: String,
         score: Float,

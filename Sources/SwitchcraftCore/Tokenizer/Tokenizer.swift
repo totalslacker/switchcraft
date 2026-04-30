@@ -23,6 +23,13 @@ public struct Tokenizer: Sendable {
     private let preNormMatcher: AddedTokenMatcher
     private let postNormMatcher: AddedTokenMatcher
 
+    /// Load a tokenizer from a HuggingFace `tokenizer.json` file at `path`.
+    ///
+    /// - Throws: `TokenizerError.fileNotFound` if `path` does not exist,
+    ///   `TokenizerError.ioError` if the file cannot be read,
+    ///   `TokenizerError.malformedJSON` if the JSON is invalid,
+    ///   `TokenizerError.missingField` / `.unsupportedComponent` if the
+    ///   pipeline shape is not the expected Unigram + Metaspace stack.
     public init(contentsOf path: String) throws {
         let url = URL(fileURLWithPath: path)
         guard FileManager.default.fileExists(atPath: path) else {
@@ -45,6 +52,10 @@ public struct Tokenizer: Sendable {
         try self.init(data: data)
     }
 
+    /// Load a tokenizer from a raw `tokenizer.json` payload.
+    ///
+    /// - Throws: same errors as `init(contentsOf:)` other than the
+    ///   filesystem-related cases.
     public init(data: Data) throws {
         let raw: Any
         do {
