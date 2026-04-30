@@ -17,6 +17,58 @@ end-to-end "Getting Started" instructions and the
 Regenerates the cached HuggingFace tokenizer fixture used by
 `TokenizerTests`. Re-run after upgrading the upstream tokenizer JSON.
 
+## `fetch-nfcorpus.sh` — populating `$SWITCHCRAFT_NFCORPUS_DIR`
+
+`NFCorpusBenchmarkTests` (`Tests/SwitchcraftTests/`) computes
+NDCG@10 against the NFCorpus test split and asserts the result lands
+in Witchcraft's published [0.31, 0.33] band. The dataset is **not
+committed** to this repository: NFCorpus is academic-use-only and
+incompatible with Switchcraft's Apache 2.0 release intent. Developers
+who want to run the benchmark obtain NFCorpus locally under whatever
+upstream terms they accept.
+
+This script is one developer convenience. It pulls four `.zst` files
+from upstream Witchcraft's pinned commit, decompresses them in place,
+and writes plaintext into the directory referenced by
+`$SWITCHCRAFT_NFCORPUS_DIR`.
+
+### Prerequisites
+
+- `bash`, `curl`, `zstd` (on macOS: `brew install zstd`).
+
+### Usage
+
+```bash
+export SWITCHCRAFT_NFCORPUS_DIR="$HOME/datasets/nfcorpus"
+mkdir -p "$SWITCHCRAFT_NFCORPUS_DIR"
+./scripts/fetch-nfcorpus.sh
+```
+
+The script writes three required plaintext files plus one optional
+file into `$SWITCHCRAFT_NFCORPUS_DIR`:
+
+- `nfcorpus.tsv` — corpus rows (`docid \t title \t body`)
+- `questions.test.tsv` — dev queries (`query-id \t query`)
+- `qrels.test.json` — pytrec_eval-style nested-dict relevance judgments
+- `collection_map.json` — optional; ignored by the Switchcraft suite
+  (Switchcraft indexes by the original `MED-XXXX` doc-id directly)
+
+Total size ~5–6 MB plaintext. With both `SWITCHCRAFT_XTR_MLPACKAGE`
+and `SWITCHCRAFT_NFCORPUS_DIR` set, run the benchmark with:
+
+```bash
+swift test --filter NFCorpusBenchmark
+```
+
+Expect ~6 minutes on Apple Silicon for the one-time index build.
+
+### License caveat
+
+NFCorpus is third-party data; Switchcraft does not redistribute it and
+takes no position on its licensing terms. By running this script you
+are downloading data hosted by upstream Witchcraft — confirm that your
+intended use is permitted before proceeding.
+
 ## `witchcraft-fact-dump.patch` — regenerating `Tests/Fixtures/facts_corpus.json`
 
 `FactsCorpusParityTests` (`Tests/SwitchcraftTests/`) compares

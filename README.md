@@ -135,6 +135,44 @@ SWITCHCRAFT_XTR_MLPACKAGE=$PWD/Tests/Fixtures/xtr-base-en.mlpackage \
 Performance-sensitive tests should be run in release configuration
 (`swift test -c release`).
 
+### NFCorpus NDCG@10 parity benchmark
+
+`NFCorpusBenchmarkTests` is the cross-implementation quality gate:
+it indexes the NFCorpus test split through Switchcraft and asserts
+macro-averaged NDCG@10 lands in Witchcraft's published [0.31, 0.33]
+band (per ADR 006).
+
+The NFCorpus dataset is **not committed** to this repository — its
+license is academic-use-only and incompatible with Switchcraft's
+Apache 2.0 release intent. The suite is double-gated on
+`SWITCHCRAFT_XTR_MLPACKAGE` *and* `SWITCHCRAFT_NFCORPUS_DIR`. When
+either env var is unset (or the expected files are missing), the
+benchmark skips cleanly. CI sets neither, so it never runs there.
+
+To run it locally, obtain NFCorpus under whatever terms you accept
+and place these three plaintext files into a directory:
+
+- `nfcorpus.tsv` — corpus rows (`docid \t title \t body`)
+- `questions.test.tsv` — dev queries (`query-id \t query`)
+- `qrels.test.json` — pytrec_eval-style nested relevance judgments
+  (`{ qid: { docid: grade } }`)
+
+`scripts/fetch-nfcorpus.sh` is one developer convenience that pulls
+these from upstream Witchcraft's pinned commit and decompresses them
+in place — see [`scripts/README.md`](scripts/README.md) for details.
+
+Then:
+
+```bash
+export SWITCHCRAFT_XTR_MLPACKAGE=$PWD/Tests/Fixtures/xtr-base-en.mlpackage
+export SWITCHCRAFT_NFCORPUS_DIR=/path/to/nfcorpus
+
+swift test --filter NFCorpusBenchmark
+```
+
+Expect ~6 minutes on Apple Silicon for the one-time CoreML T5 index
+build (~3,633 abstracts) before the assertion runs.
+
 ## References
 
 - [`docs/Plan.md`](docs/Plan.md) — full implementation plan and
