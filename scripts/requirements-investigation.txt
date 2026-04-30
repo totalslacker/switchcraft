@@ -1,0 +1,21 @@
+# Pinned dependencies for the SmoothQuant feasibility investigation
+# (`scripts/investigate-smoothquant.py`).
+#
+# This file MUST NOT be merged into `requirements-coreml.txt`.
+# Per ADR 010(c) and the issue #31 history, the production conversion
+# pipeline pins are tied to the canonical `.mlpackage` and the committed
+# embedding fixtures; bumping them requires re-running parity. The
+# investigation script is a transient tool that needs the same toolchain
+# *plus* matplotlib for figure rendering, so it inherits the production
+# pins via `-r requirements-coreml.txt` and only adds the visualisation
+# dependency.
+#
+# Install with:
+#     pip install -r scripts/requirements-investigation.txt
+
+-r requirements-coreml.txt
+
+# Figure rendering for activation-distribution heatmaps. 3.8.x is the
+# last minor that still resolves cleanly against the `numpy<2.0` pin in
+# `requirements-coreml.txt`.
+matplotlib==3.8.4
