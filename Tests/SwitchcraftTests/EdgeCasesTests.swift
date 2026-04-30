@@ -82,23 +82,24 @@ struct EdgeCasesTests {
 
     @Test("long document (10k+ tokens) flushes and is searchable")
     func longDocumentRoundTrip() async throws {
-        // Build a body with exactly 10,000 unique whitespace-separated
-        // tokens so MockEmbedder produces a 10,000-vector chunk. Each
-        // token is unique so we can search for one and assert presence.
-        let tokenCount = 10_000
+        // Build a 10,000-token body from short repeated filler plus a
+        // single unique trailing marker. Filler is short because
+        // MockEmbedder.encode rehashes the entire body for every token
+        // (seed = SHA-256("\(text)|\(i)")), so runtime scales with
+        // tokenCount × bodyLength. Short filler keeps CI time low while
+        // still producing a 10,000-vector chunk.
+        let fillerTokens = 9_999
         var builder = ""
-        builder.reserveCapacity(tokenCount * 8)
-        for i in 0..<tokenCount {
-            if i > 0 { builder.append(" ") }
-            builder.append("tok\(i)")
-        }
+        builder.reserveCapacity(fillerTokens * 2 + 32)
+        for _ in 0..<fillerTokens { builder.append("t ") }
+        builder.append("uniquemarker9999")
         let body = builder
 
-        // Configure l0 large enough that the 10k-vector flush completes
-        // without triggering a real k-means cascade. The spec only
-        // requires `index()` to flush without error — not to cascade —
-        // and the production default (l0=1024, k≈1600) would be slow
-        // under debug.
+        // Use a larger L0 capacity so this test stays focused on the
+        // long-document flush/search round trip and avoids depending on
+        // internal compaction or clustering behavior. The requirement
+        // here is only that `index()` completes without error and the
+        // document remains searchable.
         let config = StoreConfig(
             indexer: IndexerConfig(l0Capacity: 16_384, lsmFanout: 2)
         )
@@ -107,9 +108,9 @@ struct EdgeCasesTests {
         try await store.add(id: "long-doc", body: body)
         try await store.index()
 
-        // Pick a token from late in the body to also exercise the
-        // tail of the embedding ledger.
-        let hits = try await store.search(query: "tok9999", topK: 10)
+        // Search for the unique trailing marker so the assertion is
+        // unambiguous and not dependent on any one filler token.
+        let hits = try await store.search(query: "uniquemarker9999", topK: 10)
         #expect(hits.contains(where: { $0.uuid == "long-doc" }))
 
         try await store.shutdown()
