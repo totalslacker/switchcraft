@@ -558,9 +558,9 @@ This allows the Swift tests to validate correctness without running the Rust imp
 
 ## Open Source Release
 
-Switchcraft is released as a standalone Swift package, the **first native Apple platform implementation** of XTR-Warp token-level semantic search.
+Switchcraft is being released as a standalone Swift package, the **first native Apple platform implementation** of XTR-Warp token-level semantic search.
 
-Shipped in **v0.1.0** (issue #41):
+Prepared for release in **v0.1.0** (issue #41) — ready to tag once the release PR merges:
 
 - **Standalone Swift package** distributed via Swift Package Manager
 - **Apache 2.0 license** — matching Witchcraft's license, maximally permissive

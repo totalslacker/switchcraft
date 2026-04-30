@@ -63,7 +63,13 @@ struct ToyEmbedder: Embedder {
     func encode(_ text: String) async throws -> [Float] {
         let tokens = text.lowercased().split(whereSeparator: \.isWhitespace)
         return tokens.flatMap { tok -> [Float] in
-            var v = (0..<dims).map { i in Float(((tok.hashValue &+ i) % 31) - 15) }
+            // FNV-1a 64-bit over UTF-8 — stable across runs and Swift versions
+            // (unlike Swift's seed-randomised String.hashValue).
+            var h: UInt64 = 0xcbf2_9ce4_8422_2325
+            for byte in tok.utf8 { h = (h ^ UInt64(byte)) &* 0x0000_0100_0000_01b3 }
+            var v = (0..<dims).map { i -> Float in
+                Float(Int(truncatingIfNeeded: (h &+ UInt64(i)) % 31)) - 15
+            }
             let n = (v.map { $0 * $0 }.reduce(0, +)).squareRoot()
             if n > 0 { for i in v.indices { v[i] /= n } }
             return v
