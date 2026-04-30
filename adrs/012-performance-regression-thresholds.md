@@ -47,13 +47,18 @@ a per-search buffer).
 
 ## (b) Runner assumptions
 
-CI runs on `macos-15` GitHub Actions runners (~7 GB RAM, 3 cores). Both
-the debug and release jobs in `.github/workflows/ci.yml` will pick up
-this suite automatically. The thresholds above are calibrated to hold
-in **debug** mode as well (debug-mode p50 on M1 Ultra is ~241 ms;
-unoptimised stdlib bounds checks and ARC traffic dominate the cost).
-Local-machine numbers are recorded for reference; CI numbers will be
-collected as history accrues. See section (e).
+CI runs on `macos-15` GitHub Actions runners (~7 GB RAM, 3 cores). The
+release-mode CI job in `.github/workflows/ci.yml` is the authoritative
+perf gate. The debug-mode job **skips this suite entirely** via an
+`assert`-based runtime detection (`isReleaseBuild`) wired through
+Swift Testing's `.enabled(if:)` trait — debug-mode latency is too noisy
+on shared CI runners to defend a meaningful floor against. Initial
+calibration tried debug-mode floors (p50 < 300 ms; observed ~241 ms on
+an M1 Ultra dev box), but the macos-15 CI runner came in at ~326 ms
+p50 and the test failed; rather than loosening the floor 3–4× to
+absorb debug-mode noise (which would defeat the regression-detection
+purpose), the suite is gated to release where the floor remains
+meaningful.
 
 ## (c) Corpus tuning
 
@@ -147,11 +152,15 @@ before any CI history exists. The tightening policy:
   via a `static let buildOnce: Task<Fixture, Error>` and shared between
   the latency and memory tests; the throughput test builds its own
   corpus inline because it must measure the build.
-- **Release-mode recommendation**: the test file's header documents
-  `swift test -c release`. Debug mode passes the floors with reduced
-  headroom (debug p50 ~241 ms vs the 300 ms floor on M1 Ultra), so the
-  CI debug job is also a useful regression detector even though the
-  numbers are noisier.
+- **Release-mode gating**: the suite is annotated
+  `.enabled(if: isReleaseBuild, …)` and `isReleaseBuild` is computed
+  via the standard `assert`-based runtime trick (closure side-effects
+  visible only when assertions are enabled). Under `swift test`
+  (debug) all three tests skip with a clear reason; under
+  `swift test -c release` they execute. This eliminates ~3 minutes of
+  noisy debug-mode runtime per CI run and removes the false-positive
+  failure mode where debug latency on a shared runner exceeds a floor
+  calibrated against release-mode numbers.
 
 ---
 
