@@ -30,7 +30,7 @@ suite stays within the thresholds documented in ADR 012.
 
 When modifying an existing file, add at least one regression test for each
 existing behavior the change could break — see the rules under "Regression
-Tests for Modified Files" in the project's `CLAUDE.md`.
+Tests for Modified Files" in [`.claude/CLAUDE.md`](.claude/CLAUDE.md).
 
 ## Style and architecture
 
