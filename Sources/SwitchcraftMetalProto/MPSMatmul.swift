@@ -19,6 +19,18 @@ public final class MPSMatmul: @unchecked Sendable {
     public let device: MTLDevice
     private let queue: MTLCommandQueue
 
+    /// Cache key: `(M, K, N)`. `MPSMatrixMultiplication` is shape-bound, so we
+    /// cache one per benchmark shape to keep per-iteration allocation out of
+    /// the hot path. Without this, each iteration paid for a fresh
+    /// `MPSMatrixMultiplication` object — biasing the MPS-vs-cblas comparison.
+    private struct OpKey: Hashable {
+        let m: Int
+        let k: Int
+        let n: Int
+    }
+    private var ops: [OpKey: MPSMatrixMultiplication] = [:]
+    private let cacheLock = NSLock()
+
     public init() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw MetalMatmulError.noDeviceAvailable
@@ -28,6 +40,30 @@ public final class MPSMatmul: @unchecked Sendable {
         }
         self.device = device
         self.queue = queue
+    }
+
+    private func operation(m: Int, k: Int, n: Int) -> MPSMatrixMultiplication {
+        let key = OpKey(m: m, k: k, n: n)
+        cacheLock.lock()
+        if let cached = ops[key] {
+            cacheLock.unlock()
+            return cached
+        }
+        cacheLock.unlock()
+        let mm = MPSMatrixMultiplication(
+            device: device,
+            transposeLeft: false,
+            transposeRight: false,
+            resultRows: m,
+            resultColumns: n,
+            interiorColumns: k,
+            alpha: 1.0,
+            beta: 0.0
+        )
+        cacheLock.lock()
+        ops[key] = mm
+        cacheLock.unlock()
+        return mm
     }
 
     /// Compute `C = A · B` via `MPSMatrixMultiplication`. Synchronous; blocks
@@ -74,16 +110,7 @@ public final class MPSMatmul: @unchecked Sendable {
         let bMat = MPSMatrix(buffer: bBuf, descriptor: bDesc)
         let cMat = MPSMatrix(buffer: cBuf, descriptor: cDesc)
 
-        let mm = MPSMatrixMultiplication(
-            device: device,
-            transposeLeft: false,
-            transposeRight: false,
-            resultRows: m,
-            resultColumns: n,
-            interiorColumns: k,
-            alpha: 1.0,
-            beta: 0.0
-        )
+        let mm = operation(m: m, k: k, n: n)
 
         guard let cmd = queue.makeCommandBuffer() else {
             throw MetalMatmulError.pipelineCreationFailed("makeCommandBuffer returned nil")

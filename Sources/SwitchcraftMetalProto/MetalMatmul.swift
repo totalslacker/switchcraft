@@ -18,10 +18,6 @@
 import Foundation
 import Metal
 
-#if canImport(os)
-import os
-#endif
-
 /// Tile shape used to instantiate a `gemm_fp32` pipeline. One thread per
 /// output element; `tgM × tgN` becomes the `MTLSize`'s thread-per-threadgroup
 /// dimensions. The sweep test suite enumerates a list of these.
