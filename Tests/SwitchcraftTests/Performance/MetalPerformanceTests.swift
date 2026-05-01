@@ -45,8 +45,6 @@ import Testing
 @testable import Switchcraft
 @testable import SwitchcraftCore
 
-import Darwin.Mach
-
 /// `true` when compiled with optimisations (`swift test -c release`).
 /// Mirrors the `assert`-trick used in `PerformanceTests.swift`. Defined
 /// privately here so this file is self-contained — `PerformanceTests`'

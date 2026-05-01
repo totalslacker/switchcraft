@@ -60,14 +60,14 @@ import Foundation
 import Metal
 import os
 
-public enum MetalContextError: Error, CustomStringConvertible {
+enum MetalContextError: Error, CustomStringConvertible {
     case noDeviceAvailable
     case commandQueueCreationFailed
     case libraryLoadFailed(String)
     case functionNotFound(String)
     case pipelineCreationFailed(String)
 
-    public var description: String {
+    var description: String {
         switch self {
         case .noDeviceAvailable:
             return "MTLCreateSystemDefaultDevice() returned nil — no Metal-capable GPU"
