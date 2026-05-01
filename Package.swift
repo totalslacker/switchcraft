@@ -36,7 +36,23 @@ let package = Package(
     targets: [
         .target(
             name: "SwitchcraftCore",
-            path: "Sources/SwitchcraftCore"
+            path: "Sources/SwitchcraftCore",
+            resources: [
+                // SwiftPM 6's `.process(...)` ships `.metal` files as raw
+                // source rather than as a precompiled `.metallib`; the
+                // `MetalContext` runtime-source fallback handles that case.
+                // See ADR 015 for the build-strategy rationale.
+                .process("Metal/Shaders"),
+            ],
+            linkerSettings: [
+                .linkedFramework(
+                    "Metal",
+                    .when(platforms: [.macOS, .iOS, .visionOS])
+                ),
+                // MetalPerformanceShaders is intentionally NOT linked here —
+                // it is deferred to the first sub-issue that actually uses
+                // an MPS primitive (ADR 015 §"Build / packaging").
+            ]
         ),
         .target(
             name: "Switchcraft",

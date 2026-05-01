@@ -608,9 +608,13 @@ Filed as one **umbrella issue** with Plan-stage decomposition, same
 shape as the Phase 1 testing umbrella (#20 → #21–#28). Expected
 sub-issues:
 
-1. **Metal scaffolding** — `MTLDevice` acquisition, command queue
-   setup, error types, common test harness, performance-regression
-   test infrastructure. The first kernel sub-issue depends on this.
+1. **Metal scaffolding** ✅ (#51, ADR 015) — `MTLDevice` acquisition,
+   command queue setup, lazy `MTLLibrary` with `NSLock`-guarded
+   pipeline cache (`MetalContext`), transparent Accelerate fallback
+   helper (`runMetalOrFallback`), `SWITCHCRAFT_FORCE_ACCELERATE` env
+   var, `MetalAvailability.isAvailable` test gate, and a dims=128
+   `MetalPerformanceTests` suite alongside ADR 012's dims=32
+   `PerformanceTests`.
 2. **Q4 dequant + matmul kernel** — the highest-leverage win,
    exercises decompression + matmul fusion.
 3. **Centroid similarity kernel** — straightforward batched dot

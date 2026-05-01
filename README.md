@@ -277,6 +277,24 @@ SWITCHCRAFT_XTR_MLPACKAGE=$PWD/Tests/Fixtures/xtr-base-en.mlpackage \
 Performance-sensitive tests should be run in release configuration
 (`swift test -c release`).
 
+### Forcing the Accelerate fallback
+
+The Phase 2 search-path Metal kernels (umbrella #50) install a
+transparent fallback to the existing Accelerate path: any Metal
+failure (no GPU, library load fail, dispatch error) silently routes
+back to `cblas_sgemm` so callers see no behaviour change. The
+`SWITCHCRAFT_FORCE_ACCELERATE` env var forces that fallback path even
+when Metal is available, so tests can exercise it on Metal-capable
+hosts:
+
+```bash
+SWITCHCRAFT_FORCE_ACCELERATE=1 swift test --filter Metal
+```
+
+The Metal test suites use the same env var as part of their
+`.enabled(if:)` gating, so they skip cleanly when it is set. See
+[ADR 015](adrs/015-metal-context-and-dispatch.md) for the rationale.
+
 ### NFCorpus NDCG@10 parity benchmark
 
 `NFCorpusBenchmarkTests` is the cross-implementation quality gate:
