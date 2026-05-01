@@ -73,6 +73,45 @@ struct MetalContextTests {
         }
     }
 
+    @Test("register(bundle:resourceName:) error path leaves context state intact")
+    func registerBundleErrorPathLeavesContextIntact() throws {
+        // Use a fresh context so the registration failure can't leak
+        // into the shared singleton.
+        let ctx = try MetalContext()
+
+        // SwitchcraftTests' own `Bundle.module` has no `.metal`
+        // resource, so both library-load paths fail and `register`
+        // throws `libraryLoadFailed`. The registration must NOT
+        // mutate the libraries list on the failure path (no
+        // half-registered state); the previously-resolvable default-
+        // bundle kernels must continue to resolve.
+        #expect(throws: MetalContextError.self) {
+            try ctx.register(
+                bundle: Bundle.module,
+                resourceName: "no_such_shader_file"
+            )
+        }
+
+        // Default-library kernels still resolve after the failure.
+        let pipeline = try ctx.pipeline(for: "identity_fp32")
+        #expect(pipeline.threadExecutionWidth >= 1)
+
+        // The failed registration didn't pollute the registered-
+        // bundle set: a second attempt with the same bundle still
+        // throws (i.e. it wasn't silently marked registered).
+        #expect(throws: MetalContextError.self) {
+            try ctx.register(
+                bundle: Bundle.module,
+                resourceName: "no_such_shader_file"
+            )
+        }
+
+        // Pipeline cache hits on repeat lookup (same `===` instance).
+        let again = try ctx.pipeline(for: "identity_fp32")
+        #expect(pipeline === again,
+                "pipeline cache returned a fresh state on the second lookup after registration failure")
+    }
+
     // MARK: - Helpers
 
     /// Run the placeholder `identity_fp32` shader synchronously. Kept

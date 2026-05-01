@@ -52,7 +52,22 @@
 // `.metal` file as a bundle resource string. The fallback runs once at
 // `init`; pipeline-state caching keeps the per-call overhead at zero.
 //
-// See `adrs/015-metal-context-and-dispatch.md` for the full rationale.
+// Per-target shader bundles
+// -------------------------
+//
+// `MetalContext` is shared across the SwitchcraftCore + SwitchcraftMetal
+// targets. Each target ships its own MSL files in its own
+// `Bundle.module`. The context loads `SwitchcraftCore`'s bundle at
+// `init` (the default library); other targets register their bundle
+// lazily via `register(bundle:resourceName:)` before their first
+// `pipeline(for:)` call. `pipeline(for:)` then searches all registered
+// libraries for the requested function name. Registration is idempotent
+// — registering the same bundle twice is a no-op — and thread-safe
+// under the existing `cacheLock`.
+//
+// See `adrs/015-metal-context-and-dispatch.md` (sections (b) "Library
+// load strategy" and (e) "Per-target shader bundles") for the full
+// rationale.
 
 #if canImport(Metal)
 
@@ -132,7 +147,24 @@ public final class MetalContext: @unchecked Sendable {
 
     public let device: MTLDevice
     public let queue: MTLCommandQueue
+
+    /// Default library (shipped from `SwitchcraftCore`'s `Bundle.module`).
+    /// Preserved as a public property for back-compat with call-sites that
+    /// referenced `ctx.library` directly; new code should use
+    /// `pipeline(for:)` which now searches every registered library.
     public let library: MTLLibrary
+
+    /// All loaded Metal libraries searched by `pipeline(for:)` in
+    /// registration order. Includes `library` (the default) plus any
+    /// per-target libraries registered via `register(bundle:resourceName:)`.
+    /// Guarded by `cacheLock`.
+    private var libraries: [MTLLibrary] = []
+
+    /// Bundle identities already registered, used to make registration
+    /// idempotent. We key on `Bundle.bundleURL` because `Bundle` itself
+    /// is not `Hashable`; the URL is stable per loaded bundle.
+    /// Guarded by `cacheLock`.
+    private var registeredBundleURLs: Set<URL> = []
 
     /// Pipeline cache keyed by Metal function name. Guarded by `cacheLock`.
     /// The cached `MTLComputePipelineState` values are themselves
@@ -159,7 +191,50 @@ public final class MetalContext: @unchecked Sendable {
         }
         self.device = device
         self.queue = queue
-        self.library = try Self.loadLibrary(device: device)
+        let defaultLib = try Self.loadLibrary(
+            device: device,
+            bundle: Bundle.module,
+            resourceName: Self.shaderResourceName
+        )
+        self.library = defaultLib
+        self.libraries = [defaultLib]
+        self.registeredBundleURLs = [Bundle.module.bundleURL]
+    }
+
+    /// Register an additional Metal library bundle so its kernels are
+    /// reachable via `pipeline(for:)`. Used by `SwitchcraftMetal` (and
+    /// future per-target shader bundles) so the central pipeline cache
+    /// can resolve their function names without a separate context.
+    ///
+    /// Idempotent — registering a bundle that's already registered is a
+    /// no-op. Thread-safe under `cacheLock`. The same load strategy
+    /// (`makeDefaultLibrary` first, fallback to source compilation) is
+    /// used for every registered bundle so the build-pipeline behaviour
+    /// is uniform across targets.
+    ///
+    /// - Parameters:
+    ///   - bundle: the resource bundle to load Metal shaders from.
+    ///     Typically `Bundle.module` of the calling target.
+    ///   - resourceName: the basename of the `.metal` source file used
+    ///     by the runtime-source-compile fallback path. Without an
+    ///     extension. Only consulted when `makeDefaultLibrary(bundle:)`
+    ///     fails, i.e. when SwiftPM ships raw source rather than a
+    ///     compiled `.metallib` (see header §"Library load strategy").
+    public func register(bundle: Bundle, resourceName: String) throws {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+
+        let key = bundle.bundleURL
+        if registeredBundleURLs.contains(key) {
+            return
+        }
+        let lib = try Self.loadLibrary(
+            device: device,
+            bundle: bundle,
+            resourceName: resourceName
+        )
+        libraries.append(lib)
+        registeredBundleURLs.insert(key)
     }
 
     /// Resolve (or build and cache) the pipeline state for a kernel by
@@ -180,7 +255,19 @@ public final class MetalContext: @unchecked Sendable {
         if let cached = pipelines[functionName] {
             return cached
         }
-        guard let function = library.makeFunction(name: functionName) else {
+        // Search every registered library in registration order — the
+        // first match wins. Function names are unique within a library
+        // (Metal's linking model), and across libraries the catalogue
+        // owns the name-uniqueness invariant (one function name → one
+        // implementation across the whole codebase).
+        var function: MTLFunction?
+        for lib in libraries {
+            if let f = lib.makeFunction(name: functionName) {
+                function = f
+                break
+            }
+        }
+        guard let function else {
             throw MetalContextError.functionNotFound(functionName)
         }
         let state: MTLComputePipelineState
@@ -195,22 +282,30 @@ public final class MetalContext: @unchecked Sendable {
 
     // MARK: - Private
 
-    /// Load the Metal library. Tries the precompiled `default.metallib`
-    /// first; falls back to runtime source compilation when SwiftPM
-    /// has shipped the `.metal` file as raw source (see header comment).
-    private static func loadLibrary(device: MTLDevice) throws -> MTLLibrary {
-        if let lib = try? device.makeDefaultLibrary(bundle: Bundle.module) {
+    /// Load a Metal library from `bundle`. Tries the precompiled
+    /// `default.metallib` first; falls back to runtime source
+    /// compilation when SwiftPM has shipped the `.metal` file as raw
+    /// source (see header comment §"Library load strategy"). The same
+    /// strategy is used for both the default `SwitchcraftCore` bundle
+    /// and any per-target bundle registered via
+    /// `register(bundle:resourceName:)`.
+    private static func loadLibrary(
+        device: MTLDevice,
+        bundle: Bundle,
+        resourceName: String
+    ) throws -> MTLLibrary {
+        if let lib = try? device.makeDefaultLibrary(bundle: bundle) {
             return lib
         }
         guard
-            let url = Bundle.module.url(
-                forResource: shaderResourceName,
+            let url = bundle.url(
+                forResource: resourceName,
                 withExtension: "metal"
             ),
             let source = try? String(contentsOf: url, encoding: .utf8)
         else {
             throw MetalContextError.libraryLoadFailed(
-                "\(shaderResourceName).metal not found in module bundle"
+                "\(resourceName).metal not found in bundle \(bundle.bundleURL.lastPathComponent)"
             )
         }
         do {
