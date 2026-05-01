@@ -86,19 +86,19 @@ forward references, not existing files.
 | Upstream (ggml/llama.cpp) | Swift destination | Precision (storage / compute / accum) |
 |---|---|---|
 | `gguf.h` reader (file format), invoked by `llama-model-loader.cpp` (llama.cpp) | `Sources/SwitchcraftMetal/GGUF/GGUFReader.swift` (#59) | n/a (file format; produces typed `MTLBuffer`s) |
-| `dequantize_row_q4_K` in `src/ggml-quants.c` | CPU helper `Sources/SwitchcraftMetal/Kernels/Q4KDequant.swift` (#60, parity-test reference only) | Q4_K → FP32 (CPU reference) |
+| `dequantize_row_q4_K` in `src/ggml-quants.c` | CPU helper `Sources/SwitchcraftMetal/GGUF/Q4KDecode.swift` (#59; reused as the parity-test reference for #60's matmul kernel) | Q4_K → FP32 (CPU reference) |
 | Metal kernel `kernel_dequantize_q4_K` in `src/ggml-metal/ggml-metal.metal` | `Sources/SwitchcraftMetal/Shaders/Q4KDequant.metal` (#64, first consumer is `kernel_get_rows_q4_K` token embedding lookup) | Q4_K → FP16 (compute) → FP32 (downstream consumer). **Moved from #60 to #64**: the matmul kernel inlines its own per-super-block dequant, so the standalone Metal kernel has no production caller until #64 — shipping it earlier would be shadow code with only a synthetic test harness keeping it alive. |
-| `kernel_mul_mat_q4_K_f32` in `src/ggml-metal/ggml-metal.metal` (Q4_K weights × FP32 activations, FP32 accumulator) | `Sources/SwitchcraftMetal/Kernels/Q4KMatMul.swift` + `Sources/SwitchcraftMetal/Shaders/Q4KMatMul.metal` (#60) | Q4_K weights / FP16 activation × dequantised FP16 weight (compute) / FP32 accumulator |
+| `kernel_mul_mm_q4_K_f32` (the matrix-matrix template instantiation at upstream `src/ggml-metal/ggml-metal.metal:10112`; Q4_K weights × FP32 activations, FP32 accumulator) | `Sources/SwitchcraftMetal/Kernels/Q4KMatMul.swift` + `Sources/SwitchcraftMetal/Shaders/Q4KMatMul.metal` (#60). Bundle: `SwitchcraftMetal/Bundle.module` per ADR 015 §(e) "Per-target shader bundles". | Q4_K weights / src1 FP32 in MTLBuffer, cast to FP16 in threadgroup memory before SIMD-group multiply / FP32 accumulator / FP32 output |
 | Token embedding lookup — `kernel_get_rows_q4_K` (Metal) / equivalent CPU path in `ggml-quants.c` | folded into `Sources/SwitchcraftMetal/Embedder/T5MetalEmbedder.swift` (#64); reuses Q4KDequant for the row gather | Q4_K storage → FP32 output |
 | `kernel_rms_norm_f32` in `src/ggml-metal/ggml-metal.metal` (T5 RMSNorm — variance only, no mean centering, no bias) | `Sources/SwitchcraftMetal/Kernels/RMSNorm.swift` + `Sources/SwitchcraftMetal/Shaders/RMSNorm.metal` (#61) | FP32 weight / FP32 compute / FP32 accumulator. **FP32 carve-out is non-negotiable** per ADR 003 + ADR 014(b). |
-| Q/K/V/O projections — `kernel_mul_mat_q4_K_f32` (4 × 12 = 48 invocations per encode) | reuses `Q4KMatMul.swift` from #60 | as Q4KMatMul row above |
+| Q/K/V/O projections — `kernel_mul_mm_q4_K_f32` (4 × 12 = 48 invocations per encode) | reuses `Q4KMatMul.swift` from #60 | as Q4KMatMul row above |
 | Scaled dot-product attention — `kernel_mul_mm_f16` / `kernel_mul_mm_f32` for `Q · Kᵀ`, optional `Q8_0` K cache via `kernel_mul_mat_q8_0_f32` | `Sources/SwitchcraftMetal/Kernels/Attention.swift` + `Sources/SwitchcraftMetal/Shaders/Attention.metal` (#62) | FP16 K/V (Q8_0 K cache is a Witchcraft-side ggml choice not strictly required for our encode-only path; default to FP16 K/V) / FP32 compute / FP32 accumulator |
 | Relative-position bias — T5 `_relative_position_bucket` (see "Relative-position attention bucket" below); added pre-softmax | `Sources/SwitchcraftMetal/Kernels/RelativePositionBias.swift` + `Sources/SwitchcraftMetal/Shaders/RelativePositionBias.metal` (#62) | bucket-table FP32 / FP32 compute / FP32 accumulator |
 | `kernel_soft_max_f32` in `src/ggml-metal/ggml-metal.metal` (T5 attention softmax with optional mask + bias) | `Sources/SwitchcraftMetal/Kernels/Softmax.swift` + `Sources/SwitchcraftMetal/Shaders/Softmax.metal` (#62) | FP32 input / FP32 compute / FP32 accumulator. **Sensitive op — do not lower to FP16 even if it appears to work on a single fixture.** |
-| FFN gate matmul (`wi_0`, gated branch) — `kernel_mul_mat_q4_K_f32` | reuses `Q4KMatMul.swift` from #60 | as Q4KMatMul row above |
-| FFN up matmul (`wi_1`, paired branch) — `kernel_mul_mat_q4_K_f32` | reuses `Q4KMatMul.swift` from #60 | as Q4KMatMul row above |
+| FFN gate matmul (`wi_0`, gated branch) — `kernel_mul_mm_q4_K_f32` | reuses `Q4KMatMul.swift` from #60 | as Q4KMatMul row above |
+| FFN up matmul (`wi_1`, paired branch) — `kernel_mul_mm_q4_K_f32` | reuses `Q4KMatMul.swift` from #60 | as Q4KMatMul row above |
 | Gated-GELU activation — `gelu_new(wi_0(x)) * wi_1(x)` element-wise; ggml `kernel_gelu_f32` + element-wise multiply | `Sources/SwitchcraftMetal/Kernels/GatedGELU.swift` + `Sources/SwitchcraftMetal/Shaders/GatedGELU.metal` (#63) | FP32 input / FP32 compute (`gelu_new` formula uses `tanh`; no exp overflow at FP32 for typical activation magnitudes) / FP32 accumulator |
-| FFN down matmul (`wo`) — `kernel_mul_mat_q4_K_f32` | reuses `Q4KMatMul.swift` from #60 | as Q4KMatMul row above |
+| FFN down matmul (`wo`) — `kernel_mul_mm_q4_K_f32` | reuses `Q4KMatMul.swift` from #60 | as Q4KMatMul row above |
 | Residual add (`x_out = x_in + sublayer(LN(x_in))`) — ggml `kernel_add_f32` | `Sources/SwitchcraftMetal/Kernels/ResidualAdd.swift` + `Sources/SwitchcraftMetal/Shaders/ResidualAdd.metal` (#63) | FP32 / FP32 / FP32. **Residual stream stays at FP32 throughout** per ADR 003 + ADR 014(b). |
 | Final encoder RMSNorm | reuses `RMSNorm.swift` from #61 | as RMSNorm row above |
 | Projection matmul (the absorbed `2_Dense/Linear` from sentence-transformers; FP16 weights at GGUF read time, no quantisation) — `kernel_mul_mm_f16` | `Sources/SwitchcraftMetal/Kernels/ProjectionMatMul.swift` + `Sources/SwitchcraftMetal/Shaders/ProjectionMatMul.metal` (#64) | FP16 weight / FP16 compute / FP32 accumulator |
@@ -243,7 +243,8 @@ for the canonical unpack sequence). Sub-issue #60 should follow that
 unpack order to keep MaxSim scoring stable across the port.
 
 The Metal version (`kernel_dequantize_q4_K` and the fused matmul
-variant `kernel_mul_mat_q4_K_f32`) both live in
+variant `kernel_mul_mm_q4_K_f32` — the matrix-matrix template
+instantiation at upstream `ggml-metal.metal:10112`) both live in
 `ggml/src/ggml-metal/ggml-metal.metal` at the pinned commit. The
 fused matmul kernel is the throughput-relevant target for #60; the
 standalone dequant is useful for #60's parity tests against the C
@@ -557,6 +558,41 @@ readable on the encoder-only path because it's not multiplexed with
 decoder code.
 
 ---
+
+## Deviations from upstream
+
+Sub-issues record any concrete MSL/MTL-vs-upstream divergence here so a
+future port-refresh against a new commit pin can audit them quickly.
+"Faithful port" is the intent; deviations are minimised and explained.
+
+### #60 — `kernel_mul_mm_q4_K_f32`
+
+- **`FC_mul_mm_bc_out` is hard-coded `true`** rather than per-shape
+  function-constant specialised. ADR 015 forbids runtime tuning; we
+  ship a single specialisation. With `bc_out = true` aligned tiles
+  still take the fast `simdgroup_store` path (the kernel branches on
+  `r0 + NR0 <= ne0 && r1 + NR1 <= ne1` at run time), and non-aligned
+  shapes (e.g. the N=33 edge-case test, future arbitrary-N callers)
+  take the staged-write boundary path safely. Strict superset of
+  `bc_out = false`.
+- **`FC_mul_mm_bc_inp` is hard-coded `false`** because (a) `K % 256
+  == 0` is a wrapper precondition (Q4_K block layout), so K is always
+  a multiple of `NK = 32`, and (b) the q4_K specialisation's
+  `is_same<T0_4x4, block_q>::value` is `false` (T0 = float, block_q =
+  block_q4_K), so the `bc_inp` branch's element-wise FP-load path is
+  unreachable.
+- **`mpp::tensor_ops::matmul2d` path omitted entirely.** Upstream
+  guards the new `metal_tensor` matmul behind
+  `#ifdef GGML_METAL_HAS_TENSOR`; we ship only the legacy
+  simdgroup-tile path (the upstream `#else` branch). The legacy path
+  is enough for our T5-base shapes and avoids a dependency on
+  `MetalPerformancePrimitives.h` (deferred per ADR 015 §"Build /
+  packaging" — Phase 2 ships custom kernels only).
+- **Inlined dequantise branch.** The kernel hand-specialises the
+  upstream `if (is_same<T0_4x4, block_q>::value && FC_mul_mm_bc_inp)`
+  branch (always-false for q4_K_f32) — only the dequantise path is
+  emitted. Removes a runtime branch and ~25 lines of always-dead MSL
+  while preserving the inner-loop layout.
 
 ## Cross-references
 

@@ -216,7 +216,62 @@ it. The `SwitchcraftMetalProto` library is products-excluded
 investigation code; whether to delete or keep-as-evidence is out of
 scope here.
 
-## (e) Consequences
+## (e) Per-target shader bundles (amended for issue #60)
+
+The original scaffolding (#51) loaded MSL only from `SwitchcraftCore`'s
+`Bundle.module`. Issue #60 ships `Q4KMatMul.metal` from a *different*
+target, `SwitchcraftMetal/Shaders/`, so `MetalContext` is amended to
+support multiple registered libraries.
+
+API:
+
+```swift
+extension MetalContext {
+    public func register(bundle: Bundle, resourceName: String) throws
+}
+```
+
+Semantics:
+
+- **Idempotent.** Registering the same `bundle` twice (keyed on
+  `Bundle.bundleURL`) is a silent no-op. Lets multiple kernel
+  wrappers in the same target each call `register(...)` from their
+  `init` without coordination.
+- **Lazy.** No global init hook — wrappers register their bundle the
+  first time they're constructed (`Q4KMatMulKernel.init` →
+  `registerSwitchcraftMetalShaders(...)`). Avoids the Swift
+  module-init portability problem.
+- **Fail-atomic.** A failed registration (library load throws) does
+  *not* mutate the libraries list or the registered-bundle set. The
+  next `register(...)` call sees the bundle as still-unregistered and
+  retries. Tested in `MetalContextTests`.
+- **Lookup order.** `pipeline(for:)` searches the libraries in
+  registration order; the first match wins. Function names must be
+  globally unique across registered libraries — the catalogue
+  (`docs/porting/ggml-t5.md`) owns this invariant.
+- **Same load strategy.** Each registered bundle goes through the
+  same `makeDefaultLibrary(bundle:)`-then-source-fallback path as the
+  default `SwitchcraftCore` bundle. Per-target bundles inherit
+  whatever SwiftPM toolchain behaviour the scaffolding stabilised.
+
+Other ADR 015 contracts are unchanged — Sendable policy
+(`@unchecked Sendable` under `cacheLock`), threadgroup-sizing-fixed,
+transparent fallback to Accelerate via `runMetalOrFallback`, and test
+gating via `MetalAvailability` all carry over verbatim.
+
+`Package.swift` mirrors the scaffolding's resource declaration on each
+shipping target, e.g.:
+
+```swift
+.target(
+    name: "SwitchcraftMetal",
+    dependencies: ["SwitchcraftCore"],
+    resources: [.process("Shaders")],
+    ...
+)
+```
+
+## (f) Consequences
 
 - Search-path call sites that adopt Metal (sub-issues #2–#4 of the
   umbrella) need to thread `runMetalOrFallback(metal:, fallback:)`
@@ -237,7 +292,7 @@ scope here.
   this hasn't been a constraint yet; production kernels need to be
   vetted for both.
 
-## (f) Open questions deferred
+## (g) Open questions deferred
 
 - **No-Metal CI job.** The macos-15 GitHub Actions runner has Metal,
   so the skip path is not exercised by default CI today. Whether to
