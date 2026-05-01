@@ -100,7 +100,7 @@ forward references, not existing files.
 | FFN down matmul (`wo`) — `kernel_mul_mat_q4_K_f32` | reuses `Q4KMatMul.swift` from #60 | as Q4KMatMul row above |
 | Residual add (`x_out = x_in + sublayer(LN(x_in))`) — ggml `kernel_add_f32` | `Sources/SwitchcraftMetal/Kernels/ResidualAdd.swift` + `Sources/SwitchcraftMetal/Shaders/ResidualAdd.metal` (#63) | FP32 / FP32 / FP32. **Residual stream stays at FP32 throughout** per ADR 003 + ADR 014(b). |
 | Final encoder RMSNorm | reuses `RMSNorm.swift` from #61 | as RMSNorm row above |
-| Projection matmul (the absorbed `2_Dense/Linear` from sentence-transformers; FP16 weights at GGUF read time, no quantisation) — `kernel_mul_mm_f16` | `Sources/SwitchcraftMetal/Kernels/ProjectionMatMul.swift` + `Sources/SwitchcraftMetal/Shaders/ProjectionMatMul.metal` (#64) | FP16 weight / FP32 compute / FP32 accumulator |
+| Projection matmul (the absorbed `2_Dense/Linear` from sentence-transformers; FP16 weights at GGUF read time, no quantisation) — `kernel_mul_mm_f16` | `Sources/SwitchcraftMetal/Kernels/ProjectionMatMul.swift` + `Sources/SwitchcraftMetal/Shaders/ProjectionMatMul.metal` (#64) | FP16 weight / FP16 compute / FP32 accumulator |
 | L2 normalisation (unit norm per token) — element-wise `x / sqrt(sum(x²) + ε)`; ggml has no dedicated kernel for this combination, composed from `kernel_sqr_f32` + `kernel_sum_rows_f32` + element-wise scale | `Sources/SwitchcraftMetal/Kernels/L2Norm.swift` + `Sources/SwitchcraftMetal/Shaders/L2Norm.metal` (#63) | FP32 / FP32 / FP32. **Sensitive op** — `sum(x²)` over 768 elements has overflowed FP16 historically (ADR 014(b) point 2). |
 | Orchestrator — encoder forward pass dispatch order, `MTLBuffer` lifecycle, sliding-window integration | `Sources/SwitchcraftMetal/Embedder/T5MetalEmbedder.swift` (#64) | n/a (orchestration) |
 
@@ -273,14 +273,14 @@ catalogue follows ggml's per-op kernel choices verbatim.
 | RMSNorm (12 pre-attn + 12 pre-FFN + 1 final) | 25 | FP32 (small, 768 floats × 25) | **FP32 — non-negotiable** | FP32 |
 | Q/K/V/O projections | 48 (4 × 12 layers) | Q4_K | dequantised → FP16 | FP32 |
 | Scaled dot-product attention `Q · Kᵀ / √d_k` | 12 | n/a (activations only) | FP32 (the divide-by-√d_k must be FP32 or roundoff disturbs softmax) | FP32 |
-| Relative-position bias add | 12 | FP32 (32-bucket × 12-head table; ~12 KB) | FP32 | FP32 |
+| Relative-position bias add | 12 | FP32 (32-bucket × 12-head learned table; 384 floats, ~1.5 KiB) | FP32 | FP32 |
 | Softmax | 12 | n/a | **FP32 — sensitive op** (ADR 003) | FP32 |
 | FFN gate matmul `wi_0` | 12 | Q4_K | dequantised → FP16 | FP32 |
 | FFN up matmul `wi_1` | 12 | Q4_K | dequantised → FP16 | FP32 |
 | Gated-GELU `gelu_new(gate) * up` | 12 | n/a | FP32 (`gelu_new` uses `tanh`; FP32 has headroom) | FP32 |
 | FFN down matmul `wo` | 12 | Q4_K | dequantised → FP16 | FP32 |
 | Residual add | 24 (12 post-attn + 12 post-FFN) | n/a | **FP32 — residual stream stays FP32 throughout** (ADR 014(b)) | FP32 |
-| Projection matmul (absorbed `2_Dense.weight`, 768 → 128) | 1 | FP16 (no Q4_K — small, ~96 KB at FP32) | FP16 | FP32 |
+| Projection matmul (absorbed `2_Dense.weight`, 768 → 128) | 1 | FP16 (no Q4_K — 768 × 128 = 98,304 elements; ~192 KiB at FP16, ~384 KiB at FP32) | FP16 | FP32 |
 | L2 normalisation | 1 | n/a | **FP32 — sensitive op**, `sum(x²)` overflows FP16 (ADR 014(b) point 2) | FP32 |
 
 **Total**: 184 op invocations per 512-token encode (or fewer per
