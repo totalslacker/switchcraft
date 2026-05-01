@@ -1,0 +1,194 @@
+{
+  "hardware" : {
+    "chip" : "Apple M1 Ultra",
+    "memoryGB" : 128,
+    "osVersion" : "Version 26.4.1 (Build 25E253)"
+  },
+  "results" : [
+    {
+      "backend" : "accelerate_cblas_sgemm",
+      "gflops" : 2600.558777179763,
+      "iterations" : 100,
+      "k" : 768,
+      "m" : 512,
+      "meanNanos" : 330335,
+      "minNanos" : 232250,
+      "n" : 768,
+      "p50Nanos" : 309291,
+      "p95Nanos" : 492916,
+      "shape" : "qkv_proj",
+      "warmup" : 10
+    },
+    {
+      "backend" : "mps_matrix_multiplication",
+      "gflops" : 554.3433207194589,
+      "iterations" : 100,
+      "k" : 768,
+      "m" : 512,
+      "meanNanos" : 1273777,
+      "minNanos" : 1089541,
+      "n" : 768,
+      "p50Nanos" : 1269750,
+      "p95Nanos" : 1417083,
+      "shape" : "qkv_proj",
+      "warmup" : 10
+    },
+    {
+      "backend" : "custom_metal_fp32",
+      "gflops" : 498.86494183568624,
+      "iterations" : 100,
+      "k" : 768,
+      "m" : 512,
+      "meanNanos" : 1564112,
+      "minNanos" : 1210708,
+      "n" : 768,
+      "p50Nanos" : 1600541,
+      "p95Nanos" : 1737375,
+      "shape" : "qkv_proj",
+      "tile" : {
+        "tgM" : 16,
+        "tgN" : 16
+      },
+      "warmup" : 10
+    },
+    {
+      "backend" : "accelerate_cblas_sgemm",
+      "gflops" : 1974.0594541902367,
+      "iterations" : 100,
+      "k" : 768,
+      "m" : 512,
+      "meanNanos" : 1615201,
+      "minNanos" : 1223833,
+      "n" : 3072,
+      "p50Nanos" : 1436083,
+      "p95Nanos" : 2337583,
+      "shape" : "ffn_up",
+      "warmup" : 10
+    },
+    {
+      "backend" : "mps_matrix_multiplication",
+      "gflops" : 1050.3996104347825,
+      "iterations" : 100,
+      "k" : 768,
+      "m" : 512,
+      "meanNanos" : 2838108,
+      "minNanos" : 2300000,
+      "n" : 3072,
+      "p50Nanos" : 2723083,
+      "p95Nanos" : 3404291,
+      "shape" : "ffn_up",
+      "warmup" : 10
+    },
+    {
+      "backend" : "custom_metal_fp32",
+      "gflops" : 799.16848762554,
+      "iterations" : 100,
+      "k" : 768,
+      "m" : 512,
+      "meanNanos" : 3822708,
+      "minNanos" : 3023041,
+      "n" : 3072,
+      "p50Nanos" : 3939625,
+      "p95Nanos" : 4210625,
+      "shape" : "ffn_up",
+      "tile" : {
+        "tgM" : 16,
+        "tgN" : 16
+      },
+      "warmup" : 10
+    },
+    {
+      "backend" : "accelerate_cblas_sgemm",
+      "gflops" : 2104.383993254596,
+      "iterations" : 100,
+      "k" : 3072,
+      "m" : 512,
+      "meanNanos" : 1777655,
+      "minNanos" : 1148041,
+      "n" : 768,
+      "p50Nanos" : 1534291,
+      "p95Nanos" : 2351000,
+      "shape" : "ffn_down",
+      "warmup" : 10
+    },
+    {
+      "backend" : "mps_matrix_multiplication",
+      "gflops" : 1059.497469137156,
+      "iterations" : 100,
+      "k" : 3072,
+      "m" : 512,
+      "meanNanos" : 2665761,
+      "minNanos" : 2280250,
+      "n" : 768,
+      "p50Nanos" : 2619833,
+      "p95Nanos" : 3241625,
+      "shape" : "ffn_down",
+      "warmup" : 10
+    },
+    {
+      "backend" : "custom_metal_fp32",
+      "gflops" : 776.2924381250754,
+      "iterations" : 100,
+      "k" : 3072,
+      "m" : 512,
+      "meanNanos" : 3491523,
+      "minNanos" : 3112125,
+      "n" : 768,
+      "p50Nanos" : 3304791,
+      "p95Nanos" : 4541250,
+      "shape" : "ffn_down",
+      "tile" : {
+        "tgM" : 16,
+        "tgN" : 16
+      },
+      "warmup" : 10
+    },
+    {
+      "backend" : "accelerate_cblas_sgemm",
+      "gflops" : 944.087184056272,
+      "iterations" : 100,
+      "k" : 768,
+      "m" : 512,
+      "meanNanos" : 108448,
+      "minNanos" : 106625,
+      "n" : 128,
+      "p50Nanos" : 106833,
+      "p95Nanos" : 121208,
+      "shape" : "token_proj",
+      "warmup" : 10
+    },
+    {
+      "backend" : "mps_matrix_multiplication",
+      "gflops" : 185.5117180373186,
+      "iterations" : 100,
+      "k" : 768,
+      "m" : 512,
+      "meanNanos" : 617988,
+      "minNanos" : 542625,
+      "n" : 128,
+      "p50Nanos" : 605958,
+      "p95Nanos" : 721083,
+      "shape" : "token_proj",
+      "warmup" : 10
+    },
+    {
+      "backend" : "custom_metal_fp32",
+      "gflops" : 191.11784138460018,
+      "iterations" : 100,
+      "k" : 768,
+      "m" : 512,
+      "meanNanos" : 596178,
+      "minNanos" : 526708,
+      "n" : 128,
+      "p50Nanos" : 584000,
+      "p95Nanos" : 702291,
+      "shape" : "token_proj",
+      "tile" : {
+        "tgM" : 16,
+        "tgN" : 16
+      },
+      "warmup" : 10
+    }
+  ],
+  "runDate" : "2026-05-01T01:25:34Z"
+}

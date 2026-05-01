@@ -1,0 +1,118 @@
+{
+  "hardware" : {
+    "chip" : "Apple M1 Ultra",
+    "memoryGB" : 128,
+    "osVersion" : "Version 26.4.1 (Build 25E253)"
+  },
+  "results" : [
+    {
+      "backend" : "custom_metal_fp32",
+      "gflops" : 495.7978095099913,
+      "iterations" : 50,
+      "k" : 768,
+      "m" : 512,
+      "meanNanos" : 6284442,
+      "minNanos" : 4872791,
+      "n" : 3072,
+      "p50Nanos" : 6288291,
+      "p95Nanos" : 6953375,
+      "shape" : "ffn_up",
+      "tile" : {
+        "tgM" : 8,
+        "tgN" : 8
+      },
+      "warmup" : 5
+    },
+    {
+      "backend" : "custom_metal_fp32",
+      "gflops" : 797.7938096260216,
+      "iterations" : 50,
+      "k" : 768,
+      "m" : 512,
+      "meanNanos" : 3375198,
+      "minNanos" : 3028250,
+      "n" : 3072,
+      "p50Nanos" : 3339875,
+      "p95Nanos" : 3765291,
+      "shape" : "ffn_up",
+      "tile" : {
+        "tgM" : 16,
+        "tgN" : 16
+      },
+      "warmup" : 5
+    },
+    {
+      "backend" : "custom_metal_fp32",
+      "gflops" : 610.7425280126845,
+      "iterations" : 50,
+      "k" : 768,
+      "m" : 512,
+      "meanNanos" : 4902176,
+      "minNanos" : 3955708,
+      "n" : 3072,
+      "p50Nanos" : 4619083,
+      "p95Nanos" : 5800708,
+      "shape" : "ffn_up",
+      "tile" : {
+        "tgM" : 32,
+        "tgN" : 32
+      },
+      "warmup" : 5
+    },
+    {
+      "backend" : "custom_metal_fp32",
+      "gflops" : 705.9188732970525,
+      "iterations" : 50,
+      "k" : 768,
+      "m" : 512,
+      "meanNanos" : 3942042,
+      "minNanos" : 3422375,
+      "n" : 3072,
+      "p50Nanos" : 3836333,
+      "p95Nanos" : 4581583,
+      "shape" : "ffn_up",
+      "tile" : {
+        "tgM" : 8,
+        "tgN" : 32
+      },
+      "warmup" : 5
+    },
+    {
+      "backend" : "custom_metal_fp32",
+      "gflops" : 721.0982024771866,
+      "iterations" : 50,
+      "k" : 768,
+      "m" : 512,
+      "meanNanos" : 4227348,
+      "minNanos" : 3350333,
+      "n" : 3072,
+      "p50Nanos" : 4217625,
+      "p95Nanos" : 4964791,
+      "shape" : "ffn_up",
+      "tile" : {
+        "tgM" : 32,
+        "tgN" : 8
+      },
+      "warmup" : 5
+    },
+    {
+      "backend" : "custom_metal_fp32",
+      "gflops" : 304.95527307538504,
+      "iterations" : 50,
+      "k" : 768,
+      "m" : 512,
+      "meanNanos" : 9188068,
+      "minNanos" : 7922208,
+      "n" : 3072,
+      "p50Nanos" : 9208041,
+      "p95Nanos" : 10309083,
+      "shape" : "ffn_up",
+      "tile" : {
+        "tgM" : 8,
+        "tgN" : 4
+      },
+      "warmup" : 5
+    }
+  ],
+  "runDate" : "2026-05-01T01:25:46Z"
+}
