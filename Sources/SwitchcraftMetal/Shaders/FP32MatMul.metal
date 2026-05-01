@@ -27,30 +27,31 @@
 // Shape model
 // -----------
 //
-// All three operands are batched 3-D tensors:
+// All three operands are batched 3-D-ish tensors with explicit row and
+// batch strides (in *elements*, not bytes). Inner-K elements are
+// always contiguous (stride 1).
 //
-//     A : [batch, M,                  K]        — row-major
-//     B : [batch, transposeB ? N : K, transposeB ? K : N]
-//                                                — row-major
-//     C : [batch, M, N]                          — row-major
+//   A : [batch, M, K]   row-stride = a_row_stride
+//                        batch-stride = a_stride_batch
+//   B : [batch, *, K]   if transposeB == 1, row-stride b_row_stride
+//                        addresses successive N-rows
+//       [batch, K, N]   if transposeB == 0, row-stride b_row_stride
+//                        addresses successive K-rows (column N within row)
+//   C : [batch, M, N]   row-stride = c_row_stride
+//                        batch-stride = c_stride_batch
 //
-// `transposeB == 1`  →  C = A · Bᵀ  (Q·Kᵀ, 2_Dense)
-// `transposeB == 0`  →  C = A · B   (softmax·V)
-//
-// Strides are computed implicitly from M / N / K — no broadcast,
-// no padding, no batch-strided weight reuse. Callers that want to
-// share a B tensor across batches must set `b_stride_batch = 0` via
-// future args-struct extension; not needed for the current callers.
+// Explicit row strides let `T5MetalEmbedder` slice per-head views out
+// of an interleaved `[M, D = nHeads * dHead]` Q/K/V buffer without a
+// separate transpose kernel. Default-shape callers set
+// `a_row_stride == K`, `b_row_stride == K` (transposed) or `N`
+// (non-transposed), and `c_row_stride == N`.
 //
 // Deviations from upstream
 // ------------------------
 //
 // 1. **Naive per-element schedule.** Upstream's `mul_mm` family uses a
 //    `simdgroup_matrix` tiled load/multiply-accumulate; we ship a
-//    one-thread-per-output-element scalar kernel instead. The encoder
-//    workload in #64 is dominated by the 84 Q4_K matmuls; these three
-//    activation-only ops contribute O(few %) of cycles per encode and
-//    aren't on the critical path for the parity gate.
+//    one-thread-per-output-element scalar kernel instead.
 // 2. **No FP16 path.** ggml's `_f16_f32` and `_f16_f16` instantiations
 //    are not emitted; this kernel handles only the activations the
 //    T5 encoder hands it. The 2_Dense FP16 weight is widened to FP32
@@ -66,8 +67,7 @@ using namespace metal;
 
 // ---------------------------------------------------------------------
 // `FP32MatMulArgs` — flat-3D framing matching the host-side Swift
-// `FP32MatMulArgs` byte-for-byte. All fields are `uint32_t` so the
-// struct size is fixed at 32 bytes regardless of platform alignment.
+// `FP32MatMulArgs` byte-for-byte. All fields are `uint32_t`.
 // ---------------------------------------------------------------------
 
 typedef struct {
@@ -76,14 +76,17 @@ typedef struct {
     uint32_t K;                 // contraction dim
     uint32_t batch;             // number of independent matmuls
     uint32_t transpose_b;       // 0 → C = A·B  ;  1 → C = A·Bᵀ
-    uint32_t a_stride_batch;    // floats between batches in A (typically M*K)
+    uint32_t a_stride_batch;    // floats between batches in A
     uint32_t b_stride_batch;    // floats between batches in B
-    uint32_t c_stride_batch;    // floats between batches in C (typically M*N)
+    uint32_t c_stride_batch;    // floats between batches in C
+    uint32_t a_row_stride;      // floats between successive M-rows in A
+    uint32_t b_row_stride;      // floats between successive rows of B (N-rows if transposed, K-rows if not)
+    uint32_t c_row_stride;      // floats between successive M-rows in C
 } FP32MatMulArgs;
 
 static_assert(
-    sizeof(FP32MatMulArgs) == 32,
-    "FP32MatMulArgs layout drifted (expected 32 bytes)"
+    sizeof(FP32MatMulArgs) == 44,
+    "FP32MatMulArgs layout drifted (expected 44 bytes)"
 );
 
 // ---------------------------------------------------------------------
@@ -108,24 +111,23 @@ kernel void kernel_fp32_matmul(
         return;
     }
 
-    device const float * a_row = A + b * args.a_stride_batch + m * args.K;
-    device       float * c_row = C + b * args.c_stride_batch + m * args.N;
+    device const float * a_row = A + b * args.a_stride_batch + m * args.a_row_stride;
+    device       float * c_row = C + b * args.c_stride_batch + m * args.c_row_stride;
 
     float acc = 0.0f;
 
     if (args.transpose_b != 0u) {
-        // B laid out as [batch, N, K] row-major — output (m,n) pairs
-        // with row n of B (sized K).
-        device const float * b_row = B + b * args.b_stride_batch + n * args.K;
+        // B[batch, n, k] — row-stride b_row_stride between N-rows.
+        device const float * b_row = B + b * args.b_stride_batch + n * args.b_row_stride;
         for (uint k = 0; k < args.K; ++k) {
             acc += a_row[k] * b_row[k];
         }
     } else {
-        // B laid out as [batch, K, N] row-major — output (m,n) walks
-        // the n-th column of B with stride N.
+        // B[batch, k, n] — row-stride b_row_stride between K-rows;
+        // walk column n with that stride.
         device const float * b_col = B + b * args.b_stride_batch + n;
         for (uint k = 0; k < args.K; ++k) {
-            acc += a_row[k] * b_col[k * args.N];
+            acc += a_row[k] * b_col[k * args.b_row_stride];
         }
     }
 
