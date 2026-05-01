@@ -259,6 +259,52 @@ When any of the unfalsified conditions trigger, ADR 010(h)'s
 "tighten back toward ±0.01" note should be revisited in the same
 commit that updates the references.
 
+### Status update (2026-05-01) — sub-condition (g)(2) is being followed
+
+Sub-condition (g)(2) above ("Custom Metal kernels … effectively a
+Swift port of ggml's T5 inference path") has moved from *unfalsified
+candidate* to *active port*. Umbrella issue #57 tracks the multi-PR
+campaign; sub-issue #58 lands the porting catalogue at
+[`docs/porting/ggml-t5.md`](../docs/porting/ggml-t5.md), which fixes
+the upstream commit pins (ggml, llama.cpp, Candle, Witchcraft), the
+artefact map (upstream → Swift target), the Q4_K block layout
+reference, the per-op precision matrix (informational; ADR 016 will
+promote to normative in #64), the relative-position attention bucket
+formula, the FFN activation determination
+(`feed_forward_proj: "gated-gelu"` per `google/xtr-base-en/config.json`,
+which corrects the issue-body assumption that classic T5-base ReLU
+applies), the GGUF asset acquisition pipeline, and the tokeniser
+disposition.
+
+This work is **a port, not an investigation**. The kernels exist
+upstream in production-tested form (ggml has shipped them for years;
+Witchcraft uses Candle's port of the same kernels in production at
+Dropbox). The remaining work — sub-issues #59–#65 — is translation,
+not discovery. Contrast with sub-conditions (g)(1) (SmoothQuant, #43)
+and (g)(2)'s sibling MIL-pass approach (#46): both *were* genuine
+research questions and both produced empirical no-go reports. The
+ggml port path was deliberately *not* gated behind another
+investigation because the source code is the answer; we read it,
+translate it, and parity-test against the existing fixtures.
+
+The port does not foreclose future ANE access. Per the existing
+sub-condition (g)(1) bullet and ADR 009, the `Embedder` protocol
+seam supports multiple conformances; a future
+`T5CoreMLFP16Embedder` may ship alongside `T5MetalEmbedder` if a
+later coremltools release surfaces finer-grained per-op precision
+control. The port sets ANE aside for now; it does not surrender the
+ANE prize permanently.
+
+When the port lands its NDCG@10 gate (sub-issue #65) and
+`T5MetalEmbedder` ships as an additional conformance, the section
+above should record that ratchet sub-condition (g)(2) has *fully
+collapsed* — both stacks then have an FP16-storage Q4_K-storage
+embedder available. ADR 010(h)'s "tighten back toward ±0.01" note
+becomes actionable in the same commit, because Switchcraft and
+Witchcraft will run the same kernels against the same GGUF asset
+and the cross-stack precision pair becomes Q4_K-vs-Q4_K rather than
+FP32-vs-Q4_K.
+
 ## (h) What this ADR is not
 
 - It is **not** a directive to change either side's precision. Both
