@@ -3,44 +3,53 @@
 // One-shot helper that registers `SwitchcraftMetal`'s `Bundle.module`
 // with the shared `MetalContext` so this target's MSL kernels are
 // reachable via `MetalContext.pipeline(for:)`. Issue #60 (the first
-// kernel landing in this target) is the first caller; subsequent
-// kernel sub-issues reuse the same helper.
+// kernel landing in this target) added this helper for `Q4KMatMul`;
+// issue #61 generalises it to handle multiple `.metal` source files
+// in the same bundle.
 //
 // Why a separate file
 // -------------------
 //
 // Swift has no portable module-init hook, so registration happens
 // lazily at the first kernel-wrapper init. The helper is idempotent
-// (matching `MetalContext.register(bundle:resourceName:)`) — calling
-// it from multiple kernel wrappers in the same process is safe and
-// cheap. Keeping it in its own file makes the contract obvious to
-// future kernel authors: call `registerSwitchcraftMetalShaders(...)`
-// from your wrapper's `init`, and your `.metal` file lands in the
-// shared pipeline cache.
+// (`MetalContext.register(bundle:resourceName:)` keys on
+// `(bundleURL, resourceName)`) — calling it from multiple kernel
+// wrappers in the same process is safe and cheap. Keeping it in its
+// own file makes the contract obvious to future kernel authors: add
+// your `.metal` basename to `switchcraftMetalShaderResourceNames`,
+// call `registerSwitchcraftMetalShaders(...)` from your wrapper's
+// `init`, and your kernel lands in the shared pipeline cache.
 
 #if canImport(Metal)
 
 import Foundation
 @_spi(SwitchcraftMetal) import SwitchcraftCore
 
-/// Resource basename of the `SwitchcraftMetal` MSL source. Single
-/// `.metal` file at this stage; future kernels can either share this
-/// file or add new ones (each new file gets its own basename and a
-/// matching `register(bundle:resourceName:)` call).
+/// Resource basenames of the `SwitchcraftMetal` MSL sources that ship
+/// in `Bundle.module`. Each entry must match the file name (without
+/// extension) of a `.metal` file under
+/// `Sources/SwitchcraftMetal/Shaders/`. The runtime-source-compile
+/// fallback path consults these names one at a time; each name produces
+/// its own `MTLLibrary` registered with the shared `MetalContext`.
 ///
-/// Matches the file name (without extension) of the runtime-source-
-/// compile fallback target — i.e. `Sources/SwitchcraftMetal/Shaders/Q4KMatMul.metal`.
+/// New kernel sub-issues append their `.metal` basename here.
 @_spi(SwitchcraftMetal)
-public let switchcraftMetalShaderResourceName = "Q4KMatMul"
+public let switchcraftMetalShaderResourceNames: [String] = [
+    "Q4KMatMul",  // issue #60
+    "RMSNorm",    // issue #61
+]
 
 /// Register `SwitchcraftMetal`'s `Bundle.module` with `context` so its
-/// `.metal` shaders are reachable via `pipeline(for:)`. Idempotent.
+/// `.metal` shaders are reachable via `pipeline(for:)`. Idempotent —
+/// each `(bundle, resourceName)` pair registers exactly once.
 @_spi(SwitchcraftMetal)
 public func registerSwitchcraftMetalShaders(with context: MetalContext) throws {
-    try context.register(
-        bundle: Bundle.module,
-        resourceName: switchcraftMetalShaderResourceName
-    )
+    for resourceName in switchcraftMetalShaderResourceNames {
+        try context.register(
+            bundle: Bundle.module,
+            resourceName: resourceName
+        )
+    }
 }
 
 #endif // canImport(Metal)

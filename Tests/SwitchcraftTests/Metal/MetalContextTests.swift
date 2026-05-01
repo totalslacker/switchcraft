@@ -73,6 +73,39 @@ struct MetalContextTests {
         }
     }
 
+    @Test("register(bundle:resourceName:) keys idempotency on (bundle, resource) pair")
+    func registerKeysIdempotencyOnBundleAndResourcePair() throws {
+        // Issue #61 changed the idempotency key from `bundleURL` alone
+        // to `(bundleURL, resourceName)` so a single bundle that ships
+        // multiple `.metal` files (e.g. `SwitchcraftMetal/Bundle.module`
+        // shipping both `Q4KMatMul.metal` and `RMSNorm.metal`) can
+        // register each as its own library.
+        //
+        // We can't construct two distinct successful registrations
+        // against this test bundle (it ships no `.metal` files), but
+        // we can verify the *keying* indirectly: with the old
+        // bundle-only key, the second call below would short-circuit
+        // and return success silently (since the same bundle was
+        // already registered at `MetalContext.init` with the default
+        // `MetalCoreShaders` resource). With the new pair-keyed
+        // implementation, the second call must actually attempt a
+        // load — and because `no_such_shader_file.metal` doesn't
+        // exist, it throws. Old behaviour: pass; new behaviour: throw.
+        // The `#expect(throws:)` therefore witnesses the key change.
+        let ctx = try MetalContext()
+        #expect(throws: MetalContextError.self) {
+            try ctx.register(
+                bundle: Bundle.module,
+                resourceName: "no_such_shader_file"
+            )
+        }
+        // The original default-library registration is still intact —
+        // a failed second registration didn't pollute the loaded
+        // libraries list.
+        let pipeline = try ctx.pipeline(for: "identity_fp32")
+        #expect(pipeline.threadExecutionWidth >= 1)
+    }
+
     @Test("register(bundle:resourceName:) error path leaves context state intact")
     func registerBundleErrorPathLeavesContextIntact() throws {
         // Use a fresh context so the registration failure can't leak

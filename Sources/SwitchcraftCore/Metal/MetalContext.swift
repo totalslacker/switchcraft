@@ -161,10 +161,22 @@ public final class MetalContext: @unchecked Sendable {
     private var libraries: [MTLLibrary] = []
 
     /// Bundle identities already registered, used to make registration
-    /// idempotent. We key on `Bundle.bundleURL` because `Bundle` itself
-    /// is not `Hashable`; the URL is stable per loaded bundle.
+    /// idempotent. We key on the `(bundle.bundleURL, resourceName)` pair
+    /// because a single bundle may ship multiple `.metal` source files
+    /// — each of which compiles to its own `MTLLibrary` via the
+    /// runtime-source-compile fallback path. `Bundle` itself is not
+    /// `Hashable`, so the URL is the stable per-bundle component.
     /// Guarded by `cacheLock`.
-    private var registeredBundleURLs: Set<URL> = []
+    private var registeredBundleResources: Set<BundleResourceKey> = []
+
+    /// Composite key for `registeredBundleResources`. Two `.metal`
+    /// resources from the same bundle each register an independent
+    /// library; two registrations of the same `(bundle, resource)` pair
+    /// no-op (idempotency).
+    private struct BundleResourceKey: Hashable {
+        let bundleURL: URL
+        let resourceName: String
+    }
 
     /// Pipeline cache keyed by Metal function name. Guarded by `cacheLock`.
     /// The cached `MTLComputePipelineState` values are themselves
@@ -198,7 +210,12 @@ public final class MetalContext: @unchecked Sendable {
         )
         self.library = defaultLib
         self.libraries = [defaultLib]
-        self.registeredBundleURLs = [Bundle.module.bundleURL]
+        self.registeredBundleResources = [
+            BundleResourceKey(
+                bundleURL: Bundle.module.bundleURL,
+                resourceName: Self.shaderResourceName
+            )
+        ]
     }
 
     /// Register an additional Metal library bundle so its kernels are
@@ -206,11 +223,17 @@ public final class MetalContext: @unchecked Sendable {
     /// future per-target shader bundles) so the central pipeline cache
     /// can resolve their function names without a separate context.
     ///
-    /// Idempotent — registering a bundle that's already registered is a
-    /// no-op. Thread-safe under `cacheLock`. The same load strategy
-    /// (`makeDefaultLibrary` first, fallback to source compilation) is
-    /// used for every registered bundle so the build-pipeline behaviour
-    /// is uniform across targets.
+    /// Idempotency is keyed on the `(bundle, resourceName)` pair, not
+    /// on the bundle alone — a single bundle that ships multiple
+    /// `.metal` source files registers each one independently (the
+    /// runtime-source-compile fallback path produces one `MTLLibrary`
+    /// per `.metal` file). Calling this method a second time with the
+    /// same bundle but a *different* resource name therefore loads a
+    /// new library; calling it twice with the same `(bundle, resource)`
+    /// pair is a safe no-op. Thread-safe under `cacheLock`. The same
+    /// load strategy (`makeDefaultLibrary` first, fallback to source
+    /// compilation) is used for every registration so build-pipeline
+    /// behaviour is uniform across targets.
     ///
     /// - Parameters:
     ///   - bundle: the resource bundle to load Metal shaders from.
@@ -224,17 +247,24 @@ public final class MetalContext: @unchecked Sendable {
         cacheLock.lock()
         defer { cacheLock.unlock() }
 
-        let key = bundle.bundleURL
-        if registeredBundleURLs.contains(key) {
+        let key = BundleResourceKey(
+            bundleURL: bundle.bundleURL,
+            resourceName: resourceName
+        )
+        if registeredBundleResources.contains(key) {
             return
         }
+        // Load before mutating registeredBundleResources so a load
+        // failure leaves the registered set untouched (callers may
+        // retry with a different resource name, or simply observe the
+        // failure and fall back).
         let lib = try Self.loadLibrary(
             device: device,
             bundle: bundle,
             resourceName: resourceName
         )
         libraries.append(lib)
-        registeredBundleURLs.insert(key)
+        registeredBundleResources.insert(key)
     }
 
     /// Resolve (or build and cache) the pipeline state for a kernel by
