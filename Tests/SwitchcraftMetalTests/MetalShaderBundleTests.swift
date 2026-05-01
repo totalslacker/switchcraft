@@ -5,9 +5,10 @@
 // (`RMSNorm.metal`, alongside the existing `Q4KMatMul.metal` from
 // #60) and changed `MetalContext.register(bundle:resourceName:)`'s
 // idempotency key from `bundleURL` alone to `(bundleURL, resourceName)`
-// so multi-resource bundles work. These tests exercise the positive
-// path on the host: both kernels resolve to working pipelines against
-// a single shared `MetalContext`.
+// so multi-resource bundles work. Issue #62 adds `Softmax.metal` as the
+// third bundled `.metal` source. These tests exercise the positive
+// path on the host: every catalogued kernel resolves to a working
+// pipeline against a single shared `MetalContext`.
 
 #if canImport(Metal)
 
@@ -35,19 +36,23 @@ struct MetalShaderBundleTests {
         // registration bug behind kernel test failures).
         _ = try ctx.pipeline(for: Q4KMatMulKernel.kernelFunctionName)
         _ = try ctx.pipeline(for: RMSNormKernel.kernelFunctionName)
+        _ = try ctx.pipeline(for: SoftmaxKernel.kernelFunctionName)
     }
 
-    @Test("Q4KMatMulKernel and RMSNormKernel coexist on a single MetalContext")
-    func bothKernelsCoexist() throws {
+    @Test("Q4KMatMulKernel, RMSNormKernel, and SoftmaxKernel coexist on a single MetalContext")
+    func allKernelsCoexist() throws {
         let ctx = try #require(MetalContext.shared)
         let q4 = try Q4KMatMulKernel(context: ctx)
         let rn = try RMSNormKernel(context: ctx)
+        let sm = try SoftmaxKernel(context: ctx)
         // Surface the wrapper-side function-name constants so a future
         // rename can't silently break `init(context:)`.
         _ = q4
         _ = rn
+        _ = sm
         #expect(Q4KMatMulKernel.kernelFunctionName == "kernel_mul_mm_q4_K_f32")
         #expect(RMSNormKernel.kernelFunctionName == "kernel_rms_norm_mul_f32")
+        #expect(SoftmaxKernel.kernelFunctionName == "kernel_soft_max_f32")
     }
 }
 

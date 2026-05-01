@@ -37,6 +37,7 @@ import Foundation
 public let switchcraftMetalShaderResourceNames: [String] = [
     "Q4KMatMul",  // issue #60
     "RMSNorm",    // issue #61
+    "Softmax",    // issue #62
 ]
 
 /// Register `SwitchcraftMetal`'s `Bundle.module` with `context` so its
