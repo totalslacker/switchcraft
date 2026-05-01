@@ -345,6 +345,36 @@ Per-op precision routing follows [ADR 017](adrs/017-per-op-precision-routing.md)
 the cross-stack ≥ 0.99999 cosine gate against PyTorch FP32 is the
 correctness contract.
 
+The default embedder for adopters remains
+[`T5CoreMLEmbedder`](#coreml-setup); `T5MetalEmbedder` ships alongside
+it for callers who want the GGUF-asset path or want to evaluate the
+NDCG/perf gates documented below.
+
+### Running the NFCorpus parity gate end-to-end
+
+The NDCG@10 ∈ [0.31, 0.33] gate (issue #65) exercises the full pipeline
+through `T5MetalEmbedder` against the NFCorpus test split. It requires
+both the GGUF asset and the NFCorpus dataset:
+
+```bash
+# 1. Fetch the NFCorpus test split (academic-use license; not committed).
+./scripts/fetch-nfcorpus.sh /path/to/nfcorpus
+export SWITCHCRAFT_NFCORPUS_DIR=/path/to/nfcorpus
+
+# 2. Point at the GGUF asset (see "The asset" above).
+export SWITCHCRAFT_XTR_GGUF=$PWD/Tests/Fixtures/xtr-base-en.gguf
+
+# 3. Run the Metal NDCG gate (multi-minute one-time index build).
+swift test --filter NFCorpusMetalBenchmark
+```
+
+When either env var is unset or Metal is unavailable, the suite skips
+cleanly. The cross-stack parity gate
+(`CrossStackEmbeddingParityMetalTests`) follows the same shape and
+additionally requires `Tests/Fixtures/reference_embeddings.{bin,json}`
+to be present (regenerated locally per
+[ADR 013](adrs/013-reference-fixture-provenance.md); not committed).
+
 ## Running the tests
 
 ```bash

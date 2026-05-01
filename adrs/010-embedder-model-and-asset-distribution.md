@@ -242,6 +242,36 @@ than re-litigating tolerance. If a future Witchcraft build raises its
 quant precision (Q5/Q8/F16/F32), the tolerance should be tightened
 back toward ±0.01 in the same commit that updates the references.
 
+### Cross-stack tolerance for the Metal embedder (`T5MetalEmbedder`)
+
+`T5MetalEmbedder` (Phase 2, umbrella #57) runs the same Q4K asset
+distributed in (j) directly on Apple Metal — the storage axis is
+**Q4K-on-both-stacks**. The remaining drift sources are per-kernel
+rounding differences (Switchcraft's custom Metal kernels vs ggml's
+reference kernels in Candle), the FP16 staging used in the 2_Dense
+projection, and ggml-vs-port arithmetic-order differences. ADR 014
+frames this as the "matched-storage axis" and predicts substantially
+tighter drift than the FP32 ↔ Q4K pair documented above.
+
+**Tolerance**: `2 × empirical maxAbs` from
+`Tests/SwitchcraftMetalTests/CrossStackEmbeddingParityMetalTests.swift`,
+where `maxAbs` is the worst per-token, per-dim absolute drift between
+`T5MetalEmbedder` output and `Tests/Fixtures/reference_embeddings.bin`.
+The test prints the observed `maxAbs` on every run; if a regenerated
+fixture or kernel revision pushes the observation past `tolerance / 2`,
+re-derive both the test constant and this sub-section in the same
+commit (per CLAUDE.md's plan-tick coherence rule).
+
+The current in-tree constant is `0.01` — a conservative ceiling pending
+the first in-tree empirical measurement (operator step recorded in the
+issue #65 task list). Replace with `2 × observed maxAbs` once a developer
+machine has both `SWITCHCRAFT_XTR_GGUF` and the regenerated
+`reference_embeddings.{bin,json}` fixture available; document the
+observed value here at that point. The CoreML ±0.025 tolerance documented
+above is **independent**: both pairs (CoreML-vs-Witchcraft and
+Metal-vs-Witchcraft) coexist with distinct tolerances per their distinct
+precision axes.
+
 ### Cross-stack tolerance for the INT8 weight-only variant
 
 The INT8 weight-only variant introduced in (i) keeps FP32 compute and
