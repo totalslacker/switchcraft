@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Phase 2: Metal embedder
+
+- Add Q4_K × FP32 Metal matmul kernel (`kernel_mul_mm_q4_K_f32`) ported
+  faithfully from ggml at the catalogue-pinned commit. Exposed via
+  `Q4KMatMulKernel` (`@_spi(SwitchcraftMetal)`); single-dispatch
+  encoder, no commit/wait — orchestration owns batching. Issue #60.
+- Extend `MetalContext` with per-target shader-bundle registration
+  (`register(bundle:resourceName:)`). Each target that ships `.metal`
+  files now registers its bundle lazily at first kernel-init time;
+  `pipeline(for:)` searches all registered libraries. ADR 015 §(e)
+  amendment lands with this change.
+
 ## [0.1.0] - Unreleased
 
 First public release. Phase 1 MVP feature-complete: a Swift port of
