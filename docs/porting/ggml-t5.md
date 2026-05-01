@@ -68,12 +68,11 @@ provides per-row Candle pointers for debugging.
 Each row maps an upstream ggml file/symbol to its destination Swift
 target file under the planned `SwitchcraftMetal` library target
 (introduced in #59). The "precision" column states the row's
-**informational** precision contract — storage dtype / compute dtype /
-accumulator dtype. **ADR 016 (sub-issue #64) promotes this matrix to
-normative.** Until then, downstream sub-issues may amend a row's
-precision contract if the kernel port surfaces a per-op requirement
-the catalogue's first guess got wrong; such amendments must be
-recorded both here and in ADR 016.
+precision contract — storage dtype / compute dtype / accumulator dtype.
+**ADR 017 (landed by sub-issue #64) promoted this matrix from
+informational to normative.** Downstream changes that touch a row's
+precision contract must follow the amendment process in ADR 017 and
+record the change both here and in that ADR.
 
 Swift destinations under `Sources/SwitchcraftMetal/` are *planned*
 paths — the target itself is created by #59 (the SPI-uplift +
@@ -89,7 +88,7 @@ forward references, not existing files.
 | `dequantize_row_q4_K` in `src/ggml-quants.c` | CPU helper `Sources/SwitchcraftMetal/GGUF/Q4KDecode.swift` (#59; reused as the parity-test reference for #60's matmul kernel) | Q4_K → FP32 (CPU reference) |
 | Metal kernel `kernel_dequantize_q4_K` in `src/ggml-metal/ggml-metal.metal` | `Sources/SwitchcraftMetal/Shaders/Q4KDequant.metal` (#64, first consumer is `kernel_get_rows_q4_K` token embedding lookup) | Q4_K → FP16 (compute) → FP32 (downstream consumer). **Moved from #60 to #64**: the matmul kernel inlines its own per-super-block dequant, so the standalone Metal kernel has no production caller until #64 — shipping it earlier would be shadow code with only a synthetic test harness keeping it alive. |
 | `kernel_mul_mm_q4_K_f32` (the matrix-matrix template instantiation at upstream `src/ggml-metal/ggml-metal.metal:10112`; Q4_K weights × FP32 activations, FP32 accumulator) | `Sources/SwitchcraftMetal/Kernels/Q4KMatMul.swift` + `Sources/SwitchcraftMetal/Shaders/Q4KMatMul.metal` (#60). Bundle: `SwitchcraftMetal/Bundle.module` per ADR 015 §(e) "Per-target shader bundles". | Q4_K weights / src1 FP32 in MTLBuffer, cast to FP16 in threadgroup memory before SIMD-group multiply / FP32 accumulator / FP32 output |
-| Token embedding lookup — `kernel_get_rows_q4_K` (Metal) / equivalent CPU path in `ggml-quants.c` | folded into `Sources/SwitchcraftMetal/Embedder/T5MetalEmbedder.swift` (#64); reuses Q4KDequant for the row gather | Q4_K storage → FP32 output |
+| Token embedding lookup — `kernel_get_rows_q4_K` (Metal) / equivalent CPU path in `ggml-quants.c` | folded into `Sources/SwitchcraftMetal/T5MetalEmbedder.swift` (#64); reuses Q4KDequant for the row gather | Q4_K storage → FP32 output |
 | `kernel_rms_norm_mul_f32` in `src/ggml-metal/ggml-metal.metal` (the F==2 / gain-fused specialisation of `kernel_rms_norm_fuse_impl<float, 2>`; T5 RMSNorm fused with the per-channel weight multiply — variance only, no mean centering, no bias) | `Sources/SwitchcraftMetal/Kernels/RMSNorm.swift` + `Sources/SwitchcraftMetal/Shaders/RMSNorm.metal` (#61) | FP32 weight / FP32 compute / FP32 accumulator. **FP32 carve-out is non-negotiable** per ADR 003 + ADR 014(b). The gain multiply is folded into the kernel rather than dispatched as a second elementwise op (one fewer barrier per RMSNorm × 25 invocations per encode). |
 | Q/K/V/O projections — `kernel_mul_mm_q4_K_f32` (4 × 12 = 48 invocations per encode) | reuses `Q4KMatMul.swift` from #60 | as Q4KMatMul row above |
 | Scaled dot-product attention — `kernel_mul_mm_f16` / `kernel_mul_mm_f32` for `Q · Kᵀ`, optional `Q8_0` K cache via `kernel_mul_mat_q8_0_f32` | **Landed by #64** as `Sources/SwitchcraftMetal/Kernels/FP32MatMul.swift` + `Sources/SwitchcraftMetal/Shaders/FP32MatMul.metal` (one shared FP32 matmul for `Q · Kᵀ`, `softmax · V`, and `2_Dense`; per-head views via row-stride args). Catalogue's `Attention.{swift,metal}` placeholder is superseded. | FP32 K/V (no Q8_0 K cache; the small-K activation path stays FP32 throughout) / FP32 compute / FP32 accumulator |
@@ -103,7 +102,7 @@ forward references, not existing files.
 | Final encoder RMSNorm | reuses `RMSNorm.swift` from #61 | as RMSNorm row above |
 | Projection matmul (the absorbed `2_Dense/Linear` from sentence-transformers; FP16 weights at GGUF read time, no quantisation) — `kernel_mul_mm_f16` | **Landed by #64** via `FP32MatMul` after FP16→FP32 widening at `T5MetalEmbedder.init` (~384 KiB resident). Catalogue's `ProjectionMatMul.{swift,metal}` placeholder superseded. | **FP16 widened to FP32 at init** / FP32 compute / FP32 accumulator |
 | L2 normalisation (unit norm per token) — element-wise `x / sqrt(sum(x²) + ε)`; ggml has no dedicated kernel for this combination, composed from `kernel_sqr_f32` + `kernel_sum_rows_f32` + element-wise scale | `Sources/SwitchcraftMetal/Kernels/L2Norm.swift` + `Sources/SwitchcraftMetal/Shaders/L2Norm.metal` (#63) | FP32 / FP32 / FP32. **Sensitive op** — `sum(x²)` over 768 elements has overflowed FP16 historically (ADR 014(b) point 2). |
-| Orchestrator — encoder forward pass dispatch order, `MTLBuffer` lifecycle, sliding-window integration | `Sources/SwitchcraftMetal/Embedder/T5MetalEmbedder.swift` (#64) | n/a (orchestration) |
+| Orchestrator — encoder forward pass dispatch order, `MTLBuffer` lifecycle, sliding-window integration | `Sources/SwitchcraftMetal/T5MetalEmbedder.swift` (#64) | n/a (orchestration) |
 
 ### Op-count reconciliation
 
