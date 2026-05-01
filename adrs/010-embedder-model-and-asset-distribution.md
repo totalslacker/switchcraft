@@ -244,33 +244,45 @@ back toward ±0.01 in the same commit that updates the references.
 
 ### Cross-stack tolerance for the Metal embedder (`T5MetalEmbedder`)
 
+> **Status (2026-05-01):** scaffolding only — **not yet calibrated**.
+> The `2 × empirical maxAbs` policy below is the intended contract;
+> the in-tree constant is still a conservative `0.01` ceiling pending
+> the first empirical measurement on a developer machine. The operator
+> step in issue #65's task list has not been run; the umbrella #57 and
+> #65 Plan rows are correspondingly unticked until it is.
+
 `T5MetalEmbedder` (Phase 2, umbrella #57) runs the same Q4K asset
 distributed in (j) directly on Apple Metal — the storage axis is
 **Q4K-on-both-stacks**. The remaining drift sources are per-kernel
 rounding differences (Switchcraft's custom Metal kernels vs ggml's
-reference kernels in Candle), the FP16 staging used in the 2_Dense
-projection, and ggml-vs-port arithmetic-order differences. ADR 014
-frames this as the "matched-storage axis" and predicts substantially
-tighter drift than the FP32 ↔ Q4K pair documented above.
+reference kernels in Candle) and ggml-vs-port arithmetic-order
+differences. The 2_Dense FP16 weight is widened to FP32 once at init
+(per #64), so the projection itself runs FP32 on both sides — FP16
+staging is not a drift source on this graph. ADR 014 frames this as
+the "matched-storage axis" and predicts substantially tighter drift
+than the FP32 ↔ Q4K pair documented above.
 
-**Tolerance**: `2 × empirical maxAbs` from
+**Intended tolerance**: `2 × empirical maxAbs` from
 `Tests/SwitchcraftMetalTests/CrossStackEmbeddingParityMetalTests.swift`,
 where `maxAbs` is the worst per-token, per-dim absolute drift between
 `T5MetalEmbedder` output and `Tests/Fixtures/reference_embeddings.bin`.
-The test prints the observed `maxAbs` on every run; if a regenerated
-fixture or kernel revision pushes the observation past `tolerance / 2`,
-re-derive both the test constant and this sub-section in the same
-commit (per CLAUDE.md's plan-tick coherence rule).
+The test prints the observed `maxAbs` on every run; once the empirical
+value is derived, if a regenerated fixture or kernel revision pushes
+the observation past `tolerance / 2`, re-derive both the test constant
+and this sub-section in the same commit (per CLAUDE.md's plan-tick
+coherence rule).
 
-The current in-tree constant is `0.01` — a conservative ceiling pending
-the first in-tree empirical measurement (operator step recorded in the
-issue #65 task list). Replace with `2 × observed maxAbs` once a developer
-machine has both `SWITCHCRAFT_XTR_GGUF` and the regenerated
+**Current in-tree constant**: `0.01` — a placeholder ceiling, **not**
+the calibrated `2 × maxAbs` value the policy describes. Replace with
+the empirical value once a developer machine has both
+`SWITCHCRAFT_XTR_GGUF` and the regenerated
 `reference_embeddings.{bin,json}` fixture available; document the
-observed value here at that point. The CoreML ±0.025 tolerance documented
-above is **independent**: both pairs (CoreML-vs-Witchcraft and
-Metal-vs-Witchcraft) coexist with distinct tolerances per their distinct
-precision axes.
+observed `maxAbs` here at that point and tick the issue #65 / umbrella
+#57 Plan rows in the same commit.
+
+The CoreML ±0.025 tolerance documented above is **independent**: both
+pairs (CoreML-vs-Witchcraft and Metal-vs-Witchcraft) coexist with
+distinct tolerances per their distinct precision axes.
 
 ### Cross-stack tolerance for the INT8 weight-only variant
 

@@ -123,7 +123,10 @@ struct EmbedderPerformanceTests {
 
     fileprivate static func buildCorpus() async throws -> Fixture {
         let modelURL = GGUFAsset.url!
-        let tokenizerURL = TokenizerFixture.url!
+        let tokenizerURL = try #require(
+            TokenizerFixture.url,
+            "tokenizer fixture missing — Tests/Fixtures/xtr-base-en.tokenizer.json absent"
+        )
         let tokenizer = try Tokenizer(contentsOf: tokenizerURL.path)
         let embedder = try await T5MetalEmbedder(
             modelURL: modelURL,
