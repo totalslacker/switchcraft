@@ -92,7 +92,7 @@ forward references, not existing files.
 | Token embedding lookup — `kernel_get_rows_q4_K` (Metal) / equivalent CPU path in `ggml-quants.c` | folded into `Sources/SwitchcraftMetal/Embedder/T5MetalEmbedder.swift` (#64); reuses Q4KDequant for the row gather | Q4_K storage → FP32 output |
 | `kernel_rms_norm_mul_f32` in `src/ggml-metal/ggml-metal.metal` (the F==2 / gain-fused specialisation of `kernel_rms_norm_fuse_impl<float, 2>`; T5 RMSNorm fused with the per-channel weight multiply — variance only, no mean centering, no bias) | `Sources/SwitchcraftMetal/Kernels/RMSNorm.swift` + `Sources/SwitchcraftMetal/Shaders/RMSNorm.metal` (#61) | FP32 weight / FP32 compute / FP32 accumulator. **FP32 carve-out is non-negotiable** per ADR 003 + ADR 014(b). The gain multiply is folded into the kernel rather than dispatched as a second elementwise op (one fewer barrier per RMSNorm × 25 invocations per encode). |
 | Q/K/V/O projections — `kernel_mul_mm_q4_K_f32` (4 × 12 = 48 invocations per encode) | reuses `Q4KMatMul.swift` from #60 | as Q4KMatMul row above |
-| Scaled dot-product attention — `kernel_mul_mm_f16` / `kernel_mul_mm_f32` for `Q · Kᵀ`, optional `Q8_0` K cache via `kernel_mul_mat_q8_0_f32` | `Sources/SwitchcraftMetal/Kernels/Attention.swift` + `Sources/SwitchcraftMetal/Shaders/Attention.metal` (#62) | FP16 K/V (Q8_0 K cache is a Witchcraft-side ggml choice not strictly required for our encode-only path; default to FP16 K/V) / FP32 compute / FP32 accumulator |
+| Scaled dot-product attention — `kernel_mul_mm_f16` / `kernel_mul_mm_f32` for `Q · Kᵀ`, optional `Q8_0` K cache via `kernel_mul_mat_q8_0_f32` | **Landed by #64** as `Sources/SwitchcraftMetal/Kernels/FP32MatMul.swift` + `Sources/SwitchcraftMetal/Shaders/FP32MatMul.metal` (one shared FP32 matmul for `Q · Kᵀ`, `softmax · V`, and `2_Dense`; per-head views via row-stride args). Catalogue's `Attention.{swift,metal}` placeholder is superseded. | FP32 K/V (no Q8_0 K cache; the small-K activation path stays FP32 throughout) / FP32 compute / FP32 accumulator |
 | Relative-position bias — T5 `_relative_position_bucket` (see "Relative-position attention bucket" below); added pre-softmax | bucket-table generation + per-head bias gather folded into `Sources/SwitchcraftMetal/T5MetalEmbedder.swift` (#64); the resulting `B × N` bias buffer is handed to the #62 softmax kernel via its optional `bias:` parameter | bucket-table FP32 / FP32 compute / FP32 accumulator |
 | `kernel_soft_max_f32` in `src/ggml-metal/ggml-metal.metal` (T5 attention softmax with optional additive mask/bias buffer) | `Sources/SwitchcraftMetal/Kernels/SoftmaxKernel.swift` + `Sources/SwitchcraftMetal/Shaders/Softmax.metal` (#62) | FP32 input / FP32 compute / FP32 accumulator. **Sensitive op — do not lower to FP16 even if it appears to work on a single fixture.** Wrapper exposes only what T5 needs (`input`, optional `bias`, `output`, `B`, `N`, `scale`); ALiBi (`max_bias`/`m0`/`m1`/`n_head_log2`) and attention-sinks (`src2`) buffer slots are preserved verbatim in MSL but disabled by the wrapper (T5 uses additive relpos bias on the mask slot, no sinks). |
 | FFN gate matmul (`wi_0`, gated branch) — `kernel_mul_mm_q4_K_f32` | reuses `Q4KMatMul.swift` from #60 | as Q4KMatMul row above |
@@ -101,7 +101,7 @@ forward references, not existing files.
 | FFN down matmul (`wo`) — `kernel_mul_mm_q4_K_f32` | reuses `Q4KMatMul.swift` from #60 | as Q4KMatMul row above |
 | Residual add (`x_out = x_in + sublayer(LN(x_in))`) — ggml `kernel_add_f32` | `Sources/SwitchcraftMetal/Kernels/ResidualAdd.swift` + `Sources/SwitchcraftMetal/Shaders/ResidualAdd.metal` (#63) | FP32 / FP32 / FP32. **Residual stream stays at FP32 throughout** per ADR 003 + ADR 014(b). |
 | Final encoder RMSNorm | reuses `RMSNorm.swift` from #61 | as RMSNorm row above |
-| Projection matmul (the absorbed `2_Dense/Linear` from sentence-transformers; FP16 weights at GGUF read time, no quantisation) — `kernel_mul_mm_f16` | `Sources/SwitchcraftMetal/Kernels/ProjectionMatMul.swift` + `Sources/SwitchcraftMetal/Shaders/ProjectionMatMul.metal` (#64) | FP16 weight / FP16 compute / FP32 accumulator |
+| Projection matmul (the absorbed `2_Dense/Linear` from sentence-transformers; FP16 weights at GGUF read time, no quantisation) — `kernel_mul_mm_f16` | **Landed by #64** via `FP32MatMul` after FP16→FP32 widening at `T5MetalEmbedder.init` (~384 KiB resident). Catalogue's `ProjectionMatMul.{swift,metal}` placeholder superseded. | **FP16 widened to FP32 at init** / FP32 compute / FP32 accumulator |
 | L2 normalisation (unit norm per token) — element-wise `x / sqrt(sum(x²) + ε)`; ggml has no dedicated kernel for this combination, composed from `kernel_sqr_f32` + `kernel_sum_rows_f32` + element-wise scale | `Sources/SwitchcraftMetal/Kernels/L2Norm.swift` + `Sources/SwitchcraftMetal/Shaders/L2Norm.metal` (#63) | FP32 / FP32 / FP32. **Sensitive op** — `sum(x²)` over 768 elements has overflowed FP16 historically (ADR 014(b) point 2). |
 | Orchestrator — encoder forward pass dispatch order, `MTLBuffer` lifecycle, sliding-window integration | `Sources/SwitchcraftMetal/Embedder/T5MetalEmbedder.swift` (#64) | n/a (orchestration) |
 
@@ -256,12 +256,13 @@ source. The C and Metal definitions remain canonical.
 
 ---
 
-## Per-op precision matrix (informational)
+## Per-op precision matrix (normative)
 
-**This matrix is informational. ADR 016 (sub-issue #64) promotes it
-to normative.** Downstream sub-issues may amend a row's precision
-contract if the port surfaces a per-op requirement the catalogue's
-first guess got wrong; record amendments here and in ADR 016.
+**This matrix is normative as of 2026-05-01.** ADR 017 (landed by
+sub-issue #64) promotes the matrix from informational to load-bearing
+for the SwitchcraftMetal port. Future kernel/orchestrator changes that
+touch a row of this table must follow the amendment process in ADR 017
+§(b)/(d).
 
 The precision contract per op aligns with ADR 003 (parity-arithmetic
 FP32 carve-outs for sensitive ops) and ADR 014(b)/(d)/(i)
@@ -282,7 +283,7 @@ catalogue follows ggml's per-op kernel choices verbatim.
 | Gated-GELU `gelu_new(gate) * up` | 12 | n/a | FP32 (`gelu_new` uses `tanh`; FP32 has headroom) | FP32 |
 | FFN down matmul `wo` | 12 | Q4_K | dequantised → FP16 | FP32 |
 | Residual add | 24 (12 post-attn + 12 post-FFN) | n/a | **FP32 — residual stream stays FP32 throughout** (ADR 014(b)) | FP32 |
-| Projection matmul (absorbed `2_Dense.weight`, 768 → 128) | 1 | FP16 (no Q4_K — 768 × 128 = 98,304 elements; ~192 KiB at FP16, ~384 KiB at FP32) | FP16 | FP32 |
+| Projection matmul (absorbed `2_Dense.weight`, 768 → 128) | 1 | **FP16 widened to FP32 once at `T5MetalEmbedder.init`** (~384 KiB) — see "Deviations from upstream" §#64 | FP32 (via `FP32MatMul`) | FP32 |
 | L2 normalisation | 1 | n/a | **FP32 — sensitive op**, `sum(x²)` overflows FP16 (ADR 014(b) point 2) | FP32 |
 
 **Total**: 184 op invocations per 512-token encode (or fewer per
@@ -565,6 +566,41 @@ Sub-issues record any concrete MSL/MTL-vs-upstream divergence here so a
 future port-refresh against a new commit pin can audit them quickly.
 "Faithful port" is the intent; deviations are minimised and explained.
 
+### #64 — `T5MetalEmbedder` orchestration
+
+- **One shared `FP32MatMul` kernel** for `Q · Kᵀ`, `softmax · V`, and
+  the `2_Dense` projection. Supersedes the catalogue's
+  `Attention.{swift,metal}` and `ProjectionMatMul.{swift,metal}`
+  placeholder rows. The kernel takes explicit row-stride args so
+  per-head views slice an interleaved `[M, D = nHeads*dHead]` Q/K/V
+  buffer without a separate transpose pass; softmax · V's output is
+  written back into `[M, D]` interleaved layout in one shot so the O
+  projection sees a contiguous input. Naive per-thread schedule —
+  performance optimisation deferred to #65 / future work; correctness
+  gate (≥0.99999 cosine vs PyTorch FP32) is the primary contract.
+- **2_Dense FP16 weight widened to FP32 once at `T5MetalEmbedder.init`**
+  (~384 KiB resident). Avoids landing a separate FP16 kernel family
+  for a single op. Storage line of the catalogue's "Projection matmul"
+  row is amended; activation and accumulator precision are unchanged.
+  See ADR 017 §(c) for the full rationale.
+- **CPU dequant of token-embedding rows per window** (~1.5 MB per
+  window). Catalogue planned a standalone `Q4KDequant.metal`/
+  `kernel_get_rows_q4_K`; the orchestrator inlines a CPU pass via
+  `Q4KDecode.dequantise` instead, keeping the GPU pipeline on a single
+  command-buffer-per-window cadence. Cost is bounded by `windowSize ×
+  (dModel / 256) × 144 ≈ 1.5 MB` of source bytes per window.
+- **GGUF tensor naming pinned to HuggingFace transformers convention**
+  (`encoder.block.<ℓ>.layer.0.SelfAttention.q.weight`, etc.) with one
+  fallback enumeration for the `2_Dense` projection (the only tensor
+  whose name varies across conversion pipelines). A name miss throws a
+  typed `T5MetalEmbedderError.tensorMissing` listing the candidates.
+- **No 1/√d_k attention scaling** in the FP32 matmul (T5 v1.1 omits
+  it; HuggingFace's `T5Attention` matches). Verified during the port
+  against `transformers/src/transformers/models/t5/modeling_t5.py`.
+- **Eager weight upload at init**, not lazy per-encode. Resident cost
+  is dominated by the GGUF asset (~80 MB Q4_K + ~384 KiB widened
+  projection), well under ADR 012's 300 MB peak-RSS ceiling.
+
 ### #60 — `kernel_mul_mm_q4_K_f32`
 
 - **`FC_mul_mm_bc_out` is hard-coded `true`** rather than per-shape
@@ -609,6 +645,8 @@ future port-refresh against a new commit pin can audit them quickly.
 - ADR 011 — sliding window; reused as-is.
 - ADR 013 — reference fixture provenance; same Witchcraft pin.
 - ADR 015 — `MetalContext` and dispatch; foundation reused.
-- ADR 016 — *forward reference.* Lands with #64 to promote this
-  catalogue's per-op matrix to normative.
+- ADR 016 — GGUF asset distribution; landed with #59.
+- ADR 017 — Per-op precision routing in `T5MetalEmbedder`; landed
+  with #64 and promotes this catalogue's per-op matrix from
+  informational to normative.
 - `docs/Plan.md` — Phase 2 sub-issue checklist links here.

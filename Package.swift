@@ -95,7 +95,10 @@ let package = Package(
         // (GGUF asset distribution).
         .target(
             name: "SwitchcraftMetal",
-            dependencies: ["SwitchcraftCore"],
+            // SwitchcraftCoreML is depended on solely for `SlidingWindow`
+            // (pure-Swift sliding-window planner/merger reused per ADR
+            // 011). CoreML the framework is not actually used here.
+            dependencies: ["SwitchcraftCore", "SwitchcraftCoreML"],
             path: "Sources/SwitchcraftMetal",
             resources: [
                 // Per ADR 015 §(e), each target that ships Metal shaders

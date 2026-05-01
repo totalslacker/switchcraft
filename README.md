@@ -263,11 +263,13 @@ filter that strips low-signal positions (see
 
 ## Metal embedder setup
 
-The `SwitchcraftMetal` target is the in-progress port of ggml's T5
+The `SwitchcraftMetal` target is the Phase 2 port of ggml's T5
 inference to Swift + Metal (umbrella issue #57). It ships alongside —
-not in place of — the CoreML embedder. Sub-issue #59 lands the GGUF
-reader + Q4_K CPU dequantisation reference; sub-issues #60–#64 add the
-kernels and the `T5MetalEmbedder` that consume them.
+not in place of — the CoreML embedder. Sub-issue #59 landed the GGUF
+reader + Q4_K CPU dequantisation reference; sub-issues #60–#63 added
+the kernels (Q4_K matmul, RMSNorm, softmax, residual add, gated-GELU,
+L2 norm); sub-issue #64 lands the FP32 attention/projection matmul and
+the `T5MetalEmbedder` orchestrator.
 
 ### The asset
 
@@ -300,6 +302,42 @@ the round-trip parity suite skips cleanly via Swift Testing's
 `.enabled(if:)` trait — fresh checkouts stay green. Header-parsing,
 mixed-dtype, and Q4_K decode unit tests run unconditionally on
 in-memory fixtures.
+
+### Using `T5MetalEmbedder`
+
+```swift
+import SwitchcraftCore
+import SwitchcraftCoreML
+@_spi(SwitchcraftMetal) import SwitchcraftMetal
+
+let tokenizerURL = URL(fileURLWithPath: "Tests/Fixtures/xtr-base-en.tokenizer.json")
+let tokenizer = try Tokenizer(contentsOf: tokenizerURL.path)
+
+let ggufURL = URL(fileURLWithPath: ProcessInfo.processInfo.environment["SWITCHCRAFT_XTR_GGUF"]!)
+
+// `T5MetalEmbedder.init` throws `metalUnavailable` when Metal is
+// unreachable (no GPU, `SWITCHCRAFT_FORCE_ACCELERATE=1`, library load
+// fail). Catch the throw and fall back to the CoreML embedder so the
+// app stays usable on hosts where Metal isn't viable.
+let embedder: any Embedder
+do {
+    embedder = try await T5MetalEmbedder(modelURL: ggufURL, tokenizer: tokenizer)
+} catch T5MetalEmbedderError.metalUnavailable {
+    let mlpackageURL = URL(fileURLWithPath: ProcessInfo.processInfo.environment["SWITCHCRAFT_XTR_MLPACKAGE"]!)
+    embedder = try await T5CoreMLEmbedder(modelURL: mlpackageURL, tokenizer: tokenizer)
+}
+
+// Plug into SwitchcraftStore the same way as T5CoreMLEmbedder; the
+// `Embedder` protocol contract is identical (ADR 009). The Metal
+// embedder records `modelIdentifier = "google/xtr-base-en@v1+gguf"`
+// to distinguish embeddings produced by the two paths (ADR 010(c)).
+```
+
+The Metal embedder is `@_spi(SwitchcraftMetal) public` rather than full
+public — see [ADR 016 §"`@_spi(SwitchcraftMetal)` import pattern"](adrs/016-gguf-asset-distribution.md).
+Per-op precision routing follows [ADR 017](adrs/017-per-op-precision-routing.md);
+the cross-stack ≥ 0.99999 cosine gate against PyTorch FP32 is the
+correctness contract.
 
 ## Running the tests
 

@@ -56,7 +56,7 @@ public enum T5RelativePositionBias {
         // upper-half offset.
         let halfBuckets = numBuckets / 2  // 16
         let isPositive = relativePosition > 0
-        var relativeBuckets = isPositive ? halfBuckets : 0
+        let relativeBuckets = isPositive ? halfBuckets : 0
         let absPos = abs(relativePosition)
 
         let maxExact = halfBuckets / 2  // 8
