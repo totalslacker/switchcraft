@@ -43,7 +43,7 @@ import Foundation
 import Metal
 import Testing
 @testable import Switchcraft
-@testable import SwitchcraftCore
+@_spi(SwitchcraftMetal) @testable import SwitchcraftCore
 
 /// `true` when compiled with optimisations (`swift test -c release`).
 /// Mirrors the `assert`-trick used in `PerformanceTests.swift`. Defined

@@ -16,7 +16,7 @@
 
 import Foundation
 import Metal
-@testable import SwitchcraftCore
+@_spi(SwitchcraftMetal) @testable import SwitchcraftCore
 
 /// Probes the host for Metal support. Used as `.enabled(if: …)` on the
 /// Metal test suites so they skip cleanly on no-GPU hosts and on test

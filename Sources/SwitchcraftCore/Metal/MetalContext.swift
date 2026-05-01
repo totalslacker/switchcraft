@@ -60,14 +60,15 @@ import Foundation
 import Metal
 import os
 
-enum MetalContextError: Error, CustomStringConvertible {
+@_spi(SwitchcraftMetal)
+public enum MetalContextError: Error, CustomStringConvertible {
     case noDeviceAvailable
     case commandQueueCreationFailed
     case libraryLoadFailed(String)
     case functionNotFound(String)
     case pipelineCreationFailed(String)
 
-    var description: String {
+    public var description: String {
         switch self {
         case .noDeviceAvailable:
             return "MTLCreateSystemDefaultDevice() returned nil — no Metal-capable GPU"
@@ -82,22 +83,27 @@ enum MetalContextError: Error, CustomStringConvertible {
 
 /// Process-wide Metal context for the search-path kernels.
 ///
-/// Intentionally `internal` to `SwitchcraftCore` (no public API change
-/// per ADR 009). Future kernel sub-issues call into `MetalContext.shared`
-/// from inside helpers like `matmulQueryTimesRowMajorTranspose` and fall
-/// back to the existing Accelerate path on `nil`.
-final class MetalContext: @unchecked Sendable {
+/// Visibility is **`@_spi(SwitchcraftMetal) public`**, not full `public`,
+/// so the type does not appear in the stable Switchcraft public API
+/// surface (ADR 009). The SPI hatch lets the sibling `SwitchcraftMetal`
+/// target reuse this pipeline cache without re-implementing it; consumers
+/// outside the package cannot reach the type. Internal `SwitchcraftCore`
+/// call-sites continue to use the default-internal access. See ADR 015
+/// §"Sendable policy" and ADR 016 §"`@_spi(SwitchcraftMetal)` import
+/// pattern".
+@_spi(SwitchcraftMetal)
+public final class MetalContext: @unchecked Sendable {
     /// Env var that forces the Accelerate fallback path even when a
     /// Metal device is available. Read once at first `shared` access.
     /// Documented in README.md.
-    static let forceAccelerateEnvVar = "SWITCHCRAFT_FORCE_ACCELERATE"
+    public static let forceAccelerateEnvVar = "SWITCHCRAFT_FORCE_ACCELERATE"
 
     /// Bundle-resource basename for the placeholder shader source. Used
     /// by the runtime-compile fallback.
     private static let shaderResourceName = "MetalCoreShaders"
 
     /// Default subsystem for `os.Logger` instances scoped to this module.
-    static let logSubsystem = "com.switchcraft.core"
+    public static let logSubsystem = "com.switchcraft.core"
 
     /// Lazy process-wide singleton. `nil` when:
     ///
@@ -108,7 +114,7 @@ final class MetalContext: @unchecked Sendable {
     /// `static let` guarantees the initializer runs exactly once across
     /// the process, satisfying the `MTLLibrary` "no concurrent
     /// initialization" constraint.
-    static let shared: MetalContext? = {
+    public static let shared: MetalContext? = {
         if isForceAccelerateSet() {
             return nil
         }
@@ -124,9 +130,9 @@ final class MetalContext: @unchecked Sendable {
         }
     }()
 
-    let device: MTLDevice
-    let queue: MTLCommandQueue
-    let library: MTLLibrary
+    public let device: MTLDevice
+    public let queue: MTLCommandQueue
+    public let library: MTLLibrary
 
     /// Pipeline cache keyed by Metal function name. Guarded by `cacheLock`.
     /// The cached `MTLComputePipelineState` values are themselves
@@ -137,7 +143,7 @@ final class MetalContext: @unchecked Sendable {
     /// Designated initializer. Intentionally `internal`; consumers use
     /// `MetalContext.shared` so we honor the single-shared-instance
     /// discipline (Metal context creation is non-trivial — issue #51 spec).
-    init() throws {
+    public init() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw MetalContextError.noDeviceAvailable
         }
@@ -160,7 +166,7 @@ final class MetalContext: @unchecked Sendable {
     /// path. `MTLLibrary.makeFunction` is undocumented for thread
     /// safety, which is the second reason the lock spans the whole
     /// critical section (see ADR 015 §"Sendable policy").
-    func pipeline(for functionName: String) throws -> MTLComputePipelineState {
+    public func pipeline(for functionName: String) throws -> MTLComputePipelineState {
         cacheLock.lock()
         defer { cacheLock.unlock() }
 

@@ -23,6 +23,12 @@ let package = Package(
         // `scripts/convert-xtr-to-coreml.py` (see ADR 010).
         .library(name: "SwitchcraftCoreML", targets: ["SwitchcraftCoreML"]),
 
+        // Phase 2 Metal embedder support — GGUF reader + (in subsequent
+        // sub-issues) Q4_K matmul / RMSNorm / SDPA kernels and the
+        // T5MetalEmbedder. Requires the Q4-quantised GGUF asset gated by
+        // SWITCHCRAFT_XTR_GGUF (see ADR 016 and ADR 010(j)).
+        .library(name: "SwitchcraftMetal", targets: ["SwitchcraftMetal"]),
+
         // Test-support only: a reusable conformance suite for adopters
         // writing custom SwitchcraftStorage backends. Not intended for
         // end-user apps. Whether this stays a top-level product or moves
@@ -80,6 +86,26 @@ let package = Package(
             dependencies: ["SwitchcraftCore"],
             path: "Sources/SwitchcraftStorageTesting"
         ),
+        // Phase 2 Metal embedder (umbrella issue #57). Sub-issue #59
+        // lands the GGUF reader + Q4_K CPU dequantisation reference and
+        // the @_spi(SwitchcraftMetal) hatch on MetalContext that lets
+        // this target reuse SwitchcraftCore's pipeline cache without
+        // re-foundation. Future sub-issues (#60–#64) add the kernels and
+        // T5MetalEmbedder here. See ADR 015 (Metal context) and ADR 016
+        // (GGUF asset distribution).
+        .target(
+            name: "SwitchcraftMetal",
+            dependencies: ["SwitchcraftCore"],
+            path: "Sources/SwitchcraftMetal",
+            linkerSettings: [
+                .linkedFramework(
+                    "Metal",
+                    .when(platforms: [.macOS, .iOS, .visionOS])
+                ),
+                // MetalPerformanceShaders deliberately omitted — Phase 2
+                // ships custom kernels only (ADR 015 §"Build / packaging").
+            ]
+        ),
         // Standalone Metal-matmul prototype for the Phase 2 custom-Metal-kernels
         // feasibility investigation (issue #49). Intentionally NOT in `products`
         // — only the matching test target consumes it. Library is fully isolated
@@ -125,6 +151,18 @@ let package = Package(
                 "SwitchcraftCore",
             ],
             path: "Tests/SwitchcraftMetalProtoTests"
+        ),
+        // Tests for SwitchcraftMetal (issue #59 onwards). Header-parsing
+        // and Q4_K decode tests run unconditionally on in-memory
+        // fixtures; round-trip parity tests against the upstream Q4_K
+        // GGUF are gated on the SWITCHCRAFT_XTR_GGUF env var (ADR 016).
+        .testTarget(
+            name: "SwitchcraftMetalTests",
+            dependencies: [
+                "SwitchcraftMetal",
+                "SwitchcraftCore",
+            ],
+            path: "Tests/SwitchcraftMetalTests"
         ),
     ]
 )
