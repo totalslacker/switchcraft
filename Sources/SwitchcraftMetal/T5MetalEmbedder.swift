@@ -241,18 +241,21 @@ public actor T5MetalEmbedder: Embedder {
                 available: tensorNames
             )
             layerWeights.append(LayerWeights(
-                preAttnNormGain: preAttnNorm,
-                qWeight: q, kWeight: k, vWeight: v, oWeight: o,
-                preFFNNormGain: preFFNNorm,
-                wi0Weight: wi0, wi1Weight: wi1, woWeight: wo
+                preAttnNormGain: preAttnNorm.buffer,
+                qWeight: q.buffer, kWeight: k.buffer,
+                vWeight: v.buffer, oWeight: o.buffer,
+                preFFNNormGain: preFFNNorm.buffer,
+                wi0Weight: wi0.buffer, wi1Weight: wi1.buffer,
+                woWeight: wo.buffer
             ))
         }
 
         // ----- Final encoder RMSNorm -----
-        let finalNorm = try await Self.requireFP32Vector(
+        let finalNormTensor = try await Self.requireFP32Vector(
             reader, name: Self.tensorFinalNorm, length: dModel,
             available: tensorNames
         )
+        let finalNorm = finalNormTensor.buffer
 
         // ----- Relative-position bias weights (FP32 [num_buckets, num_heads]) -----
         let relposTensor = try await Self.requireTensor(
@@ -818,10 +821,13 @@ extension T5MetalEmbedder {
         }
     }
 
+    // Returns `GGUFTensor` (which is `@unchecked Sendable`) rather than
+    // `MTLBuffer` so the result can cross the actor-isolated `init`'s
+    // `await` boundaries; the caller pulls `.buffer` synchronously.
     fileprivate static func requireFP32Vector(
         _ reader: GGUFReader, name: String, length: Int,
         available: Set<String>
-    ) async throws -> MTLBuffer {
+    ) async throws -> GGUFTensor {
         let tensor = try await requireTensor(reader, name: name, available: available)
         try requireDtype(tensor, .f32)
         guard tensor.elementCount == length else {
@@ -829,13 +835,13 @@ extension T5MetalEmbedder {
                 "\(name) elements \(tensor.elementCount) ≠ expected \(length)"
             )
         }
-        return tensor.buffer
+        return tensor
     }
 
     fileprivate static func requireQ4KMatrix(
         _ reader: GGUFReader, name: String, N: Int, K: Int,
         available: Set<String>
-    ) async throws -> MTLBuffer {
+    ) async throws -> GGUFTensor {
         let tensor = try await requireTensor(reader, name: name, available: available)
         try requireDtype(tensor, .q4k)
         // GGUF on-disk fastest-varying-first: shape == [K, N].
@@ -846,7 +852,7 @@ extension T5MetalEmbedder {
                 "\(name) on-disk shape \(tensor.shape) ≠ expected [\(K), \(N)] (fastest-varying-first)"
             )
         }
-        return tensor.buffer
+        return tensor
     }
 }
 
