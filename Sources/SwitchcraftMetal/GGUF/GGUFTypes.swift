@@ -122,6 +122,9 @@ public enum GGUFError: Error, CustomStringConvertible, Equatable {
     /// dtype's storage requirements (e.g. Q4_K count not a multiple of
     /// 256), or the tensor data offset would read past EOF.
     case malformedTensor(name: String, reason: String)
+    /// File-level fields (`general.alignment`, tensor shape dims, KV
+    /// counts) overflowed or contained an invalid value.
+    case invalidHeader(reason: String)
     /// Failed to allocate an `MTLBuffer` for a tensor.
     case bufferAllocationFailed(name: String, bytes: Int)
     /// The named tensor is not present in the file.
@@ -145,6 +148,8 @@ public enum GGUFError: Error, CustomStringConvertible, Equatable {
             return "GGUF: unsupported tensor dtype \(raw) for tensor '\(name)' — only F32 (0), F16 (1), Q4_K (12) are supported"
         case .malformedTensor(let name, let reason):
             return "GGUF: malformed tensor '\(name)' — \(reason)"
+        case .invalidHeader(let reason):
+            return "GGUF: invalid header — \(reason)"
         case .bufferAllocationFailed(let name, let bytes):
             return "GGUF: MTLBuffer allocation failed for tensor '\(name)' (\(bytes) bytes)"
         case .tensorNotFound(let name):

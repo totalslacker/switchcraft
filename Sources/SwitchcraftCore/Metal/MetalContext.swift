@@ -140,9 +140,16 @@ public final class MetalContext: @unchecked Sendable {
     private var pipelines: [String: MTLComputePipelineState] = [:]
     private let cacheLock = NSLock()
 
-    /// Designated initializer. Intentionally `internal`; consumers use
-    /// `MetalContext.shared` so we honor the single-shared-instance
-    /// discipline (Metal context creation is non-trivial — issue #51 spec).
+    /// Designated initializer.
+    ///
+    /// Exposed via `@_spi(SwitchcraftMetal) public` so the sibling
+    /// `SwitchcraftMetal` target (and tests with the matching SPI
+    /// import) can construct a context directly when necessary. Most
+    /// consumers should still use `MetalContext.shared` to honor the
+    /// single-shared-instance discipline — Metal context creation is
+    /// non-trivial (issue #51 spec) and `static let shared` is what
+    /// guarantees the `MTLLibrary` is initialised exactly once across
+    /// the process.
     public init() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw MetalContextError.noDeviceAvailable

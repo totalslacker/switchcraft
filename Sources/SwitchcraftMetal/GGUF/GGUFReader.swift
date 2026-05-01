@@ -125,17 +125,31 @@ public actor GGUFReader {
 
         // Resolve alignment override before parsing tensor info — the
         // alignment governs the data-block start, not the tensor-info
-        // block, but resolve it once here.
-        let alignment: Int = {
-            if case .uint64(let n) = metadata["general.alignment"] {
-                return Int(n)
+        // block, but resolve it once here. Validate that the value is
+        // positive and a power of two; ggml writes 32 by default and
+        // round-tripping anything else through `% alignment` would
+        // either trap (alignment == 0) or produce a misaligned data
+        // block start (non-power-of-two).
+        let alignment: Int
+        if case .uint64(let n) = metadata["general.alignment"] {
+            guard n >= 1, n <= UInt64(Int.max) else {
+                throw GGUFError.invalidHeader(
+                    reason: "general.alignment=\(n) is not a positive Int-representable value"
+                )
             }
-            // Some encoders write `general.alignment` as u32 and the
-            // typed-subset surface promotes u32 → uint64 on read. (We
-            // keep this branch as a safety net even though the cast is
-            // already handled in `readValue`.)
-            return Self.defaultAlignment
-        }()
+            let v = Int(n)
+            // Power-of-two check: GGUF spec defines alignment as
+            // a power of two; reject anything else so a corrupt KV
+            // doesn't quietly produce a misaligned tensor-data block.
+            guard v & (v - 1) == 0 else {
+                throw GGUFError.invalidHeader(
+                    reason: "general.alignment=\(v) is not a power of two"
+                )
+            }
+            alignment = v
+        } else {
+            alignment = Self.defaultAlignment
+        }
 
         // ----- Tensor info block -----
         var tensorInfo: [String: TensorInfo] = [:]
@@ -149,8 +163,25 @@ public actor GGUFReader {
             var elementCount = 1
             for _ in 0..<nDims {
                 let dim: UInt64 = try Self.readUInt64(data, cursor: &cursor)
-                shape.append(Int(dim))
-                elementCount *= Int(dim)
+                // Guard the u64 → Int conversion and the multiplicative
+                // accumulation so a corrupt or hostile header becomes a
+                // typed error instead of a trap.
+                guard dim <= UInt64(Int.max) else {
+                    throw GGUFError.malformedTensor(
+                        name: name,
+                        reason: "dim \(dim) does not fit in Int"
+                    )
+                }
+                let dimInt = Int(dim)
+                shape.append(dimInt)
+                let (product, overflow) = elementCount.multipliedReportingOverflow(by: dimInt)
+                guard !overflow else {
+                    throw GGUFError.malformedTensor(
+                        name: name,
+                        reason: "element count overflow on dim \(dimInt) (running product so far: \(elementCount))"
+                    )
+                }
+                elementCount = product
             }
             let typeRaw: UInt32 = try Self.readUInt32(data, cursor: &cursor)
             guard let dtype = GGUFDType.from(rawGGMLType: typeRaw) else {
@@ -164,6 +195,12 @@ public actor GGUFReader {
                 )
             }
             let relativeOffset: UInt64 = try Self.readUInt64(data, cursor: &cursor)
+            guard relativeOffset <= UInt64(Int.max) else {
+                throw GGUFError.malformedTensor(
+                    name: name,
+                    reason: "relative offset \(relativeOffset) does not fit in Int"
+                )
+            }
             let info = TensorInfo(
                 name: name,
                 dtype: dtype,
@@ -214,12 +251,18 @@ public actor GGUFReader {
             throw GGUFError.tensorNotFound(name: name)
         }
         let byteCount = info.dtype.storageBytes(for: info.elementCount)
-        let absoluteOffset = dataBlockStart + info.relativeOffset
-        let endOffset = absoluteOffset + byteCount
-        guard endOffset <= data.count else {
+        let (absoluteOffset, ovAbs) = dataBlockStart.addingReportingOverflow(info.relativeOffset)
+        guard !ovAbs else {
             throw GGUFError.malformedTensor(
                 name: name,
-                reason: "data range [\(absoluteOffset), \(endOffset)) extends past EOF (\(data.count))"
+                reason: "absolute data offset overflow (dataBlockStart=\(dataBlockStart), relative=\(info.relativeOffset))"
+            )
+        }
+        let (endOffset, ovEnd) = absoluteOffset.addingReportingOverflow(byteCount)
+        guard !ovEnd, endOffset <= data.count else {
+            throw GGUFError.malformedTensor(
+                name: name,
+                reason: "data range [\(absoluteOffset), \(absoluteOffset)+\(byteCount)) extends past EOF (\(data.count))"
             )
         }
         let buffer: MTLBuffer = try data.withUnsafeBytes { raw -> MTLBuffer in
@@ -249,8 +292,17 @@ public actor GGUFReader {
 
     @inline(__always)
     private static func need(_ data: Data, cursor: Int, bytes: Int) throws {
-        guard cursor + bytes <= data.count else {
-            throw GGUFError.truncated(at: cursor, needed: bytes)
+        let (end, overflow) = cursor.addingReportingOverflow(bytes)
+        if overflow || end > data.count {
+            // Report the *missing* byte count, not the requested size, so
+            // diagnostics describe the shortfall rather than the read.
+            let shortfall: Int
+            if overflow {
+                shortfall = .max
+            } else {
+                shortfall = end - data.count
+            }
+            throw GGUFError.truncated(at: cursor, needed: shortfall)
         }
     }
 
@@ -300,7 +352,14 @@ public actor GGUFReader {
     }
 
     private static func readString(_ data: Data, cursor: inout Int) throws -> String {
+        let lenStart = cursor
         let len = try readUInt64(data, cursor: &cursor)
+        // Guard against u64 → Int truncation on 64-bit (and especially
+        // 32-bit) hosts so a malformed length field becomes a typed
+        // error instead of a trap.
+        guard len <= UInt64(Int.max) else {
+            throw GGUFError.malformedString(at: lenStart)
+        }
         let lenInt = Int(len)
         try need(data, cursor: cursor, bytes: lenInt)
         let start = data.startIndex + cursor
