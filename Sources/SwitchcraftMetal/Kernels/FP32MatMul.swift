@@ -13,12 +13,7 @@
 // Public surface intentionally minimal:
 //   - `init(context:)` resolves the pipeline state once and caches it.
 //   - `encode(...)` records a single dispatch into the caller-supplied
-//     command buffer; no commit, no wait. Orchestration / batching is
-//     `T5MetalEmbedder`'s responsibility.
-//
-// `@_spi(SwitchcraftMetal) public` — visible to the SwitchcraftMetal
-// target's tests and to `T5MetalEmbedder` (also in `SwitchcraftMetal`)
-// but not part of the stable Switchcraft public API surface.
+//     command buffer; no commit, no wait.
 
 #if canImport(Metal)
 
@@ -29,13 +24,12 @@ import Metal
 /// Single-dispatch encoder for `kernel_fp32_matmul`.
 ///
 /// Computes `C = A · B` (or `C = A · Bᵀ` when `transposeB == true`)
-/// over a batch of independent matrices, all FP32. See the MSL header
-/// for the shape model and deviations from upstream.
+/// over a batch of independent matrices, all FP32. Per-head views of
+/// an interleaved `[M, nHeads*dHead]` buffer are addressed by passing
+/// explicit row and batch strides.
 ///
 /// Precision contract: FP32 throughout — used on the activation paths
-/// where ADR 014(b)/(i) require FP32 (Q·Kᵀ feeds the FP32 softmax;
-/// softmax·V feeds the FP32 residual stream; the 2_Dense projection
-/// feeds the L2-norm sensitive op).
+/// where ADR 014(b)/(i) require FP32.
 @_spi(SwitchcraftMetal)
 public struct FP32MatMulKernel {
     /// Function name in MSL.
@@ -46,9 +40,9 @@ public struct FP32MatMulKernel {
 
     public init(context: MetalContext) throws {
         precondition(
-            MemoryLayout<FP32MatMulArgs>.size == 32,
+            MemoryLayout<FP32MatMulArgs>.size == 44,
             "FP32MatMulArgs layout drifted from MSL FP32MatMulArgs "
-            + "(expected 32 bytes, got \(MemoryLayout<FP32MatMulArgs>.size))"
+            + "(expected 44 bytes, got \(MemoryLayout<FP32MatMulArgs>.size))"
         )
         try registerSwitchcraftMetalShaders(with: context)
         self.context = context
@@ -58,25 +52,15 @@ public struct FP32MatMulKernel {
     /// Encode a single FP32 matmul dispatch into `commandBuffer`. Does
     /// not commit or wait.
     ///
-    /// - Parameters:
-    ///   - commandBuffer: the command buffer to encode into.
-    ///   - a: FP32 row-major `[batch, M, K]` activation matrix.
-    ///   - b: FP32 row-major `[batch, N, K]` if `transposeB == true`,
-    ///     else `[batch, K, N]`.
-    ///   - output: FP32 row-major `[batch, M, N]` output buffer.
-    ///   - M: rows of `A` and `output`.
-    ///   - N: cols of `output` (and rows of `B` when transposed).
-    ///   - K: contraction dim.
-    ///   - batch: number of independent matmuls. Pass `1` for the
-    ///     non-batched 2_Dense projection.
-    ///   - transposeB: when `true`, treat `B` as `[batch, N, K]` and
-    ///     compute `C = A · Bᵀ`.
-    ///   - aStrideBatch: floats per batch in `a`. Pass `nil` for the
-    ///     default `M*K` (contiguous).
-    ///   - bStrideBatch: floats per batch in `b`. Pass `nil` for the
-    ///     default (`N*K` if transposed, `K*N` otherwise).
-    ///   - cStrideBatch: floats per batch in `output`. Pass `nil` for
-    ///     the default `M*N`.
+    /// Default strides assume contiguous row-major layouts:
+    ///   - `a_row_stride = K`
+    ///   - `b_row_stride = K`  (if `transposeB == true`)
+    ///   - `b_row_stride = N`  (if `transposeB == false`)
+    ///   - `c_row_stride = N`
+    ///   - `a_stride_batch = M*K`, `b_stride_batch = N*K` or `K*N`,
+    ///     `c_stride_batch = M*N`
+    /// Pass non-default strides to slice per-head views from an
+    /// interleaved buffer.
     public func encode(
         commandBuffer: MTLCommandBuffer,
         a: MTLBuffer,
@@ -89,7 +73,10 @@ public struct FP32MatMulKernel {
         transposeB: Bool,
         aStrideBatch: Int? = nil,
         bStrideBatch: Int? = nil,
-        cStrideBatch: Int? = nil
+        cStrideBatch: Int? = nil,
+        aRowStride: Int? = nil,
+        bRowStride: Int? = nil,
+        cRowStride: Int? = nil
     ) {
         precondition(M > 0, "FP32MatMul: M must be positive (got \(M))")
         precondition(N > 0, "FP32MatMul: N must be positive (got \(N))")
@@ -97,40 +84,18 @@ public struct FP32MatMulKernel {
         precondition(batch > 0, "FP32MatMul: batch must be positive (got \(batch))")
 
         let aStride = aStrideBatch ?? (M * K)
-        let bStride = bStrideBatch ?? (N * K)
+        let bStride = bStrideBatch ?? (transposeB ? N * K : K * N)
         let cStride = cStrideBatch ?? (M * N)
+        let aRow = aRowStride ?? K
+        let bRow = bRowStride ?? (transposeB ? K : N)
+        let cRow = cRowStride ?? N
 
         precondition(aStride >= 0, "FP32MatMul: aStrideBatch must be non-negative")
         precondition(bStride >= 0, "FP32MatMul: bStrideBatch must be non-negative")
         precondition(cStride >= 0, "FP32MatMul: cStrideBatch must be non-negative")
-
-        let floatBytes = MemoryLayout<Float>.size
-        let aRequired = (batch * aStride + M * K) * floatBytes // upper bound
-        let bRequired = (batch * bStride + N * K) * floatBytes
-        let cRequired = (batch * cStride + M * N) * floatBytes
-        // Loose checks — they can be slack when caller passes a custom
-        // stride. Use a stricter form for the all-default case.
-        if aStrideBatch == nil {
-            precondition(a.length >= batch * M * K * floatBytes,
-                         "FP32MatMul: a buffer length \(a.length) < required \(batch * M * K * floatBytes)")
-        } else {
-            precondition(a.length >= aRequired,
-                         "FP32MatMul: a buffer length \(a.length) < required \(aRequired)")
-        }
-        if bStrideBatch == nil {
-            precondition(b.length >= batch * N * K * floatBytes,
-                         "FP32MatMul: b buffer length \(b.length) < required \(batch * N * K * floatBytes)")
-        } else {
-            precondition(b.length >= bRequired,
-                         "FP32MatMul: b buffer length \(b.length) < required \(bRequired)")
-        }
-        if cStrideBatch == nil {
-            precondition(output.length >= batch * M * N * floatBytes,
-                         "FP32MatMul: output buffer length \(output.length) < required \(batch * M * N * floatBytes)")
-        } else {
-            precondition(output.length >= cRequired,
-                         "FP32MatMul: output buffer length \(output.length) < required \(cRequired)")
-        }
+        precondition(aRow > 0, "FP32MatMul: aRowStride must be positive")
+        precondition(bRow > 0, "FP32MatMul: bRowStride must be positive")
+        precondition(cRow > 0, "FP32MatMul: cRowStride must be positive")
 
         var args = FP32MatMulArgs(
             M: UInt32(M),
@@ -140,7 +105,10 @@ public struct FP32MatMulKernel {
             transpose_b: transposeB ? 1 : 0,
             a_stride_batch: UInt32(aStride),
             b_stride_batch: UInt32(bStride),
-            c_stride_batch: UInt32(cStride)
+            c_stride_batch: UInt32(cStride),
+            a_row_stride: UInt32(aRow),
+            b_row_stride: UInt32(bRow),
+            c_row_stride: UInt32(cRow)
         )
 
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
@@ -152,10 +120,6 @@ public struct FP32MatMulKernel {
         encoder.setBuffer(b, offset: 0, index: 2)
         encoder.setBuffer(output, offset: 0, index: 3)
 
-        // Threadgroup choice: 8×8×1 keeps each TG modest (64 threads) and
-        // tiles cleanly across the M / N grid. `dispatchThreads` with
-        // non-uniform threadgroups handles `M % 8 != 0` / `N % 8 != 0`
-        // tails directly; the kernel still has a defensive bounds check.
         let tgWidth = 8
         let tgHeight = 8
         let tgDepth = 1
@@ -170,9 +134,8 @@ public struct FP32MatMulKernel {
     /// Mirrors the MSL `FP32MatMulArgs` byte-for-byte. Field order is
     /// load-bearing — changes must be mirrored in `FP32MatMul.metal`.
     /// All fields are `UInt32` so there is no padding;
-    /// `MemoryLayout<FP32MatMulArgs>.size == 32` is asserted in
-    /// `init(context:)` so a layout drift traps immediately with a clear
-    /// message rather than surfacing as silent garbage.
+    /// `MemoryLayout<FP32MatMulArgs>.size == 44` is asserted in
+    /// `init(context:)`.
     struct FP32MatMulArgs {
         var M: UInt32              // offset 0
         var N: UInt32              // offset 4
@@ -182,7 +145,10 @@ public struct FP32MatMulKernel {
         var a_stride_batch: UInt32 // offset 20
         var b_stride_batch: UInt32 // offset 24
         var c_stride_batch: UInt32 // offset 28
-        // total: 32
+        var a_row_stride: UInt32   // offset 32
+        var b_row_stride: UInt32   // offset 36
+        var c_row_stride: UInt32   // offset 40
+        // total: 44
     }
 }
 
