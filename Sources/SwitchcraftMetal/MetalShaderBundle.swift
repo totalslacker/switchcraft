@@ -41,6 +41,7 @@ public let switchcraftMetalShaderResourceNames: [String] = [
     "ResidualAdd", // issue #63
     "GatedGELU",   // issue #63
     "L2Norm",      // issue #63
+    "FP32MatMul",  // issue #64
 ]
 
 /// Register `SwitchcraftMetal`'s `Bundle.module` with `context` so its
