@@ -79,9 +79,11 @@ public struct Q4KMatMulKernel {
     ///     GGUFReader (or by tests via `Q4KDecode`-shaped helpers).
     ///   - weightShape: `(N, K)` in elements. K must be a multiple of 256.
     ///   - input: FP32 row-major activation matrix, `M * K` floats.
-    ///   - output: FP32 row-major output, `M * N` floats. Must be
-    ///     `.storageModeShared` so the caller can read the result
-    ///     after the command buffer completes.
+    ///   - output: FP32 row-major output, `M * N` floats. Use a
+    ///     CPU-readable storage mode (e.g. `.storageModeShared`) if
+    ///     the caller needs to read the result after the command
+    ///     buffer completes; GPU-only storage modes are also valid
+    ///     when the output stays on-GPU for a downstream kernel.
     ///   - M: number of activation rows (== number of output rows).
     public func encode(
         commandBuffer: MTLCommandBuffer,
