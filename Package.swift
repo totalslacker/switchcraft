@@ -171,7 +171,8 @@ let package = Package(
                 "SwitchcraftMetal",
                 "SwitchcraftCore",
             ],
-            path: "Tests/SwitchcraftMetalTests"
+            path: "Tests/SwitchcraftMetalTests",
+            resources: [.copy("../Fixtures")]
         ),
     ]
 )
