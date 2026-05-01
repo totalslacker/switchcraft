@@ -21,3 +21,4 @@ ADRs document significant design decisions for Switchcraft. Each file follows th
 - [013 — Reference fixture provenance](013-reference-fixture-provenance.md)
 - [014 — Precision asymmetry cross-stack](014-precision-asymmetry-cross-stack.md)
 - [015 — Metal context and dispatch](015-metal-context-and-dispatch.md)
+- [016 — GGUF asset distribution](016-gguf-asset-distribution.md)

@@ -360,3 +360,25 @@ custom MIL pass, no new precision-sensitive code paths, and identical
 runtime contract to the FP32 default. ADR 014(g) explicitly anticipated
 this work as Phase 2 quantisation that "expands the trade-off space
 without changing the FP32 build's parity contract".
+
+## (j) Metal embedder asset distribution
+
+The Phase 2 Metal embedder (umbrella issue #57) consumes a Q4-quantised
+GGUF v3 asset (~80 MB) instead of (or alongside) the CoreML
+`.mlpackage` covered by (a)–(i). The distribution policy mirrors (d)
+verbatim:
+
+- The GGUF asset is **not committed** for the same size + LFS reasons.
+- Tests gate on `SWITCHCRAFT_XTR_GGUF=<path>` (parallel to
+  `SWITCHCRAFT_XTR_MLPACKAGE`); the env-var is read by the
+  `GGUFAsset` test helper in `Tests/SwitchcraftMetalTests/Support/`.
+- Asset acquisition uses the Witchcraft `quantize-tool` pipeline
+  documented in `docs/porting/ggml-t5.md` §"Asset acquisition".
+
+The full design — GGUF reader scope, Q4_K decode parity policy,
+`@_spi(SwitchcraftMetal)` import pattern, deferred
+`.storageModePrivate` and `binaryTarget` decisions — lives in
+**ADR 016** (`016-gguf-asset-distribution.md`). Treat ADR 016 as the
+authoritative document for the GGUF channel; this subsection exists
+only to keep ADR 010's "embedder asset distribution" framing complete
+when readers approach the topic from the CoreML side.

@@ -487,13 +487,14 @@ is the algorithmic reference for the Q4_K decoder; Candle is the
 generator of the bytes the decoder must read to reproduce the
 existing fixture.
 
-### Asset gating env var (preview)
+### Asset gating env var
 
-Sub-issue #59 lands `SWITCHCRAFT_XTR_GGUF` as the env-var asset gate
+Sub-issue #59 landed `SWITCHCRAFT_XTR_GGUF` as the env-var asset gate
 for the Q4_K GGUF, mirroring `SWITCHCRAFT_XTR_MLPACKAGE` per ADR 010
-(d). The semantics and resolution order land in **ADR 010(j)**
-alongside the `SwitchcraftMetal` target. Out of scope for this
-catalogue.
+(d). The semantics and resolution order are documented in **ADR 016**
+(`016-gguf-asset-distribution.md`) and cross-referenced from **ADR
+010(j)**. README §"Metal embedder setup" documents the operator
+workflow.
 
 ---
 

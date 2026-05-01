@@ -100,6 +100,7 @@ exported as a public type (see ADR 009(j)).
 | `Switchcraft` | Umbrella module: `SwitchcraftStore` + `Embedder` + `StoreConfig`. Most consumers `import Switchcraft`. |
 | `SwitchcraftSQLite` | SQLite + FTS5 storage backend and the `SwitchcraftStore.sqlite(...)` factory. |
 | `SwitchcraftCoreML` | `T5CoreMLEmbedder` — a real `Embedder` backed by the `google/xtr-base-en` CoreML model. |
+| `SwitchcraftMetal` | Phase 2 Metal embedder support — GGUF v3 reader + (forthcoming) Q4_K matmul / RMSNorm / SDPA kernels and `T5MetalEmbedder`. Requires the Q4-quantised GGUF asset gated by `SWITCHCRAFT_XTR_GGUF`. |
 | `SwitchcraftStorageTesting` | A reusable conformance suite for adopters writing custom `SwitchcraftStorage` backends. Test-support only. |
 
 `SwitchcraftCore` is an internal target (re-exported by `Switchcraft`) and is
@@ -259,6 +260,46 @@ try await store.shutdown()
 inputs longer than 512 tokens, and the pre-normalisation L2 norm
 filter that strips low-signal positions (see
 [ADR 011](adrs/011-sliding-window-long-input-strategy.md)).
+
+## Metal embedder setup
+
+The `SwitchcraftMetal` target is the in-progress port of ggml's T5
+inference to Swift + Metal (umbrella issue #57). It ships alongside —
+not in place of — the CoreML embedder. Sub-issue #59 lands the GGUF
+reader + Q4_K CPU dequantisation reference; sub-issues #60–#64 add the
+kernels and the `T5MetalEmbedder` that consume them.
+
+### The asset
+
+The Metal embedder consumes a Q4-quantised GGUF v3 file (~80 MB)
+produced by Witchcraft's `quantize-tool` against the upstream
+`google/xtr-base-en` weights. The asset is **not committed** for the
+same size and Git LFS reasons as the CoreML `.mlpackage`; see
+[ADR 010(j)](adrs/010-embedder-model-and-asset-distribution.md) and
+[ADR 016](adrs/016-gguf-asset-distribution.md) for the distribution
+rationale.
+
+The asset acquisition pipeline is documented in
+[`docs/porting/ggml-t5.md`](docs/porting/ggml-t5.md) §"Asset
+acquisition". In short: run the Witchcraft `quantize-tool` (Candle-
+backed) against the FP32 weights to produce `xtr-base-en.gguf`, place
+it anywhere convenient.
+
+### Running the asset-gated tests
+
+```bash
+export SWITCHCRAFT_XTR_GGUF=$PWD/Tests/Fixtures/xtr-base-en.gguf
+# Optional — enables bit-equal Q4_K decode parity vs an FP32 reference
+# dump (see ADR 016 §"Bit-equal Q4_K decode").
+# export SWITCHCRAFT_XTR_GGUF_FP32_REF=$PWD/Tests/Fixtures/xtr-base-en.fp32-ref.json
+swift test --filter SwitchcraftMetalTests
+```
+
+When `SWITCHCRAFT_XTR_GGUF` is unset or points at a non-existent path,
+the round-trip parity suite skips cleanly via Swift Testing's
+`.enabled(if:)` trait — fresh checkouts stay green. Header-parsing,
+mixed-dtype, and Q4_K decode unit tests run unconditionally on
+in-memory fixtures.
 
 ## Running the tests
 
