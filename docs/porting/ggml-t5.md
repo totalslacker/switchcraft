@@ -29,7 +29,7 @@ Plan.md tick).
 |---|---|---|
 | `ggml-org/ggml` | `b70770970e84c30a007b3859a453768b3ece2d3d` (2026-05-01) | **Algorithmic reference.** Q4_K block layout, Metal kernel source, per-op precision recipe. |
 | `ggml-org/llama.cpp` | `c3c15053925746c74fc2aaf6b864bd66665393c4` (2026-05-01) | **T5 wiring reference.** `src/llama-model.cpp` shows how the T5 encoder forward pass is composed from ggml ops. |
-| `huggingface/candle` | `5bd5618c310aaa97a30c5cb20bb6957f164ce6f7` (2026-04-22) | **Behavioural reference.** Witchcraft runs Candle (not raw ggml), so `Tests/Fixtures/reference_embeddings.bin` was produced by Candle's Q4_K kernels. When the port doesn't bit-match the PyTorch reference, Candle is the next debugging target — not ggml. |
+| `huggingface/candle` | `5bd5618c310a65a492da0eb021eb1671f3bd3571` (2026-04-22) | **Behavioural reference.** Witchcraft runs Candle (not raw ggml), so `Tests/Fixtures/reference_embeddings.bin` was produced by Candle's Q4_K kernels. When the port doesn't bit-match the PyTorch reference, Candle is the next debugging target — not ggml. |
 | `dropbox/witchcraft` | `6ad59e51cfc89bcfb20756e3f05cf9429b7cb55f` (2026-04-24) | **Fixture provenance.** Same pin as ADR 013 (a). Source of `Sources/SwitchcraftCore/Tokenizer/*` validation fixtures and the cross-stack `reference_embeddings.bin`. |
 
 These SHAs were verified to exist via `gh api repos/<repo>/commits/<sha>`
