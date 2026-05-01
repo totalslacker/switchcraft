@@ -58,6 +58,7 @@ public enum BenchmarkHarness {
         tile: MetalTile? = nil,
         body: () throws -> Void
     ) rethrows -> BenchmarkResult {
+        precondition(iterations > 0, "BenchmarkHarness.measure: iterations must be > 0")
         for _ in 0..<warmup { try body() }
         var samples = [UInt64]()
         samples.reserveCapacity(iterations)
@@ -69,8 +70,9 @@ public enum BenchmarkHarness {
         }
         let nanos = samples.map { ticksToNanos($0) }.sorted()
         let p50 = nanos[nanos.count / 2]
-        let p95 = nanos[Int(Double(nanos.count) * 0.95)]
-        let mean = UInt64(nanos.reduce(0, +) / UInt64(nanos.count))
+        let p95Idx = min(Int(Double(nanos.count) * 0.95), nanos.count - 1)
+        let p95 = nanos[p95Idx]
+        let mean = nanos.reduce(0, +) / UInt64(nanos.count)
         let minV = nanos.first ?? 0
         let flops = 2.0 * Double(m) * Double(k) * Double(n)
         // Use min-latency for GFLOPS so the number reflects best-case throughput
