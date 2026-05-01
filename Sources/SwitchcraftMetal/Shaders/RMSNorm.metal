@@ -77,9 +77,15 @@ using namespace metal;
 //   ne00   — D (logical inner-dim length; the mean denominator)
 //   ne00_t — per-thread loop bound (= ne00 for T=float, ne00/4 for
 //            T=float4); we only ship the scalar form so ne00_t == ne00
-//   nb1    — dst row byte stride
-//   nb2    — dst dim2 byte stride (=1 in 2-D layout)
-//   nb3    — dst dim3 byte stride (=1 in 2-D layout)
+//   nb1    — dst row byte stride (D * sizeof(float) for our 2-D case)
+//   nb2    — dst dim2 byte stride. Indexed by tgpig.y, which is always
+//            0 in our 2-D dispatch (height=1), so the value is unread
+//            on this code path; the wrapper still populates it with the
+//            contiguous-layout stride (M * D * sizeof(float)) so a
+//            future batched extension picks up correct strides.
+//   nb3    — dst dim3 byte stride. Same as nb2 but indexed by tgpig.z
+//            (always 0 in 2-D); contiguous-layout stride matches nb2
+//            since we have no dim2 extent yet.
 //   eps    — RMSNorm epsilon (added to mean before rsqrt)
 //   nef[123][i] — dim-{1,2,3} sizes for source i:
 //                   i=0 src0 (input x)        — never broadcast, sizes
