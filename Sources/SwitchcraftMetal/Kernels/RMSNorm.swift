@@ -62,6 +62,17 @@ public struct RMSNormKernel {
     private let pipeline: MTLComputePipelineState
 
     public init(context: MetalContext) throws {
+        // Trap immediately if the Swift mirror struct's layout drifts
+        // from the MSL `ggml_metal_kargs_norm` definition. The MSL side
+        // has a `static_assert(sizeof(...) == 144)` for the same reason;
+        // the Swift side needs an explicit check because layout drift
+        // would otherwise surface as silent garbage outputs / failed
+        // parity tests rather than a clear init-time error.
+        precondition(
+            MemoryLayout<RMSNormArgs>.size == 144,
+            "RMSNormArgs layout drifted from MSL ggml_metal_kargs_norm "
+            + "(expected 144 bytes, got \(MemoryLayout<RMSNormArgs>.size))"
+        )
         try registerSwitchcraftMetalShaders(with: context)
         self.context = context
         self.pipeline = try context.pipeline(for: Self.kernelFunctionName)
@@ -175,16 +186,13 @@ public struct RMSNormKernel {
         encoder.endEncoding()
     }
 
-    /// Mirrors the MSL `ggml_metal_kargs_norm` byte-for-byte. `internal`
-    /// so tests can exercise the layout assertion. Field order is
-    /// load-bearing — changes must be mirrored in `RMSNorm.metal`.
-    ///
-    /// Inline-arrays-as-individual-fields keeps the layout obvious
-    /// across Swift's tuple-vs-array-vs-fixed-size-buffer storage
-    /// rules; `MemoryLayout<RMSNormArgs>.size == 144` is asserted in
-    /// the test suite.
-    @frozen
-    @usableFromInline
+    /// Mirrors the MSL `ggml_metal_kargs_norm` byte-for-byte. Field
+    /// order is load-bearing — changes must be mirrored in
+    /// `RMSNorm.metal`. Inline-arrays-as-individual-fields keeps the
+    /// layout obvious across Swift's tuple-vs-array-vs-fixed-size-buffer
+    /// storage rules; `MemoryLayout<RMSNormArgs>.size == 144` is
+    /// asserted in `init(context:)` so a layout drift traps immediately
+    /// with a clear message rather than surfacing as silent garbage.
     struct RMSNormArgs {
         var ne00: Int32       // offset 0
         var ne00_t: Int32     // offset 4
