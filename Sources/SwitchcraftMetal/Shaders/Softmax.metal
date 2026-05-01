@@ -68,11 +68,11 @@ using namespace metal;
 // `ggml_metal_kargs_soft_max` — verbatim port of upstream
 // `src/ggml-metal/ggml-metal-impl.h:778-799`. Field order, types, and
 // inline padding must match the host-side Swift `SoftmaxArgs` struct
-// byte-for-byte. The two interior 4-byte pads (after `ne02` and after
-// `n_head_log2`) are layout-load-bearing — they arise from the
-// `int32_t → uint64_t` alignment transition at offset 12 and from
-// rounding the struct to 8-byte alignment at the end. Drop either pad
-// and every later field misaligns silently.
+// byte-for-byte. Three 4-byte pads are layout-load-bearing:
+//   - after `ne02` at offset 12 — `int32_t → uint64_t` alignment for `nb01`
+//   - after `ne13` at offset 52 — `int32_t → uint64_t` alignment for `nb11`
+//   - after `n_head_log2` at offset 124 — round struct to 8-byte alignment
+// Drop any of these and every later field misaligns silently.
 //
 //   ne00 / ne01 / ne02   — src0 inner / mid / outer extents
 //                            (N / M / nheads in T5 attention shape)

@@ -70,29 +70,48 @@ private enum SoftmaxReference {
         precondition(x.count == B * N)
         if let bias = bias { precondition(bias.count == B * N) }
         var y = [Float](repeating: 0, count: B * N)
+        // Reuse a single per-row exp buffer across all B rows — at the
+        // T5 parity shape (B = 6144, N = 512) per-row reallocation was
+        // a heap-thrash hot spot in debug builds.
+        var rowExp = [Double](repeating: 0, count: N)
+        let scaleD = Double(scale)
+        // FP64 accumulator on the reference side so a kernel using
+        // a clean FP32 accumulator can still match within tolerance
+        // — and so the reference itself is not the source of any
+        // precision drift in the comparison.
         for r in 0..<B {
-            // FP64 accumulator on the reference side so a kernel using
-            // a clean FP32 accumulator can still match within tolerance
-            // — and so the reference itself is not the source of any
-            // precision drift in the comparison.
+            let rowBase = r * N
             var maxVal: Double = -.infinity
-            for k in 0..<N {
-                let v = Double(x[r * N + k]) * Double(scale)
-                  + (bias.map { Double($0[r * N + k]) } ?? 0)
-                if v > maxVal { maxVal = v }
+            if let bias = bias {
+                for k in 0..<N {
+                    let v = Double(x[rowBase + k]) * scaleD + Double(bias[rowBase + k])
+                    if v > maxVal { maxVal = v }
+                }
+            } else {
+                for k in 0..<N {
+                    let v = Double(x[rowBase + k]) * scaleD
+                    if v > maxVal { maxVal = v }
+                }
             }
             var sum: Double = 0
-            var rowExp = [Double](repeating: 0, count: N)
-            for k in 0..<N {
-                let v = Double(x[r * N + k]) * Double(scale)
-                  + (bias.map { Double($0[r * N + k]) } ?? 0)
-                let e = (v - maxVal).exp()
-                rowExp[k] = e
-                sum += e
+            if let bias = bias {
+                for k in 0..<N {
+                    let v = Double(x[rowBase + k]) * scaleD + Double(bias[rowBase + k])
+                    let e = (v - maxVal).exp()
+                    rowExp[k] = e
+                    sum += e
+                }
+            } else {
+                for k in 0..<N {
+                    let v = Double(x[rowBase + k]) * scaleD
+                    let e = (v - maxVal).exp()
+                    rowExp[k] = e
+                    sum += e
+                }
             }
             let inv = 1.0 / sum
             for k in 0..<N {
-                y[r * N + k] = Float(rowExp[k] * inv)
+                y[rowBase + k] = Float(rowExp[k] * inv)
             }
         }
         return y
@@ -257,15 +276,33 @@ struct SoftmaxKernelTests {
             x: x, bias: bias, B: B, N: N, scale: scale
         )
 
+        // Compute cosine / max-abs row-by-row directly over the parent
+        // buffers — at B = 6144, N = 512, the prior `Array(slice)` copies
+        // were a non-trivial allocation hot path in debug builds. Same
+        // arithmetic as `MetalCorrectness.cosineSimilarity` /
+        // `maxAbsError`, just inlined with a row offset.
         var minCos: Double = 1.0
         var maxAbs: Double = 0
-        for r in 0..<B {
-            let kRow = Array(kernelOut[(r * N)..<((r + 1) * N)])
-            let rRow = Array(referenceOut[(r * N)..<((r + 1) * N)])
-            let cos = MetalCorrectness.cosineSimilarity(kRow, rRow)
-            let err = MetalCorrectness.maxAbsError(kRow, rRow)
-            if cos < minCos { minCos = cos }
-            if err > maxAbs { maxAbs = err }
+        kernelOut.withUnsafeBufferPointer { kPtr in
+            referenceOut.withUnsafeBufferPointer { rPtr in
+                for r in 0..<B {
+                    let base = r * N
+                    var dot: Double = 0, nA: Double = 0, nB: Double = 0
+                    var rowMax: Double = 0
+                    for k in 0..<N {
+                        let ai = Double(kPtr[base + k]), bi = Double(rPtr[base + k])
+                        dot += ai * bi
+                        nA += ai * ai
+                        nB += bi * bi
+                        let d = abs(ai - bi)
+                        if d > rowMax { rowMax = d }
+                    }
+                    let denom = nA.squareRoot() * nB.squareRoot()
+                    let cos = denom > 0 ? dot / denom : 1.0
+                    if cos < minCos { minCos = cos }
+                    if rowMax > maxAbs { maxAbs = rowMax }
+                }
+            }
         }
         print("[Softmax] B=\(B) N=\(N) bias=\(withBias) — min row cosine \(minCos), max abs err \(maxAbs)")
         #expect(minCos >= 0.99999,
