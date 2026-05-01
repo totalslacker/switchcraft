@@ -328,8 +328,8 @@ Track progress by checking off items as they land. Effort estimates and notes fo
 
 - [ ] **SmoothQuant FP16 conversion path** (size + speed + ANE eligibility) — see "SmoothQuant FP16 path" below. **Investigation phase complete; see status below.**
 - [x] **INT8 weight-only `.mlpackage` variant** (rung 1 of "If SmoothQuant fails" ladder, ~110 MB) — see ADR 010(i); ships alongside FP32 default, opt-in via `SWITCHCRAFT_XTR_MLPACKAGE_INT8W`
-- [ ] **Custom Metal kernels for the T5 embedder** (closes embedder latency gap with Witchcraft; the Metal kernels themselves don't reach ANE, but doesn't preclude a future CoreML-FP16 variant shipping alongside via the Embedder protocol seam) — see "Custom Metal kernels for the T5 embedder" below
-- [ ] **Metal compute shaders for search hot paths** (Q4 dequant + matmul, centroid similarity, residual scoring) — see "Metal compute shaders for search hot paths" below
+- [ ] **Port ggml's T5 inference to Swift + Metal** (gives us roughly Witchcraft's embedder size + speed + power; Metal kernels themselves don't reach ANE today but the `Embedder` seam preserves a future CoreML-FP16 variant if/when one becomes viable) — see "Port ggml's T5 inference to Swift + Metal" below
+- [x] **Metal compute shaders for search hot paths — scaffolding** (#51 / PR #56, ADR 015). Per-kernel sub-issues (#52/#53/#54) closed as wrongly-scoped after #49 established Accelerate beats MPS; future kernel work goes against ggml's targets, not Accelerate — see "Search-side Metal: rescoped" below
 - [ ] LRU caching for query embeddings
 - [ ] Background indexing pipeline
 - [ ] Parallel bucket search
@@ -469,12 +469,15 @@ The fallback ladder, with current empirical status:
    every targeted island. The only passing carve-out is functionally
    full-FP32 with FP16 weight storage (see ADR 014(g) for the full
    record).
-3. **Custom Metal kernels for the T5 embedder** — replaces CoreML
-   inference entirely with hand-written Metal compute shaders.
-   Closes the embedder latency gap with Witchcraft (matches ggml's
-   per-op precision control). **Forfeits any future ANE prize**
-   because ANE is locked behind CoreML. See "Custom Metal kernels
-   for the T5 embedder" subsection below for the phased plan.
+3. **Port ggml's T5 inference to Swift + Metal** — replaces CoreML
+   inference entirely with a Swift+Metal port of ggml's existing T5
+   forward path (Q4-quantised kernels, FP32 sensitive ops, the works).
+   Closes the embedder size + speed + power gap with Witchcraft
+   because we are running essentially the same code, just translated.
+   The Metal kernels themselves don't reach ANE; the `Embedder`
+   protocol seam preserves a future CoreML-FP16 variant if one
+   becomes viable. See "Port ggml's T5 inference to Swift + Metal"
+   subsection below.
 4. **Switch model** (e.g. distilled MiniLM-128). Reluctant choice —
    loses comparability with Witchcraft, the NDCG@10 reference point,
    and most cross-stack parity gates. Only legitimate if upstream
@@ -484,155 +487,201 @@ The fallback ladder, with current empirical status:
    shaders for search hot paths, parallel bucket search, batch
    document processing) for performance gains.
 
-#### Custom Metal kernels for the T5 embedder
+#### Port ggml's T5 inference to Swift + Metal
 
-Strategic context: ADR 014(i) documents that Witchcraft's speed/size
-advantage on Apple Silicon comes from ggml's **fine-grained per-op
-kernel selection** — sensitive ops (RMSNorm, residual stream,
-softmax) compute at FP32 regardless of weight storage precision.
-CoreML's `compute_precision` is too coarse-grained to replicate this
-on `google/xtr-base-en` (#43 and #46 falsified the two surgical
-workarounds). The remaining path to match Witchcraft's embedder
-performance is to **bypass CoreML entirely** and write Metal compute
-shaders that replicate ggml's mixed-precision recipe.
+##### Goal and framing
 
-Trade-off: **the Metal kernels themselves don't reach ANE** — ANE
-access is gated through CoreML's `compute_precision` pipeline, and
-custom Metal kernels run on GPU only. Witchcraft itself has the
-same constraint (no ANE access from C++/Rust). Going down this path
+The user-facing goal is straightforward: a Swift-native framework
+that performs roughly like Witchcraft on iOS and macOS — similar
+size, similar speed, similar power consumption. Not faster. Not
+novel. *Good enough that customers don't bounce off perf.*
+
+ggml is open source (MIT). llama.cpp is open source (MIT). The
+exact kernels Witchcraft uses for `google/xtr-base-en` are
+documented C and `.metal` source in `ggml/src/ggml-metal.m` and
+related files. **This is a code-analysis-and-port task, not a
+research investigation.** We read what ggml does, translate the
+patterns to Swift and Metal, run parity tests against Witchcraft's
+published numbers (NDCG@10 ∈ [0.31, 0.33], 21 ms p95) and against
+the existing PyTorch reference fixture, and ship the result as a
+second `Embedder` conformance.
+
+This subsection supersedes the previous "Custom Metal kernels for
+the T5 embedder" framing, which was wrong-shaped: it treated
+matching ggml as a research question rather than a porting task.
+The matmul investigation #49 confirmed the wrong-shape: it tested
+"can a hand-rolled FP32 GEMM kernel beat Accelerate?" (no), but
+the actual question is "can we port ggml's existing Q4-quantised
+kernels?" (the answer is yes, by definition — the source is right
+there).
+
+##### Trade-off: ANE set aside, not forfeited
+
+Custom Metal kernels run on GPU; ANE access is gated through
+CoreML's `compute_precision` pipeline. Going down the port path
 means matching Witchcraft on GPU performance — *not* leapfrogging
 it via ANE, today.
 
-But this is **not a permanent decision against ANE**. The
-`Embedder` protocol seam (#16, ADR 009) is designed to support
-multiple conformances simultaneously. A `T5MetalEmbedder` shipping
-today does not preclude a future `T5CoreMLFP16Embedder` shipping
-alongside it if/when one becomes viable — for example, if a future
-coremltools release surfaces finer-grained per-op precision
-control that unblocks the FP16 path on this graph, or if model
-surgery beyond SmoothQuant (e.g., the `wi_1`/`wo` per-channel
-rebalancing idea documented in the SmoothQuant feasibility report's
-"Future ratchet" section) turns out to work. Consumers would pick
-which conformance they want at init time, and the choice is fully
-reversible. **We're setting ANE aside for now, not forfeiting it.**
+But this is not a permanent decision against ANE. The `Embedder`
+protocol seam (#16, ADR 009) is designed to support multiple
+conformances simultaneously. A `T5MetalEmbedder` shipping today
+does not preclude a future `T5CoreMLFP16Embedder` shipping alongside
+it if a coremltools release surfaces finer-grained per-op precision
+control or if model surgery beyond SmoothQuant turns out to work.
+Consumers pick which conformance they want at init time, and the
+choice is fully reversible. **We are setting ANE aside for now,
+not forfeiting it.**
 
-##### Phased delivery
+##### Phased delivery (port shape, not investigation shape)
 
-This is a 3-5 week project if pursued to completion. To avoid
-front-loading that effort on a path that might not deliver, the
-work is structured around a single bounded **investigation issue**
-followed by a multi-PR **implementation campaign** if the
-investigation says go.
+The work is a multi-PR engineering campaign, ~4-6 weeks total.
+**No more matmul-vs-Accelerate benchmarking.** ggml's published
+numbers + Witchcraft's NDCG@10 are the parity bar.
 
-1. **Investigation: matmul prototype + benchmark.** One Metal
-   compute shader for FP32 matmul sized for the shapes T5-base
-   actually uses (batch 1, seq 512, dims 768/3072). Swift test
-   harness verifying ≥0.99999 cosine vs `cblas_sgemm`. Benchmark
-   on M-series silicon vs (a) Accelerate `cblas_sgemm`,
-   (b) production CoreML FP32 inference, (c) Metal Performance
-   Shaders (`MPSMatrixMultiplication`). Output: feasibility report
-   with concrete latency numbers + go/no-go signal. **The matmul
-   kernel is ~70-80% of T5 inference time, so if we can't win on
-   matmul, the rest of the project is moot.** 1-2 weeks of work,
-   touches no `Sources/` (lives in a new investigation script + a
-   private test target).
-2. **Implementation campaign** (only on go): expand to the full
-   T5 encoder — RMSNorm, softmax, gated-FFN with gelu, L2
-   normalisation, residual add, plus the Swift orchestration layer
-   that dispatches kernels in the right order, manages
-   `MTLBuffer`s, loads weights from a custom format, and conforms
-   to the existing `Embedder` protocol. Filed as a new umbrella
-   issue with Plan-stage decomposition into per-kernel sub-issues.
-   Expected: 6 kernel sub-issues + 1 orchestration sub-issue + 1
-   parity / performance gate sub-issue.
-3. **Default flip** (final PR): switch a future `T5MetalEmbedder`
-   variant to be the default in places where ANE is not desired
-   and embedder latency is binding. Continue shipping the FP32
-   `.mlpackage` variant for users who prefer the CoreML path.
+1. **Code analysis & porting plan** (one PR, days not weeks).
+   Read `ggml-metal.m`, llama.cpp's T5 inference path, and
+   Witchcraft's Rust glue. Catalogue the kernels and orchestration
+   we need to port:
+   - The Q4-quantised matmul kernel (`mul_mat_q4_K_f32` and
+     siblings — fused dequant-and-multiply-and-accumulate on the
+     ggml block layout).
+   - RMSNorm at FP32 (`kernel_rms_norm_f32`).
+   - Softmax at FP32 (`kernel_soft_max_f32`).
+   - Element-wise: residual add, gelu, L2 normalisation.
+   - The orchestration layer: weight loading from GGUF, kernel
+     dispatch order matching T5's encoder forward pass,
+     `MTLBuffer` lifecycle, mixed-precision routing per ADR 014(i).
+   Output: a porting plan committed to `docs/porting/ggml-t5.md`
+   that names each ggml source file, each kernel, and the
+   corresponding Swift target file. This is mechanical mapping
+   work — produces a checklist subsequent sub-issues consume.
+
+2. **Per-kernel ports** (one PR per kernel, ordered by dependency).
+   Each PR translates a single ggml kernel to Swift + Metal,
+   commits parity tests vs the Swift FP32 reference path, and
+   records the port in the catalogue. Order roughly:
+   - GGUF reader (load Q4-quantised weights into `MTLBuffer`s).
+   - Q4 matmul kernel.
+   - RMSNorm kernel.
+   - Softmax kernel.
+   - Element-wise kernels (potentially grouped).
+   Each PR is bounded (3-5 days). Parity gate per kernel: ≥0.99999
+   cosine vs PyTorch FP32 reference on the kernel's specific
+   inputs. **No "beat Accelerate" requirement** — the goal is
+   match ggml, not optimise.
+
+3. **`T5MetalEmbedder` orchestration** (one PR). Implements the
+   forward pass in Swift, dispatching the ported kernels in the
+   T5 encoder order, conforming to the `Embedder` protocol so
+   `SwitchcraftStore` can use it interchangeably with
+   `T5CoreMLEmbedder`. Tests verify the full forward pass on the
+   existing committed fixtures (`Tests/Fixtures/xtr-base-en.embeddings.bin`)
+   at ≥0.99999 cosine vs the PyTorch reference.
+
+4. **Cross-stack parity gate** (one PR). End-to-end test that runs
+   the same NFCorpus benchmark (#27) against `T5MetalEmbedder` and
+   asserts NDCG@10 ∈ [0.31, 0.33] — the bar Witchcraft ships at.
+   This is the umbrella's acceptance criterion: if `T5MetalEmbedder`
+   clears NDCG, the port is correct. If it doesn't, debug the
+   specific kernel that diverged.
+
+5. **ADR amendments** as we go. ADR 010 picks up an INT (j) section
+   describing the GGUF asset format and `T5MetalEmbedder` variant.
+   ADR 014(g) records that the port path is followed (not
+   investigated) and why this differs from the SmoothQuant + MIL
+   pass paths that *were* research questions.
 
 ##### Multi-implementation shipping
 
-Throughout, **CoreML T5 (FP32 / INT8w / hypothetical future FP16)
-remains the default Embedder implementation**. The Metal kernel
-implementation, if landed, ships as an additional `Embedder`
-conformance — `T5MetalEmbedder` — alongside `T5CoreMLEmbedder`. The
-Embedder protocol seam (#16) was designed for exactly this: multiple
-implementations with the same contract, consumer-selected at init
-time. Downstream consumers (e.g. SafariUnfucker) keep working with
-their existing CoreML embedder until they explicitly opt in.
+Throughout, **`T5CoreMLEmbedder` (FP32 / INT8w) remains the default**
+`Embedder` implementation. `T5MetalEmbedder` ships as an additional
+conformance — consumer-selected at init time. SafariUnfucker (and
+any other downstream consumer) keeps working with the CoreML
+embedder unchanged until it explicitly opts in.
 
-##### If the matmul investigation fails
+##### Reuse of #51's scaffolding
 
-Fallback is to **stop pursuing embedder Metal kernels** and accept
-the ~1.5-2× embedder latency gap with Witchcraft. INT8 weight-only
-(#45) handles the storage axis; the embedder latency stays where it
-is until either coremltools' FP16 path opens up (passive) or a
-fundamentally different surgical technique surfaces. The search-side
-Metal work below proceeds independently regardless.
+The Metal scaffolding from #51 (`MetalContext`, dispatch helpers,
+fallback policy, ADR 015) was designed for the search-path kernel
+work. It is **directly reusable** for the embedder port: same
+`MTLDevice` acquisition, same pipeline cache pattern, same
+`MetalAvailability` gate. The embedder port doesn't re-invent the
+foundation — it builds on what #51 shipped. The only new
+infrastructure required is the GGUF reader for Q4-quantised
+weights, which is a per-port concern.
 
-#### Metal compute shaders for search hot paths
+##### Acceptance for the campaign
 
-This is the **search-side** Metal work, distinct from the embedder
-work above. The two efforts touch disjoint code (search lives in
-`Sources/SwitchcraftCore/Search/`, `KMeans/`, `Codec/`; embedder
-work would live in a new target or `Sources/SwitchcraftCoreML/`)
-and run in parallel.
+When the umbrella closes:
 
-Three kernels matter for the search path, each in a separate hot
-loop today (currently dispatched via Accelerate's `cblas_sgemm` or
-plain Swift):
+- **Asset size**: GGUF Q4K T5-base ~80 MB, matching Witchcraft.
+- **Search end-to-end p95**: ≤25 ms on the 5000-document
+  benchmark corpus (within ~20% of Witchcraft's 21 ms; not aiming
+  for parity, aiming for "in the same ballpark").
+- **Embedder latency**: comparable to Witchcraft's GGUF path on the
+  same hardware (~50 ms per 512-token encode, give or take). Match
+  ggml's published M1-class numbers.
+- **NDCG@10**: ∈ [0.31, 0.33] on NFCorpus when `T5MetalEmbedder`
+  is the active embedder.
+- **Power consumption**: not directly measured; comparable
+  inferred from comparable wall time at comparable GPU
+  utilisation.
+- **`docs/Plan.md` "Port ggml's T5 inference to Swift + Metal"**
+  line is `[x]`.
 
-1. **Q4 dequant + matmul fused** — the bucket residuals from
-   `Q4Codec` (4-bit per value, packed) get decoded and combined
-   with their centroid at search time. Currently: unpack via Swift
-   loop, then `cblas_sgemm`. With Metal: fused dequant-and-matmul
-   kernel modeled on ggml's `kernel_mul_mat_q4_K_f32`.
-2. **Centroid similarity** — query-vs-centroids dot product across
-   all generations. Currently: `cblas_sgemm` over a few thousand
-   centroids per query. With Metal: optimised batched dot product
-   on GPU; relevant for large indexes where centroid count grows.
-3. **Residual scoring / MaxSim** — per-token similarity
-   accumulation during the candidate scoring step. Currently: Swift
-   loops in `SearchEngine`. With Metal: parallelised reduction.
+##### Why we are not investigating further before porting
 
-Expected outcome: **search latency closes from current ~30 ms p95 to
-~21 ms p95** (matching Witchcraft's published number). The big
-absolute wins are on large indexes where the centroid sweep
-dominates; on the 33-fact corpus and similar small corpora, the
-existing Accelerate path is already fast enough that Metal kernels
-won't move the needle.
+We have, in the recent past, taken the bait of "investigate first,
+implement on go" framing on questions where the *implementation*
+was the answer. SmoothQuant and MIL pass were genuinely research
+questions and the investigations were correct. The matmul
+investigation (#49) was *partly* correct as a measurement question
+("does our hand-rolled kernel beat Accelerate?") but produced a
+no-go that was wrong-shaped because Accelerate isn't the relevant
+target — ggml is. We do not need a third investigation to confirm
+that ggml's Q4 kernels work on `google/xtr-base-en`; ggml has
+shipped them in production for years. The remaining work is
+translation, not discovery.
 
-##### Phased delivery
+#### Search-side Metal: rescoped
 
-Filed as one **umbrella issue** with Plan-stage decomposition, same
-shape as the Phase 1 testing umbrella (#20 → #21–#28). Expected
-sub-issues:
+The original "Metal compute shaders for search hot paths"
+subsection (now removed) framed three sub-issues — #52 (Q4 dequant
++ matmul), #53 (centroid similarity), #54 (MaxSim reduction) — as
+kernels competing with Accelerate's `cblas_sgemm`. After #49's
+empirical finding that **Accelerate beats `MPSMatrixMultiplication`
+by 2-5× on M1 Ultra** for the shapes that matter (almost certainly
+AMX dispatch via Apple's matrix coprocessor), this framing was
+wrong:
 
-1. **Metal scaffolding** ✅ (#51, ADR 015) — `MTLDevice` acquisition,
-   command queue setup, lazy `MTLLibrary` with `NSLock`-guarded
-   pipeline cache (`MetalContext`), transparent Accelerate fallback
-   helper (`runMetalOrFallback`), `SWITCHCRAFT_FORCE_ACCELERATE` env
-   var, `MetalAvailability.isAvailable` test gate, and a dims=128
-   `MetalPerformanceTests` suite alongside ADR 012's dims=32
-   `PerformanceTests`.
-2. **Q4 dequant + matmul kernel** — the highest-leverage win,
-   exercises decompression + matmul fusion.
-3. **Centroid similarity kernel** — straightforward batched dot
-   product; moderate win on large indexes.
-4. **Residual scoring / MaxSim kernel** — parallelised reduction.
+- The search path is already running on the optimal CPU path.
+  Replacing `cblas_sgemm` with Metal is unlikely to win.
+- Witchcraft does not compete with Accelerate either. Witchcraft's
+  speed comes from a different architecture entirely (GGUF + ggml
+  Metal kernels, all GPU, *no* CPU-BLAS path).
+- The right target for embedder-side Metal work is ggml's
+  inference path (see "Port ggml's T5 inference to Swift + Metal"
+  above). The right answer for the search side is **stay on
+  Accelerate** until a workload surfaces that the AMX path can't
+  handle.
 
-Each sub-issue is bounded (3-7 days), produces its own PR with
-benchmarks, and runs through the existing `fabrik:yolo` pipeline.
-The first kernel issue establishes patterns that subsequent kernels
-reuse.
+What's preserved from the original umbrella:
 
-##### Search-side fallback if a kernel underperforms
+- **#51 / PR #56 ✅** — the Metal scaffolding (`MetalContext`,
+  pipeline cache, fallback helper, `MetalAvailability`, ADR 015,
+  performance regression infrastructure). This stays on `main`
+  and is directly reusable for the embedder port.
 
-If a specific Metal kernel can't beat the existing Accelerate /
-Swift path (entirely possible — Apple's BLAS is well-tuned), that
-kernel just stays on the Accelerate path and the umbrella ticks
-without it. The work is *additive*, not replacing — performance
-regression tests catch any backsliding.
+What's closed:
+
+- **#52, #53, #54** — closed as wrongly-scoped against Accelerate.
+  Their work is not lost; if at some point in the future a
+  search-path Metal kernel becomes worth pursuing, the framing
+  should be "match ggml's pattern" not "beat Accelerate," and the
+  scaffolding from #51 is ready to host it.
+
+The Phase 2 list above ticks the scaffolding (`[x]`); per-kernel
+search-side Metal work is no longer a Phase 2 deliverable.
 
 ---
 
