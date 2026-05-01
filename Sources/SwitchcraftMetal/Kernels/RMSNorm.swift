@@ -176,9 +176,10 @@ public struct RMSNormKernel {
         encoder.setBuffer(output, offset: 0, index: 4)
         encoder.setThreadgroupMemoryLength(Self.threadgroupMemoryBytes, index: 0)
 
-        // One threadgroup per row (i01 = tgpig.x). i02 / i03 are 1 in
-        // 2-D layout — broadcast modulus and zero strides keep the
-        // f0 / f1 / src0 indexing well-defined regardless.
+        // One threadgroup per row (i01 = tgpig.x). i02 / i03 are 0 in
+        // 2-D layout (height=depth=1 ⇒ tgpig.y = tgpig.z = 0) —
+        // broadcast modulus and zero strides keep the f0 / f1 / src0
+        // indexing well-defined regardless.
         encoder.dispatchThreadgroups(
             MTLSize(width: M, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: tptg, height: 1, depth: 1)
