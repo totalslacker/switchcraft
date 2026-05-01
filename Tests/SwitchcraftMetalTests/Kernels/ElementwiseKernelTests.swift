@@ -333,7 +333,7 @@ struct GatedGELUKernelTests {
         var gate = [Float](repeating: 0, count: count)
         var up = [Float](repeating: 0, count: count)
         // T5 FFN activations are roughly unit-scale post-RMSNorm-and-
-        // matmul; ±1 covers the typical evaluation range without
+        // matmul; ±2 covers the typical evaluation range without
         // pushing tanh into either saturation regime.
         for i in 0..<count {
             gate[i] = rng.nextFloat() * 2.0
