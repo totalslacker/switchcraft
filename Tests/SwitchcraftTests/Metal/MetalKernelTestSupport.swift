@@ -16,26 +16,26 @@
 
 import Foundation
 import Metal
+@testable import SwitchcraftCore
 
 /// Probes the host for Metal support. Used as `.enabled(if: …)` on the
 /// Metal test suites so they skip cleanly on no-GPU hosts and on test
 /// runs that have set `SWITCHCRAFT_FORCE_ACCELERATE` to exercise the
 /// fallback path.
 enum MetalAvailability {
-    /// Env var that forces the Accelerate fallback path. Mirrors
-    /// `MetalContext.forceAccelerateEnvVar` (kept in lockstep — if the
-    /// production constant changes, the test mirror must too).
-    static let forceAccelerateEnvVar = "SWITCHCRAFT_FORCE_ACCELERATE"
-
     /// `true` iff `MTLCreateSystemDefaultDevice()` returns a device and
-    /// `SWITCHCRAFT_FORCE_ACCELERATE` is unset (or set to `0`).
+    /// `SWITCHCRAFT_FORCE_ACCELERATE` is unset (or set to `0`). The env
+    /// var name is owned by `MetalContext.forceAccelerateEnvVar` so the
+    /// test gate cannot drift out of lockstep with the production check.
     static var isAvailable: Bool {
         if isForceAccelerateSet() { return false }
         return MTLCreateSystemDefaultDevice() != nil
     }
 
     private static func isForceAccelerateSet() -> Bool {
-        guard let raw = ProcessInfo.processInfo.environment[forceAccelerateEnvVar] else {
+        guard let raw = ProcessInfo.processInfo.environment[
+            MetalContext.forceAccelerateEnvVar
+        ] else {
             return false
         }
         return !raw.isEmpty && raw != "0"

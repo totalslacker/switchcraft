@@ -21,7 +21,6 @@
 
 #if canImport(Metal)
 
-import Foundation
 import Metal
 import os
 
