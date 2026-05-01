@@ -64,6 +64,28 @@ let package = Package(
             dependencies: ["SwitchcraftCore"],
             path: "Sources/SwitchcraftStorageTesting"
         ),
+        // Standalone Metal-matmul prototype for the Phase 2 custom-Metal-kernels
+        // feasibility investigation (issue #49). Intentionally NOT in `products`
+        // — only the matching test target consumes it. Library is fully isolated
+        // (zero Switchcraft dependencies) so it can be deleted or re-homed without
+        // ripple. See `docs/investigations/metal-matmul-feasibility.md`.
+        .target(
+            name: "SwitchcraftMetalProto",
+            path: "Sources/SwitchcraftMetalProto",
+            resources: [
+                .process("MetalMatmul.metal"),
+            ],
+            linkerSettings: [
+                .linkedFramework(
+                    "Metal",
+                    .when(platforms: [.macOS, .iOS, .visionOS])
+                ),
+                .linkedFramework(
+                    "MetalPerformanceShaders",
+                    .when(platforms: [.macOS, .iOS, .visionOS])
+                ),
+            ]
+        ),
         .testTarget(
             name: "SwitchcraftTests",
             dependencies: [
@@ -75,6 +97,18 @@ let package = Package(
             ],
             path: "Tests/SwitchcraftTests",
             resources: [.copy("../Fixtures")]
+        ),
+        // Test target for the Metal-matmul prototype. Gated at suite level by
+        // env vars (correctness: SWITCHCRAFT_METAL_PROTO=1, benchmarks:
+        // SWITCHCRAFT_METAL_PROTO_BENCH=1 + release build) so the default
+        // `swift test` invocation skips the entire suite cleanly.
+        .testTarget(
+            name: "SwitchcraftMetalProtoTests",
+            dependencies: [
+                "SwitchcraftMetalProto",
+                "SwitchcraftCore",
+            ],
+            path: "Tests/SwitchcraftMetalProtoTests"
         ),
     ]
 )
