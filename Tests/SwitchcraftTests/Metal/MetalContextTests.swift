@@ -25,7 +25,7 @@
 import Foundation
 import Metal
 import Testing
-@testable import SwitchcraftCore
+@_spi(SwitchcraftMetal) @testable import SwitchcraftCore
 
 @Suite("MetalContext smoke tests",
        .enabled(if: MetalAvailability.isAvailable,
