@@ -35,9 +35,12 @@ import Foundation
 /// New kernel sub-issues append their `.metal` basename here.
 @_spi(SwitchcraftMetal)
 public let switchcraftMetalShaderResourceNames: [String] = [
-    "Q4KMatMul",  // issue #60
-    "RMSNorm",    // issue #61
-    "Softmax",    // issue #62
+    "Q4KMatMul",   // issue #60
+    "RMSNorm",     // issue #61
+    "Softmax",     // issue #62
+    "ResidualAdd", // issue #63
+    "GatedGELU",   // issue #63
+    "L2Norm",      // issue #63
 ]
 
 /// Register `SwitchcraftMetal`'s `Bundle.module` with `context` so its
