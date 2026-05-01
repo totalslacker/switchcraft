@@ -173,6 +173,11 @@ let package = Package(
             dependencies: [
                 "SwitchcraftMetal",
                 "SwitchcraftCore",
+                // Issue #65 NFCorpus + cross-stack + perf suites build a
+                // full SwitchcraftStore over SQLiteStorage with
+                // T5MetalEmbedder. These deps are test-target only.
+                "Switchcraft",
+                "SwitchcraftSQLite",
             ],
             path: "Tests/SwitchcraftMetalTests",
             resources: [.copy("../Fixtures")]
