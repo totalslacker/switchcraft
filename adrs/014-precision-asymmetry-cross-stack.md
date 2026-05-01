@@ -220,10 +220,18 @@ Witchcraft-side direction explicitly. Trigger conditions:
      FP32-promotion that survives MIL graph fusion).
   2. **Custom Metal kernels** that bypass CoreML's automated graph
      optimisation entirely — effectively a Swift port of ggml's T5
-     inference path. This is the "Phase 2 — Metal compute shaders for
-     hot paths" line in `docs/Plan.md` taken to an aggressive scope.
-     Substantial undertaking; **loses ANE access** because custom
-     kernels run on GPU only.
+     inference path. This is the "Phase 2 — Custom Metal kernels for
+     the T5 embedder" line in `docs/Plan.md`. Substantial undertaking.
+     The Metal kernels themselves don't reach ANE (custom kernels
+     run on GPU only; ANE is reachable only through CoreML's
+     `compute_precision` pipeline). **Critically, this does not
+     foreclose future ANE access** — the `Embedder` protocol seam
+     (ADR 009) supports multiple conformances simultaneously, so a
+     future `T5CoreMLFP16Embedder` could ship alongside Metal
+     kernels if a coremltools release with finer-grained per-op
+     precision control or other surgical advance unblocks the FP16
+     path. Pursuing custom Metal kernels sets ANE aside for now;
+     it does not surrender the ANE prize permanently.
   3. **Pre-conversion model surgery beyond SmoothQuant** that targets
      the residual-stream magnitude rather than per-Linear inputs —
      e.g., scale-down `ff.wi_1` and matching scale-up of `ff.wo` along
@@ -345,10 +353,18 @@ doesn't enter the picture for those sites.
   per-op precision control through the public API.
 - ANE access is gated on FP16 compute, which CoreML provides via
   `compute_precision`. Custom Metal kernels run on GPU only; they
-  don't reach ANE. So even if we wrote ggml-equivalent Metal kernels
-  for the T5 encoder, we would *not* recover ANE eligibility — that
-  prize is specifically tied to CoreML's compute_precision pipeline,
-  which is what's blocked.
+  themselves don't reach ANE — that prize is specifically tied to
+  CoreML's `compute_precision` pipeline, which is currently blocked
+  for `google/xtr-base-en`. **Important nuance**: pursuing the
+  Metal-kernel path does *not* foreclose future ANE access. The
+  `Embedder` protocol seam (#16, ADR 009) supports multiple
+  conformances simultaneously; if a future coremltools release
+  surfaces finer-grained precision control (or any other surgical
+  advance unblocks the FP16 path on this graph), a parallel
+  `T5CoreMLFP16Embedder` conformance can ship alongside a
+  `T5MetalEmbedder` conformance and consumers can pick at init
+  time. The Metal-kernel work sets ANE aside for now; it does not
+  surrender the ANE prize permanently.
 - INT8 weight-only quantisation (#45) is the only easy win currently
   available, and it operates entirely on **axis 1** (storage). It
   shrinks the asset from ~430 MB to ~110 MB without touching axis 2

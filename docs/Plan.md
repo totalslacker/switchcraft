@@ -328,7 +328,7 @@ Track progress by checking off items as they land. Effort estimates and notes fo
 
 - [ ] **SmoothQuant FP16 conversion path** (size + speed + ANE eligibility) — see "SmoothQuant FP16 path" below. **Investigation phase complete; see status below.**
 - [x] **INT8 weight-only `.mlpackage` variant** (rung 1 of "If SmoothQuant fails" ladder, ~110 MB) — see ADR 010(i); ships alongside FP32 default, opt-in via `SWITCHCRAFT_XTR_MLPACKAGE_INT8W`
-- [ ] **Custom Metal kernels for the T5 embedder** (closes embedder latency gap with Witchcraft; forfeits future ANE prize) — see "Custom Metal kernels for the T5 embedder" below
+- [ ] **Custom Metal kernels for the T5 embedder** (closes embedder latency gap with Witchcraft; the Metal kernels themselves don't reach ANE, but doesn't preclude a future CoreML-FP16 variant shipping alongside via the Embedder protocol seam) — see "Custom Metal kernels for the T5 embedder" below
 - [ ] **Metal compute shaders for search hot paths** (Q4 dequant + matmul, centroid similarity, residual scoring) — see "Metal compute shaders for search hot paths" below
 - [ ] LRU caching for query embeddings
 - [ ] Background indexing pipeline
@@ -496,15 +496,25 @@ workarounds). The remaining path to match Witchcraft's embedder
 performance is to **bypass CoreML entirely** and write Metal compute
 shaders that replicate ggml's mixed-precision recipe.
 
-Critical trade-off: this path **forfeits any future ANE
-eligibility**. ANE access is gated through CoreML's
-`compute_precision` pipeline. Custom Metal kernels run on GPU only.
-Witchcraft itself has the same constraint (no ANE access from C++/
-Rust); going down this path means matching Witchcraft on GPU
-performance rather than leapfrogging it via ANE. If a future
-coremltools release surfaces finer-grained per-op precision control
-that unblocks the FP16 path, the ANE prize re-opens — but that's a
-passive condition we can't drive.
+Trade-off: **the Metal kernels themselves don't reach ANE** — ANE
+access is gated through CoreML's `compute_precision` pipeline, and
+custom Metal kernels run on GPU only. Witchcraft itself has the
+same constraint (no ANE access from C++/Rust). Going down this path
+means matching Witchcraft on GPU performance — *not* leapfrogging
+it via ANE, today.
+
+But this is **not a permanent decision against ANE**. The
+`Embedder` protocol seam (#16, ADR 009) is designed to support
+multiple conformances simultaneously. A `T5MetalEmbedder` shipping
+today does not preclude a future `T5CoreMLFP16Embedder` shipping
+alongside it if/when one becomes viable — for example, if a future
+coremltools release surfaces finer-grained per-op precision
+control that unblocks the FP16 path on this graph, or if model
+surgery beyond SmoothQuant (e.g., the `wi_1`/`wo` per-channel
+rebalancing idea documented in the SmoothQuant feasibility report's
+"Future ratchet" section) turns out to work. Consumers would pick
+which conformance they want at init time, and the choice is fully
+reversible. **We're setting ANE aside for now, not forfeiting it.**
 
 ##### Phased delivery
 
