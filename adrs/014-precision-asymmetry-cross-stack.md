@@ -18,15 +18,21 @@ future work that proposes moving either side on the precision curve.
 
 | | Switchcraft (Apple platforms) | Witchcraft (ggml ecosystem) |
 |---|---|---|
-| Compute precision | FP32 internal | Q4K matmul, Q8 attention |
+| Weight **storage** precision | FP32 (or FP16 weights, FP32 compute — see below) | Q4K body, Q8 attention K/V |
+| Sensitive-op **compute** precision (RMSNorm, residual stream, softmax) | FP32 | FP32 (independent of storage) |
+| Other-op **compute** precision | FP32 | FP16/FP32 mix per ggml kernel selection |
 | Output precision | FP16 at model port (widened to FP32 at the Swift boundary) | F32 at output |
 | Asset size | ~430 MB | ~80 MB |
-| Native quantisation toolchain | CoreML (`compute_precision`); FP16/FP32 only | ggml K-quants (Q4_K, Q5_K, Q6_K, Q8_0, F16, F32) |
+| Native quantisation toolchain | CoreML (`compute_precision`) — FP16/FP32 only, coarse-grained | ggml K-quants (Q4_K, Q5_K, Q6_K, Q8_0, F16, F32) — fine-grained per-op kernel selection |
 | Bundle-size budget | Generous (apps, IDE plugins, server-side macOS) | Tight (embedded clients at scale) |
 
 Both stacks consume the same `google/xtr-base-en` weights. The
-asymmetry is purely an inference-time choice driven by deployment
-constraints — not a quality difference in the underlying model.
+asymmetry is **not** "different points on a single precision curve" —
+that framing was an oversimplification. It is at minimum a
+two-axis difference: **storage precision** (how weights sit on disk
+and in memory) and **compute precision per op** (what numerical
+type the kernel uses for the matmul, norm, softmax, etc.). ggml
+decouples these axes; CoreML largely couples them. See section (i).
 
 ## (b) Why Switchcraft is FP32 compute, not FP16
 
@@ -76,38 +82,64 @@ so internal arithmetic in Switchcraft is full precision throughout.
 Halving the per-token output buffer is a real but modest size win on
 the wire and in memory.
 
-## (d) Why Witchcraft is Q4K + Q8 attention
+## (d) Why Witchcraft uses Q4K weight **storage** (and what it does at compute time)
 
 Witchcraft is built on the `ggml` / llama.cpp ecosystem and uses GGUF
 **K-quants** — block-quantised formats designed specifically for LLM
-inference at low bit widths:
+inference at low bit widths.
 
-1. **Q4K** stores weights as 4 bits per element with shared per-block
-   scale and min, in 256-element super-blocks. Roughly 5–6× smaller
-   than FP16. ggml has heavily-optimised Metal kernels for Q4K
-   dequant-and-matmul fused ops, so it's not just smaller, it's also
-   fast on Apple Silicon (this matters because Witchcraft also runs
-   on Macs).
+A critical clarification this ADR previously elided: **K-quants are
+storage formats, not compute formats.** When ggml executes a matmul
+against Q4K-stored weights, the runtime dequantises those weights
+on-the-fly to FP16 or FP32 just before the matmul kernel runs; the
+matmul itself computes at the higher precision (with FP32 accumulator
+in the typical Metal kernel). Q4K saves disk and memory bandwidth;
+the actual numerical work happens at higher precision. The phrase
+"Q4K matmul" should be read as "Q4K-stored weights, dequantised on
+read, computed at higher precision" — not as "4-bit arithmetic in
+the matmul kernel."
 
-2. **Q8 specifically for attention.** Attention scoring (`Q · Kᵀ`) is
-   more sensitive to quantisation noise than feedforward layers
-   because scores feed through softmax, which exponentially amplifies
-   precision errors. Q8 (~8 bits/element, shared scale) keeps
-   attention near-FP16 quality while the rest of the network stays at
-   Q4K. This "Q4K body, Q8 attention" recipe is standard ggml
-   guidance, not a Witchcraft invention.
+With that clarification:
 
-3. **Bundle size was the hard constraint** for Witchcraft's deployment
-   target (Dropbox internal client-side semantic search at scale).
-   ~80 MB on user disk matters more there than the last 0.5 % of
-   accuracy. ggml's K-quants are designed for exactly that point on
-   the curve.
+1. **Q4K weight storage** stores weights as 4 bits per element with
+   shared per-block scale and min, in 256-element super-blocks.
+   Roughly 5–6× smaller on disk than FP16. ggml has heavily-optimised
+   Metal kernels for the dequant-and-matmul fused path, so it's also
+   fast on Apple Silicon. Witchcraft also runs on Macs, so Metal
+   performance matters.
 
-4. **Witchcraft *could* ship higher precision but doesn't.** ggml
-   supports F16 and F32 GGUF formats. Reasons not to:
+2. **Q8 K/V cache for attention** addresses a different concern:
+   attention `Q · Kᵀ` feeds into softmax, which exponentially
+   amplifies precision errors. The K/V cache stays at 8 bits to give
+   the softmax better numerical headroom than 4 bits would, while
+   the projection weights (`q_proj`, `k_proj`, `v_proj`) themselves
+   stay at Q4K storage. This "Q4K body, Q8 K/V" recipe is standard
+   ggml guidance, not a Witchcraft invention.
+
+3. **The sensitive-op compute path is FP32 throughout.** This is the
+   thing that lets Witchcraft survive on `google/xtr-base-en` where
+   Switchcraft's CoreML FP16 path produces NaN. ggml's Metal backend
+   has separate kernels for FP32 norm (`kernel_rms_norm_f32`) and
+   FP16 norm (`kernel_rms_norm_f16`); the runtime dispatches the
+   FP32 kernel for T5's RMSNorm regardless of how the weights are
+   stored. The residual stream stays in FP32 throughout; `mean(x²)`
+   for any reasonable activation (≤ ~10 000) has plenty of headroom
+   in FP32 (~10³⁸ max). This is **mixed-precision compute, with
+   independent storage precision** — and it is the architectural
+   feature that enables Witchcraft's small asset on this exact graph.
+
+4. **Bundle size was the hard constraint** for Witchcraft's
+   deployment target (Dropbox internal client-side semantic search
+   at scale). ~80 MB on user disk matters more there than the last
+   0.5 % of accuracy. ggml's K-quants storage format is designed for
+   exactly that point on the curve. The mixed-precision compute
+   above is what keeps the small asset *correct*.
+
+5. **Witchcraft *could* ship higher-precision storage but doesn't.**
+   ggml supports F16 and F32 GGUF formats. Reasons not to:
    - Larger asset for negligible quality gain on retrieval tasks.
    - Their published NDCG@10 ∈ [0.31, 0.33] on NFCorpus is
-     calibrated against Q4K + Q8 attention, so changing the format
+     calibrated against Q4K + Q8 K/V, so changing the format
      invalidates the canonical reference number that downstream
      consumers (us) rely on for the cross-implementation parity gate.
    - No upstream pressure to change since their deployment values
@@ -163,27 +195,61 @@ stacks sit at different precision points.
 The asymmetry is not a permanent feature. ADR 010(h) anticipates the
 Witchcraft-side direction explicitly. Trigger conditions:
 
-- **CoreML's FP16 path starts working on T5.** A future coremltools
-  release, a custom MIL pass, model surgery to clip outliers
-  pre-conversion, or migrating to a smaller distilled model without
-  T5's outlier problem could let Switchcraft drop to ~80 MB at FP16
-  throughout. This brings the precision pair closer (FP16 vs Q4K is
-  closer than FP32 vs Q4K) and the cross-stack tolerance should
-  tighten toward ±0.01 in the same commit that updates the
-  `.mlpackage` and references.
+- **CoreML's FP16 path starts working on T5.** Two surgical sub-paths
+  named in earlier versions of this ADR — pre-conversion activation
+  smoothing (SmoothQuant) and a custom MIL pass that promotes the
+  RMSNorm cluster + residual `add` to FP32 — are now **empirically
+  falsified** for `google/xtr-base-en`:
+  - SmoothQuant (#43, `docs/investigations/smoothquant-feasibility.md`)
+    re-parameterises *inside* the Linear and cannot lower the
+    residual-stream magnitude that overflows the next block's RMSNorm.
+    Cosine vs FP32 PyTorch reference: 0.0 across α ∈ {0.3, 0.5, 0.7,
+    0.85} and the absorbed-LayerNorm formulation.
+  - Custom MIL pass (#46,
+    `docs/investigations/mil-fp32-promote-feasibility.md`) cannot
+    isolate the saturation point: the FP16 saturation happens *inside*
+    `ff.wo` before any reachable carve-out boundary, so promoting the
+    RMSNorm cluster to FP32 receives an already-saturated `+inf`
+    input and produces NaN. Cosine: 0.0 on every targeted island; the
+    only passing island is functionally full-FP32 with FP16 weight
+    storage.
+
+  The remaining sub-paths that have **not** been ruled out:
+  1. **A future coremltools release** with substantially finer-grained
+     compute-precision selection than 7.2 / 9.0 (e.g. true per-tensor
+     FP32-promotion that survives MIL graph fusion).
+  2. **Custom Metal kernels** that bypass CoreML's automated graph
+     optimisation entirely — effectively a Swift port of ggml's T5
+     inference path. This is the "Phase 2 — Metal compute shaders for
+     hot paths" line in `docs/Plan.md` taken to an aggressive scope.
+     Substantial undertaking; **loses ANE access** because custom
+     kernels run on GPU only.
+  3. **Pre-conversion model surgery beyond SmoothQuant** that targets
+     the residual-stream magnitude rather than per-Linear inputs —
+     e.g., scale-down `ff.wi_1` and matching scale-up of `ff.wo` along
+     the same input channels, mathematically equivalent but reducing
+     `ff.wo`'s output magnitude. Conceptually plausible but novel; not
+     a published recipe like SmoothQuant. Anticipated by the
+     SmoothQuant report's "Future ratchet" footnote.
+  4. **Migrating to a smaller distilled model** without T5's
+     variance-only RMSNorm overflow problem. Loses Witchcraft
+     comparability; only viable if upstream Witchcraft also moves.
+
 - **Witchcraft starts shipping higher-precision GGUF** (Q5_K, Q6_K,
   Q8_0, F16, F32) for production-grade users. Same effect — closer
-  precision pair, tighter tolerance, in the same commit that
-  regenerates `Tests/Fixtures/reference_*.bin`.
-- **Switchcraft adds INT8 / W4 quantisation** as a Phase 2 optimisation
-  (per `docs/Plan.md` "Phase 2 production optimisation" list). This
-  *expands* the trade-off space (Switchcraft would then offer both
-  FP32 and quantised builds) without changing the FP32 build's parity
-  contract.
+  storage-precision pair, tighter cross-stack tolerance, in the same
+  commit that regenerates `Tests/Fixtures/reference_*.bin`.
 
-When any of these trigger, ADR 010(h)'s "tighten back toward ±0.01"
-note should be revisited in the same commit that updates the
-references.
+- **Switchcraft adds INT8 weight-only quantisation** (#45, in flight)
+  as a Phase 2 optimisation. This is **storage-only** — compute stays
+  at FP32, NaN risk stays zero, ANE eligibility unchanged. It shrinks
+  the asset to ~110 MB without affecting the precision contract.
+  *Expands* the trade-off space (Switchcraft offers both FP32 and
+  INT8w builds) without changing the FP32 build's parity contract.
+
+When any of the unfalsified conditions trigger, ADR 010(h)'s
+"tighten back toward ±0.01" note should be revisited in the same
+commit that updates the references.
 
 ## (h) What this ADR is not
 
@@ -197,6 +263,113 @@ references.
   documented as approximate (±0.025); this ADR explains why the
   approximation is intrinsic, not a bug to fix.
 
+## (i) The deeper asymmetry: storage precision vs compute precision
+
+Earlier sections of this ADR (and earlier discussions in the project
+generally) framed the Switchcraft↔Witchcraft difference as "different
+points on the same precision/size/quality curve." That framing is
+not wrong but is incomplete. The two stacks differ on **at least two
+independent axes**, and the second axis — *compute architecture* — is
+why FP16 is reachable on Witchcraft and unreachable through CoreML on
+Switchcraft.
+
+### Two independent axes
+
+1. **Weight storage precision.** How weights sit on disk and in
+   memory. Q4K (4-bit + per-block scale) on Witchcraft; FP32 on
+   Switchcraft today. This is the axis that determines asset size.
+2. **Per-op compute precision.** What numerical type each kernel
+   uses for its matmul, norm, softmax, accumulator, etc. Witchcraft
+   runs FP32 on sensitive ops (RMSNorm, residual stream, attention
+   softmax) regardless of how the weights are stored; Switchcraft
+   today runs FP32 throughout because CoreML's `compute_precision`
+   doesn't allow targeted carve-outs in a way that survives MIL
+   graph fusion (per #43 and #46).
+
+These axes are decoupled in ggml; they are largely coupled in CoreML
+at the level of control we have access to. The earlier framing
+implied a single "precision" column with one value per stack, which
+is why the question "how is Rust able to do what Swift can't?"
+appears paradoxical: how does Q4K beat FP16 numerically? It doesn't.
+Q4K is a *storage* format, dequantised to FP16 or FP32 before any
+arithmetic. The arithmetic Witchcraft does on the residual stream is
+**FP32**, the same precision Switchcraft uses today — Witchcraft
+just gets to carry weights at Q4K through to the matmul kernel and
+have the compute happen at the higher precision.
+
+### Why the architectures permit different choices
+
+- **ggml's Metal backend** has separate kernels for each (op-type ×
+  numerical-type) combination: `kernel_rms_norm_f32`,
+  `kernel_rms_norm_f16`, `kernel_norm_f32`, `kernel_norm_f16`,
+  `kernel_mul_mat_q4_K_f32`, `kernel_mul_mat_f32_f32`, etc. The
+  runtime dispatches the kernel matching the inputs and the
+  configured precision policy. There is no "compute_precision" flag
+  for the whole graph; precision is per-op, chosen by the developer
+  when they wire up the inference graph in C/Rust code.
+
+- **CoreML** is at a level above this. You set
+  `compute_precision=ct.precision.FLOAT16` (or `FLOAT32`) at
+  conversion time and CoreML's optimiser plus runtime dispatches to
+  ANE / GPU / CPU at whatever precision its automated optimisation
+  passes have decided to use. The per-op selector
+  (`coremltools.transform.FP16ComputePrecision(op_selector=…)`)
+  exists, but operates on the post-fusion MIL graph after coremltools'
+  own passes have re-shaped the boundaries — and as the MIL pass
+  investigation (#46) demonstrated, the residual-add → RMSNorm chain
+  can't be carved cleanly because the FP16 saturation happens *inside*
+  the upstream Linear, before any reachable carve-out boundary. The
+  cast at the boundary preserves the saturated value as `+inf`; FP32
+  RMSNorm of `+inf` produces NaN; NaN propagates downstream.
+
+So the architectural difference is concretely:
+
+- **CoreML** — high-level, black-box, automated graph optimisation.
+  Apple chooses kernels for you, runs MIL fusion + lowering passes,
+  dispatches to ANE / GPU / CPU. Lots of magic; less control.
+- **ggml** — low-level, kernel-by-kernel, manual graph construction.
+  You wire up op kernels by hand; you choose precision per op. Less
+  magic; more control.
+
+For this specific T5 graph, the CoreML magic doesn't have a knob to
+turn that fixes the FP16 overflow in a targeted way. ggml's lack of
+magic means a developer just *picks* FP32 norm kernels and FP16
+doesn't enter the picture for those sites.
+
+### Implications
+
+- The "FP16/ANE prize" path through CoreML may genuinely be
+  unreachable for `google/xtr-base-en` without writing custom Metal
+  kernels (Phase 2 hot-path scope, but expanded substantially), or
+  waiting for a future coremltools release that surfaces fine-grained
+  per-op precision control through the public API.
+- ANE access is gated on FP16 compute, which CoreML provides via
+  `compute_precision`. Custom Metal kernels run on GPU only; they
+  don't reach ANE. So even if we wrote ggml-equivalent Metal kernels
+  for the T5 encoder, we would *not* recover ANE eligibility — that
+  prize is specifically tied to CoreML's compute_precision pipeline,
+  which is what's blocked.
+- INT8 weight-only quantisation (#45) is the only easy win currently
+  available, and it operates entirely on **axis 1** (storage). It
+  shrinks the asset from ~430 MB to ~110 MB without touching axis 2
+  (compute precision) — and therefore without engaging any of the
+  failure modes that ruled out SmoothQuant (#43) and the MIL pass
+  (#46).
+- The "precision/size/quality curve" framing in section (e) above is
+  preserved as a useful first-order summary, but the deeper truth is
+  that ggml and CoreML are not on the same curve at all — they are
+  in **different inference-architecture regimes** with different
+  knobs available. ggml has a knob CoreML doesn't expose, and that
+  knob is what makes ~80 MB FP16-on-T5 work.
+
+This (i) is the most common follow-up question this ADR has gotten
+("how can Rust do what Swift can't?"), and the honest answer is
+"not what we said earlier — actually, *both* stacks compute the
+sensitive ops at FP32; the difference is that ggml lets the
+developer specify that per op, whereas CoreML's coarse-grained
+precision controls don't permit a targeted carve-out on this
+specific graph."
+
 ## References
 
 - ADR 010(c) — Switchcraft asset format and precision contract.
@@ -207,9 +380,21 @@ references.
   as the smallest working configuration.
 - Issue #30 / PR #33 — Where the ±0.025 tolerance was empirically
   calibrated against the FP32-vs-Q4K precision pair.
+- Issue #43 / PR #44 / `docs/investigations/smoothquant-feasibility.md`
+  — falsifies the SmoothQuant pre-conversion-smoothing ratchet path.
+- Issue #46 / PR #48 / `docs/investigations/mil-fp32-promote-feasibility.md`
+  — falsifies the custom-MIL-pass FP32-promotion ratchet path; also
+  the source for the storage-vs-compute distinction documented in
+  section (i).
+- Issue #45 — INT8 weight-only quantisation (in flight); the storage-
+  axis win that is reachable today without touching axis 2.
 - `huggingface/diffusers#8604` — same FP16 activation-outlier pattern
   in T5-family encoders.
 - `Tests/Fixtures/facts_corpus.json.provenance` — runtime artefact
   recording the precision pair for any given parity run.
-- ggml documentation on K-quants — for the Q4K/Q8/Q5K/Q6K format
-  rationale.
+- ggml documentation on K-quants — for the Q4_K / Q8_0 / Q5_K /
+  Q6_K storage-format rationale.
+- `ggml-metal.m` (llama.cpp) — example of per-op kernel selection
+  (`kernel_rms_norm_f32` vs `kernel_rms_norm_f16`,
+  `kernel_mul_mat_q4_K_f32` etc.) that section (i) describes as
+  ggml's compute-precision-axis lever.
