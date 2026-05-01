@@ -313,7 +313,10 @@ import SwitchcraftCoreML
 let tokenizerURL = URL(fileURLWithPath: "Tests/Fixtures/xtr-base-en.tokenizer.json")
 let tokenizer = try Tokenizer(contentsOf: tokenizerURL.path)
 
-let ggufURL = URL(fileURLWithPath: ProcessInfo.processInfo.environment["SWITCHCRAFT_XTR_GGUF"]!)
+guard let ggufPath = ProcessInfo.processInfo.environment["SWITCHCRAFT_XTR_GGUF"] else {
+    fatalError("Set SWITCHCRAFT_XTR_GGUF to the .gguf asset path")
+}
+let ggufURL = URL(fileURLWithPath: ggufPath)
 
 // `T5MetalEmbedder.init` throws `metalUnavailable` when Metal is
 // unreachable (no GPU, `SWITCHCRAFT_FORCE_ACCELERATE=1`, library load
@@ -323,7 +326,10 @@ let embedder: any Embedder
 do {
     embedder = try await T5MetalEmbedder(modelURL: ggufURL, tokenizer: tokenizer)
 } catch T5MetalEmbedderError.metalUnavailable {
-    let mlpackageURL = URL(fileURLWithPath: ProcessInfo.processInfo.environment["SWITCHCRAFT_XTR_MLPACKAGE"]!)
+    guard let mlpackagePath = ProcessInfo.processInfo.environment["SWITCHCRAFT_XTR_MLPACKAGE"] else {
+        fatalError("Metal unavailable and SWITCHCRAFT_XTR_MLPACKAGE is unset — set it to the .mlpackage path to enable the CoreML fallback")
+    }
+    let mlpackageURL = URL(fileURLWithPath: mlpackagePath)
     embedder = try await T5CoreMLEmbedder(modelURL: mlpackageURL, tokenizer: tokenizer)
 }
 

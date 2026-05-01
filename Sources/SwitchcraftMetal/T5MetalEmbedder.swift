@@ -282,6 +282,17 @@ public actor T5MetalEmbedder: Embedder {
                 "\(projName) elements \(projTensor.elementCount) ≠ expected \(projExpected) (dims × dModel)"
             )
         }
+        // GGUF on-disk shape is fastest-varying-first: PyTorch's
+        // [out_features=dims, in_features=dModel] is stored as
+        // [dModel, dims]. Validate explicitly so a transposed asset
+        // throws rather than silently producing wrong embeddings.
+        guard projTensor.shape.count == 2,
+              projTensor.shape[0] == dModel,
+              projTensor.shape[1] == dimsParam else {
+            throw T5MetalEmbedderError.tensorShapeMismatch(
+                "\(projName) on-disk shape \(projTensor.shape) ≠ expected [\(dModel), \(dimsParam)] (fastest-varying-first)"
+            )
+        }
         let projWeights: [Float]
         switch projTensor.dtype {
         case .f16:
@@ -371,6 +382,25 @@ public actor T5MetalEmbedder: Embedder {
         let l2OutBuf = try alloc(M * dProj, "l2Out")
         let embedBuf = try alloc(M * D, "embed")
 
+        // ----- Precompute relpos bias into relposBiasBuf -----
+        // The bias depends only on (bucketTable, weights, numHeads,
+        // seqLen=windowSize), all fixed at init — so build once here
+        // instead of on every encode (~12 MB memcpy avoided per call).
+        let biasMatrix = T5RelativePositionBias.buildBiasMatrix(
+            bucketTable: bucketTable,
+            weights: relposWeights,
+            numHeads: H,
+            seqLen: M
+        )
+        _ = biasMatrix.withUnsafeBufferPointer { src -> Int in
+            memcpy(
+                relposBiasBuf.contents(),
+                src.baseAddress!,
+                src.count * MemoryLayout<Float>.size
+            )
+            return src.count
+        }
+
         // ----- Stored state assignment -----
         self.dims = dimsParam
         self.modelIdentifier = modelIdentifierParam
@@ -427,21 +457,8 @@ public actor T5MetalEmbedder: Embedder {
             stride: stride
         )
 
-        // Build the per-encode relpos bias once (input-position-dependent
-        // but layer-invariant per the catalogue).
-        let biasMatrix = T5RelativePositionBias.buildBiasMatrix(
-            bucketTable: bucketTable,
-            weights: relposBiasWeights,
-            numHeads: nHeads,
-            seqLen: windowSize
-        )
-        _ = biasMatrix.withUnsafeBufferPointer { src in
-            memcpy(
-                relposBiasBuf.contents(),
-                src.baseAddress!,
-                src.count * MemoryLayout<Float>.size
-            )
-        }
+        // The relpos bias is precomputed into `relposBiasBuf` at
+        // `init` time — it is fixed for a given `windowSize`.
 
         var perWindowNormalised: [[Float]] = []
         var perWindowRawNorms: [[Float]] = []
@@ -698,8 +715,11 @@ public actor T5MetalEmbedder: Embedder {
     // MARK: - Token embedding gather
 
     /// CPU dequantise the rows of the Q4_K embed-tokens table for the
-    /// given `tokens` and copy the FP32 result into `embedBuf`. Pads
-    /// with zeros for slots beyond `tokens.count`.
+    /// given `tokens` and copy the FP32 result into `embedBuf`. Slots
+    /// beyond `tokens.count` are filled with the pad-token row
+    /// (`tokenID == 0`) to match the CoreML path, which pads `input_ids`
+    /// with the pad-token ID — keeping attention behaviour identical
+    /// across the two embedders for short inputs.
     ///
     /// Cost is bounded by `windowSize × (dModel / 256) × 144 ≈ 1.5 MB`
     /// of source bytes per window; the Swift `Q4KDecode.dequantise`
@@ -711,18 +731,12 @@ public actor T5MetalEmbedder: Embedder {
             * Q4KDecode.bytesPerSuperBlock
         let dst = embedBuf.contents()
             .bindMemory(to: Float.self, capacity: M * D)
-        // Zero the buffer first so padding rows are deterministic.
-        memset(embedBuf.contents(), 0, M * D * MemoryLayout<Float>.size)
 
         embedTokensBytes.withUnsafeBytes { rawPtr in
             let base = rawPtr.bindMemory(to: UInt8.self).baseAddress!
-            for slot in 0..<min(tokens.count, M) {
-                let tokenID = Int(tokens[slot])
-                guard tokenID >= 0, tokenID < vocabSize else {
-                    // Out-of-range token — leave row zero; merger will
-                    // drop it via MIN_NORM.
-                    continue
-                }
+            for slot in 0..<M {
+                let rawID = slot < tokens.count ? Int(tokens[slot]) : 0
+                let tokenID = (rawID >= 0 && rawID < vocabSize) ? rawID : 0
                 let rowOffset = tokenID * bytesPerRow
                 let rowPtr = base.advanced(by: rowOffset)
                 let blockBuf = UnsafeRawBufferPointer(
