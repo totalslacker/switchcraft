@@ -97,6 +97,15 @@ let package = Package(
             name: "SwitchcraftMetal",
             dependencies: ["SwitchcraftCore"],
             path: "Sources/SwitchcraftMetal",
+            resources: [
+                // Per ADR 015 §(e), each target that ships Metal shaders
+                // owns its own bundle; the kernels here are registered
+                // with `MetalContext` lazily at first kernel-init time.
+                // SwiftPM 6's `.process(...)` ships `.metal` raw and
+                // the runtime-source-compile fallback in `MetalContext`
+                // handles that case.
+                .process("Shaders"),
+            ],
             linkerSettings: [
                 .linkedFramework(
                     "Metal",
