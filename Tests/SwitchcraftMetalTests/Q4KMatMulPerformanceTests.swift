@@ -49,31 +49,47 @@ struct Q4KMatMulPerformanceTests {
         weightBytes.reserveCapacity(N * blocksPerRow * 144)
         for _ in 0..<(N * blocksPerRow) { weightBytes.append(zeroBlock) }
 
-        let weightBuf: MTLBuffer = weightBytes.withUnsafeBytes { raw in
-            ctx.device.makeBuffer(
-                bytes: raw.baseAddress!,
-                length: raw.count,
-                options: .storageModeShared
-            )!
-        }
+        let weightBuf: MTLBuffer = try #require(
+            weightBytes.withUnsafeBytes { raw in
+                raw.baseAddress.flatMap {
+                    ctx.device.makeBuffer(
+                        bytes: $0,
+                        length: raw.count,
+                        options: .storageModeShared
+                    )
+                }
+            },
+            "Failed to allocate weight buffer for ffn_wi_1 perf test"
+        )
 
         let activations = [Float](repeating: 0, count: M * K)
-        let actBuf = activations.withUnsafeBufferPointer { ptr in
+        let actBuf: MTLBuffer = try #require(
+            activations.withUnsafeBufferPointer { ptr in
+                ptr.baseAddress.flatMap {
+                    ctx.device.makeBuffer(
+                        bytes: $0,
+                        length: ptr.count * MemoryLayout<Float>.size,
+                        options: .storageModeShared
+                    )
+                }
+            },
+            "Failed to allocate activation buffer for ffn_wi_1 perf test"
+        )
+        let outBuf: MTLBuffer = try #require(
             ctx.device.makeBuffer(
-                bytes: ptr.baseAddress!,
-                length: ptr.count * MemoryLayout<Float>.size,
+                length: M * N * MemoryLayout<Float>.size,
                 options: .storageModeShared
-            )!
-        }
-        let outBuf = ctx.device.makeBuffer(
-            length: M * N * MemoryLayout<Float>.size,
-            options: .storageModeShared
-        )!
+            ),
+            "Failed to allocate output buffer for ffn_wi_1 perf test"
+        )
 
         // Warm-up: shader-binding cost on first dispatch is the
         // canonical Metal trap. One throwaway dispatch absorbs it.
         do {
-            let cmd = ctx.queue.makeCommandBuffer()!
+            let cmd = try #require(
+                ctx.queue.makeCommandBuffer(),
+                "makeCommandBuffer returned nil during warm-up"
+            )
             kernel.encode(
                 commandBuffer: cmd,
                 weight: weightBuf, weightShape: (N, K),
@@ -89,7 +105,10 @@ struct Q4KMatMulPerformanceTests {
         let clock = ContinuousClock()
         for _ in 0..<iterations {
             let start = clock.now
-            let cmd = ctx.queue.makeCommandBuffer()!
+            let cmd = try #require(
+                ctx.queue.makeCommandBuffer(),
+                "makeCommandBuffer returned nil mid-benchmark"
+            )
             kernel.encode(
                 commandBuffer: cmd,
                 weight: weightBuf, weightShape: (N, K),

@@ -2,9 +2,9 @@
 //
 // Performance-test helpers for the SwitchcraftMetal suites.
 //
-// **Duplicate of the percentile / build-once / nanoseconds helpers from
-// `Tests/SwitchcraftTests/Performance/MetalPerformanceTests.swift`** per
-// the issue #60 plan §"Tests + perf helpers duplicated, not extracted"
+// **Duplicate of the release-build detection / nanoseconds / percentile
+// helpers from `Tests/SwitchcraftTests/Performance/MetalPerformanceTests.swift`**
+// per the issue #60 plan §"Tests + perf helpers duplicated, not extracted"
 // and Q4 resolution. Refactor trigger: same as
 // `MetalKernelTestSupport.swift` — extract a shared target if duplicated
 // four-plus times after #61–#63 land. Until then, mirror any change.
