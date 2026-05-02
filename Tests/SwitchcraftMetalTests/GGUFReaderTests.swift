@@ -337,19 +337,51 @@ struct GGUFReaderHeaderTests {
         try? FileManager.default.removeItem(at: url)
     }
 
-    @Test("unsupported version is rejected")
+    @Test("unsupported version is rejected (v1)")
     func unsupportedVersion() async throws {
         var fixture = GGUFFixture()
-        fixture.version = 2
+        fixture.version = 1  // v1 predates v2/v3; must be rejected
         let url = try writeFixture(fixture)
         let dev = try device()
         do {
             _ = try GGUFReader(url: url, device: dev)
             Issue.record("expected unsupportedVersion, init succeeded")
         } catch let GGUFError.unsupportedVersion(found) {
-            #expect(found == 2)
+            #expect(found == 1)
         } catch {
             Issue.record("expected unsupportedVersion, got \(error)")
+        }
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    @Test("GGUF v2 file is accepted and loadedVersion is 2")
+    func ggufV2Accepted() async throws {
+        var fixture = GGUFFixture()
+        fixture.version = 2
+        let url = try writeFixture(fixture)
+        let dev = try device()
+        do {
+            let reader = try GGUFReader(url: url, device: dev)
+            let v = await reader.loadedVersion
+            #expect(v == 2)
+        } catch {
+            Issue.record("expected GGUF v2 to be accepted, got \(error)")
+        }
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    @Test("GGUF v3 file is accepted and loadedVersion is 3")
+    func ggufV3Accepted() async throws {
+        var fixture = GGUFFixture()
+        fixture.version = 3  // default, but explicit here for clarity
+        let url = try writeFixture(fixture)
+        let dev = try device()
+        do {
+            let reader = try GGUFReader(url: url, device: dev)
+            let v = await reader.loadedVersion
+            #expect(v == 3)
+        } catch {
+            Issue.record("expected GGUF v3 to be accepted, got \(error)")
         }
         try? FileManager.default.removeItem(at: url)
     }

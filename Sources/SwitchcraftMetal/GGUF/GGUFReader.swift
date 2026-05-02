@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// GGUF v3 reader for the Phase 2 Metal embedder (issue #59).
+// GGUF v2/v3 reader for the Phase 2 Metal embedder (issue #59).
 //
 // Parses the header, KV metadata block, and tensor-info block of a GGUF
-// v3 file, then lazily uploads requested tensor bytes to `MTLBuffer`s.
+// v2 or v3 file, then lazily uploads requested tensor bytes to `MTLBuffer`s.
 //
-// On-disk format reference: `ggml/docs/gguf.md`. The v3 layout is:
+// On-disk format reference: `ggml/docs/gguf.md`. The v2/v3 layout is:
 //
 //     magic   : 4 bytes "GGUF"
-//     version : u32 (must be 3)
+//     version : u32 (must be 2 or 3)
 //     n_tensors: u64
 //     n_kv     : u64
 //     kv_pairs : { string key, u32 value_type, value } × n_kv
@@ -43,20 +43,29 @@
 import Foundation
 import Metal
 
-/// Pure-Swift GGUF v3 reader.
+/// Pure-Swift GGUF v2/v3 reader.
 ///
 /// Construct with a file URL + `MTLDevice`; parse runs synchronously
 /// inside `init`. `tensor(_:)` and `tensorNames()` are async because
 /// the reader is an `actor` (state — the cache and parsed tensor info —
 /// is mutated across calls).
+///
+/// GGUF v2 and v3 are structurally identical for the dtypes Switchcraft
+/// consumes (Q4_K, F32, F16). v2 is accepted because Witchcraft's
+/// `quantize-tool` at the pinned Candle rev `5bd5618` emits GGUF v2.
+/// See ADR 016 and Switchcraft issue #74.
 @_spi(SwitchcraftMetal)
 public actor GGUFReader {
     /// First four bytes of every GGUF file: ASCII "GGUF" little-endian.
     public static let magic: UInt32 = 0x4655_4747  // 'F' 'U' 'G' 'G' in LE byte order
     /// Default tensor-data alignment when `general.alignment` is absent.
     public static let defaultAlignment: Int = 32
-    /// Only GGUF v3 is supported.
-    public static let supportedVersion: UInt32 = 3
+
+    /// The GGUF version loaded from this file. Always 2 or 3 for any
+    /// file accepted by this reader. Exposed for debuggability — a future
+    /// structural divergence between v2 and v3 would be visible here
+    /// rather than silently tolerated.
+    public let loadedVersion: UInt32
 
     /// Description of one tensor as parsed from the tensor-info block.
     /// The MTLBuffer is allocated on demand and held in `cache`.
@@ -87,7 +96,7 @@ public actor GGUFReader {
     /// Tensor cache populated lazily by `tensor(_:)`.
     private var cache: [String: GGUFTensor] = [:]
 
-    /// Open and parse a GGUF v3 file.
+    /// Open and parse a GGUF v2 or v3 file.
     public init(url: URL, device: MTLDevice) throws {
         let data: Data
         do {
@@ -101,9 +110,10 @@ public actor GGUFReader {
         let magic: UInt32 = try Self.readUInt32(data, cursor: &cursor)
         guard magic == Self.magic else { throw GGUFError.invalidMagic }
         let version: UInt32 = try Self.readUInt32(data, cursor: &cursor)
-        guard version == Self.supportedVersion else {
+        guard version == 2 || version == 3 else {
             throw GGUFError.unsupportedVersion(found: version)
         }
+        self.loadedVersion = version
         let nTensors: UInt64 = try Self.readUInt64(data, cursor: &cursor)
         let nKV: UInt64 = try Self.readUInt64(data, cursor: &cursor)
 

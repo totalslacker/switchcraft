@@ -165,6 +165,7 @@ public actor T5MetalEmbedder: Embedder {
         // immediately actionable for the operator.
         let projCandidates = [
             "2_Dense.linear.weight",
+            "linear.weight",        // Witchcraft quantize-tool at pinned Candle rev 5bd5618
             "2_Dense.weight",
             "dense.weight",
             "projection.weight",
