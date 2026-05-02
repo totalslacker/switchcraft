@@ -488,6 +488,7 @@ struct SwitchcraftMetalSPISmokeTests {
 
 // MARK: - Round-trip parity (env-gated)
 
+// ASSET-GATED: requires SWITCHCRAFT_XTR_GGUF — skips in CI and on fresh checkouts
 @Suite("GGUFReader round-trip parity",
        .enabled(if: GGUFAsset.isAvailable,
                 "Set SWITCHCRAFT_XTR_GGUF=<path> to enable round-trip parity tests"))

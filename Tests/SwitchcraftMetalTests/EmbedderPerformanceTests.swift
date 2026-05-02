@@ -20,6 +20,7 @@ import Testing
 @_spi(SwitchcraftMetal) @testable import SwitchcraftCore
 @_spi(SwitchcraftMetal) import SwitchcraftMetal
 
+// ASSET-GATED: requires SWITCHCRAFT_XTR_GGUF + release build — skips in CI and on fresh checkouts
 @Suite(
     "T5MetalEmbedder Performance (release-only, asset-gated)",
     .serialized,

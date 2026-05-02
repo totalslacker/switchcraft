@@ -504,10 +504,6 @@ public actor T5MetalEmbedder: Embedder {
         // 1. Token embedding gather (CPU dequant, FP32 upload).
         gatherTokenEmbeddings(tokens: tokens)
 
-        // BISECT[1]: log embed table output before GPU work.
-        bisectLog(embedBuf, count: tokens.count * dModel,
-                  label: "embedBuf[after gather, \(tokens.count) tokens]")
-
         // Initialise residual stream to gathered embeddings.
         memcpy(
             residualBuf.contents(),
@@ -538,10 +534,6 @@ public actor T5MetalEmbedder: Embedder {
         if let err = cbLayers.error {
             throw T5MetalEmbedderError.commandBufferFailed("layers 0-11: \(err)")
         }
-        // BISECT[2]: residual stream after all encoder layers.
-        bisectLog(residualBuf, count: tokens.count * dModel,
-                  label: "residualBuf[after all layers]")
-
         // 3–5. Final RMSNorm + 2_Dense projection + L2 norm.
         guard let cb2 = context.queue.makeCommandBuffer() else {
             throw T5MetalEmbedderError.commandBufferCreationFailed
@@ -576,14 +568,6 @@ public actor T5MetalEmbedder: Embedder {
             throw T5MetalEmbedderError.commandBufferFailed("proj+l2: \(err)")
         }
 
-        // BISECT[4]: xNormBuf (after final RMSNorm, before 2_Dense).
-        bisectLog(xNormBuf, count: tokens.count * dModel,
-                  label: "xNormBuf[after final RMSNorm]")
-
-        // BISECT[5]: projOutBuf (after 2_Dense, before L2).
-        bisectLog(projOutBuf, count: tokens.count * dims,
-                  label: "projOutBuf[after 2_Dense]")
-
         // 6. Read back projOut + l2Out and compute pre-L2 row norms.
         let proj = readFloats(projOutBuf, count: windowSize * dims)
         let normalised = readFloats(l2OutBuf, count: windowSize * dims)
@@ -598,205 +582,7 @@ public actor T5MetalEmbedder: Embedder {
             rawNorms[r] = Float(sumSq.squareRoot())
         }
 
-        // BISECT[6]: summary of raw norms and how many survive the minNorm gate.
-        let keepCount = rawNorms.filter { $0 >= minNorm }.count
-        let normMin = rawNorms.min() ?? 0
-        let normMax = rawNorms.max() ?? 0
-        print("[T5Bisect] rawNorms: min=\(normMin) max=\(normMax) "
-            + "keepCount=\(keepCount)/\(windowSize) (minNorm=\(minNorm))")
-
         return (normalised, rawNorms)
-    }
-
-    // Intra-layer bisection for layer 2 (first NaN layer). Each sub-operation
-    // runs in its own command buffer so we can log the intermediate buffer values
-    // after each step. Temporary scaffolding; removed in Task 8.
-    private func bisectLayer2(layer: LayerWeights, tokenCount: Int, biasBuf: MTLBuffer) throws {
-        let M = windowSize
-        let D = dModel
-        let H = nHeads
-        let dH = dHead
-        let dFF_ = dFF
-
-        func run(_ label: String, _ body: (MTLCommandBuffer) -> Void) throws {
-            guard let cb = context.queue.makeCommandBuffer() else {
-                throw T5MetalEmbedderError.commandBufferCreationFailed
-            }
-            cb.label = label
-            body(cb)
-            cb.commit(); cb.waitUntilCompleted()
-            if let err = cb.error {
-                throw T5MetalEmbedderError.commandBufferFailed("\(label): \(err)")
-            }
-        }
-
-        // Attn sub-layer: pre-norm
-        try run("L2.attn.rmsNorm") { cb in
-            rmsNormKernel.encode(commandBuffer: cb, input: residualBuf, gain: layer.preAttnNormGain,
-                                 output: xNormBuf, M: M, D: D, eps: layerNormEps)
-        }
-        bisectLog(xNormBuf, count: tokenCount * D, label: "L2.xNorm[after preAttnNorm]")
-
-        // Q projection
-        try run("L2.Q") { cb in
-            q4kMatMul.encode(commandBuffer: cb, weight: layer.qWeight, weightShape: (D, D),
-                             input: xNormBuf, output: qBuf, M: M)
-        }
-        bisectLog(qBuf, count: tokenCount * D, label: "L2.qBuf[after Q proj]")
-
-        // K, V projections
-        try run("L2.KV") { cb in
-            q4kMatMul.encode(commandBuffer: cb, weight: layer.kWeight, weightShape: (D, D),
-                             input: xNormBuf, output: kBuf, M: M)
-            q4kMatMul.encode(commandBuffer: cb, weight: layer.vWeight, weightShape: (D, D),
-                             input: xNormBuf, output: vBuf, M: M)
-        }
-        bisectLog(kBuf, count: tokenCount * D, label: "L2.kBuf[after K proj]")
-
-        // Q·Kᵀ scores
-        try run("L2.scores") { cb in
-            fp32MatMulKernel.encode(commandBuffer: cb, a: qBuf, b: kBuf, output: scoresBuf,
-                                    M: M, N: M, K: dH, batch: H, transposeB: true,
-                                    aStrideBatch: dH, bStrideBatch: dH,
-                                    cStrideBatch: M * M, aRowStride: D, bRowStride: D, cRowStride: M)
-        }
-        bisectLog(scoresBuf, count: tokenCount * M, label: "L2.scoresBuf[after Q·Kᵀ, head 0 rows 0-7]")
-
-        // Softmax + relpos bias (with attention mask for pad positions).
-        try run("L2.softmax") { cb in
-            softmaxKernel.encode(commandBuffer: cb, input: scoresBuf, bias: biasBuf,
-                                 output: softmaxOutBuf, B: H * M, N: M, scale: 1.0)
-        }
-        bisectLog(softmaxOutBuf, count: tokenCount * M, label: "L2.softmaxOut[after softmax]")
-
-        // softmax·V → attnMerged
-        try run("L2.attnMerge") { cb in
-            fp32MatMulKernel.encode(commandBuffer: cb, a: softmaxOutBuf, b: vBuf, output: attnMergedBuf,
-                                    M: M, N: dH, K: M, batch: H, transposeB: false,
-                                    aStrideBatch: M * M, bStrideBatch: dH,
-                                    cStrideBatch: dH, aRowStride: M, bRowStride: D, cRowStride: D)
-        }
-        bisectLog(attnMergedBuf, count: tokenCount * D, label: "L2.attnMergedBuf[after softmax·V]")
-
-        // O projection
-        try run("L2.O") { cb in
-            q4kMatMul.encode(commandBuffer: cb, weight: layer.oWeight, weightShape: (D, D),
-                             input: attnMergedBuf, output: oProjBuf, M: M)
-        }
-        bisectLog(oProjBuf, count: tokenCount * D, label: "L2.oProjBuf[after O proj]")
-
-        // Residual add (attn)
-        try run("L2.residualAdd1") { cb in
-            residualAddKernel.encode(commandBuffer: cb, a: residualBuf, b: oProjBuf, output: residualBuf, count: M * D)
-        }
-        bisectLog(residualBuf, count: tokenCount * D, label: "L2.residualBuf[after attn residual add]")
-
-        // FFN sub-layer: pre-norm
-        try run("L2.ffn.rmsNorm") { cb in
-            rmsNormKernel.encode(commandBuffer: cb, input: residualBuf, gain: layer.preFFNNormGain,
-                                 output: xNormBuf, M: M, D: D, eps: layerNormEps)
-        }
-        bisectLog(xNormBuf, count: tokenCount * D, label: "L2.xNorm[after preFFNNorm]")
-
-        // wi_0, wi_1 projections
-        try run("L2.wi") { cb in
-            q4kMatMul.encode(commandBuffer: cb, weight: layer.wi0Weight, weightShape: (dFF_, D),
-                             input: xNormBuf, output: ffnGateBuf, M: M)
-            q4kMatMul.encode(commandBuffer: cb, weight: layer.wi1Weight, weightShape: (dFF_, D),
-                             input: xNormBuf, output: ffnUpBuf, M: M)
-        }
-        bisectLog(ffnGateBuf, count: tokenCount * dFF_, label: "L2.ffnGateBuf[after wi_0]")
-        bisectLog(ffnUpBuf, count: tokenCount * dFF_, label: "L2.ffnUpBuf[after wi_1]")
-
-        // Spotlight: directly read elements around the known NaN position (token 6, dim 324 → index 12932).
-        do {
-            let nanIdx = 12932
-            let gateRaw = ffnGateBuf.contents().bindMemory(to: Float.self, capacity: tokenCount * dFF_)
-            let upRaw   = ffnUpBuf.contents().bindMemory(to: Float.self, capacity: tokenCount * dFF_)
-            let lo = max(0, nanIdx - 3); let hi = min(tokenCount * dFF_ - 1, nanIdx + 3)
-            let gateCtx = (lo...hi).map { "[\($0)]=\(String(format: "%.4f", gateRaw[$0]))" }.joined(separator: " ")
-            let upCtx   = (lo...hi).map { "[\($0)]=\(String(format: "%.4f", upRaw[$0]))"   }.joined(separator: " ")
-            print("[T5Bisect] SPOTLIGHT gate around \(nanIdx): \(gateCtx)")
-            print("[T5Bisect] SPOTLIGHT up around \(nanIdx): \(upCtx)")
-            // Also scan all of row 6 (indices 12288..14335) for any NaN/Inf.
-            let row6Start = 6 * dFF_; let row6End = row6Start + dFF_ - 1
-            var row6NaN: Int? = nil; var row6Inf: Int? = nil
-            for i in row6Start...row6End {
-                if gateRaw[i].isNaN && row6NaN == nil { row6NaN = i }
-                if gateRaw[i].isInfinite && row6Inf == nil { row6Inf = i }
-            }
-            print("[T5Bisect] SPOTLIGHT ffnGateBuf row6 (\(row6Start)..\(row6End)): firstNaN=\(row6NaN.map{"\($0)"}  ?? "none") firstInf=\(row6Inf.map{"\($0)"} ?? "none")")
-            row6NaN = nil; row6Inf = nil
-            for i in row6Start...row6End {
-                if upRaw[i].isNaN && row6NaN == nil { row6NaN = i }
-                if upRaw[i].isInfinite && row6Inf == nil { row6Inf = i }
-            }
-            print("[T5Bisect] SPOTLIGHT ffnUpBuf row6 (\(row6Start)..\(row6End)): firstNaN=\(row6NaN.map{"\($0)"} ?? "none") firstInf=\(row6Inf.map{"\($0)"} ?? "none")")
-        }
-
-        // GatedGELU
-        try run("L2.gatedGELU") { cb in
-            gatedGELUKernel.encode(commandBuffer: cb, gate: ffnGateBuf, up: ffnUpBuf, output: ffnActBuf, count: M * dFF_)
-        }
-        bisectLog(ffnActBuf, count: tokenCount * dFF_, label: "L2.ffnActBuf[after gated-GELU]")
-
-        // wo projection
-        try run("L2.wo") { cb in
-            q4kMatMul.encode(commandBuffer: cb, weight: layer.woWeight, weightShape: (D, dFF_),
-                             input: ffnActBuf, output: ffnDownBuf, M: M)
-        }
-        bisectLog(ffnDownBuf, count: tokenCount * D, label: "L2.ffnDownBuf[after wo proj]")
-
-        // Residual add (FFN)
-        try run("L2.residualAdd2") { cb in
-            residualAddKernel.encode(commandBuffer: cb, a: residualBuf, b: ffnDownBuf, output: residualBuf, count: M * D)
-        }
-        bisectLog(residualBuf, count: tokenCount * D, label: "L2.residualBuf[after FFN residual add = layer 2 done]")
-    }
-
-    // BISECT helper — log first-8 + full-buffer NaN scan of a buffer.
-    // Temporary scaffolding; removed in Task 8.
-    private func bisectLog(_ buf: MTLBuffer, count: Int, label: String) {
-        guard count > 0 else {
-            print("[T5Bisect] \(label): count=0")
-            return
-        }
-        let raw = buf.contents().bindMemory(to: Float.self, capacity: count)
-        let sample = min(count, 8)
-        let vals = (0..<sample).map { raw[$0] }
-        let first8Finite = vals.allSatisfy { $0.isFinite }
-        // Scan full buffer for first NaN/Inf index.
-        var firstNaNIdx: Int? = nil
-        var firstInfIdx: Int? = nil
-        var globalMaxAbs: Float = 0
-        for i in 0..<count {
-            let v = raw[i]
-            if v.isNaN && firstNaNIdx == nil { firstNaNIdx = i }
-            if v.isInfinite && firstInfIdx == nil { firstInfIdx = i }
-            let a = abs(v)
-            if a.isFinite && a > globalMaxAbs { globalMaxAbs = a }
-        }
-        let anyNaN = firstNaNIdx != nil
-        let anyInf = firstInfIdx != nil
-        let allFinite = !anyNaN && !anyInf
-        let mean = vals.reduce(Float(0), +) / Float(vals.count)
-        print("[T5Bisect] \(label): "
-            + "first8=\(vals.map { String(format: "%.4f", $0) }) "
-            + "allFinite=\(allFinite) "
-            + (anyNaN ? "firstNaN@\(firstNaNIdx!) " : "")
-            + (anyInf ? "firstInf@\(firstInfIdx!) " : "")
-            + "globalMaxAbs=\(String(format: "%.4f", globalMaxAbs)) "
-            + "mean=\(String(format: "%.6f", mean))")
-        // If NaN found, log the surrounding context (10 elements either side).
-        if let nanIdx = firstNaNIdx {
-            let lo = max(0, nanIdx - 2)
-            let hi = min(count - 1, nanIdx + 5)
-            let ctx = (lo...hi).map { i -> String in
-                let v = raw[i]
-                return "[\(i)]=\(v.isNaN ? "NaN" : String(format: "%.4f", v))"
-            }
-            print("[T5Bisect] \(label) NaN context: \(ctx.joined(separator: " "))")
-        }
     }
 
     /// One attention sub-layer. Reads/writes `residualBuf`. Uses the
