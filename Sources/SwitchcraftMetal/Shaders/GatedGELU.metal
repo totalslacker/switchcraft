@@ -84,7 +84,15 @@ inline float gelu_new_f32(float x) {
     constexpr float CUBIC_COEFF    = 0.044715f;
     const float x3    = x * x * x;
     const float inner = SQRT_2_OVER_PI * (x + CUBIC_COEFF * x3);
-    return 0.5f * x * (1.0f + tanh(inner));
+    // For |inner| >= 8, tanh saturates to ±1.0 in FP32
+    // (tanh(8) ≈ 1 - 2.25e-7, which rounds to 1.0f).
+    // Metal's built-in tanh() returns NaN or 0 for large |inner|
+    // because exp(2·inner) overflows FP32 max (~3.4e38 = exp(88.7)).
+    // Bypassing tanh for |inner| >= 8 avoids this Metal bug. (Issue #75.)
+    const float t = (inner >= 8.0f)  ?  1.0f
+                  : (inner <= -8.0f) ? -1.0f
+                  : tanh(inner);
+    return 0.5f * x * (1.0f + t);
 }
 
 // ---------------------------------------------------------------------
