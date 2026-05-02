@@ -1,0 +1,25 @@
+{
+  "dims": 128,
+  "fixtures": [
+    {
+      "name": "short",
+      "input": "the apple is red and round",
+      "rows": 6,
+      "byteOffset": 0,
+      "byteLength": 3072
+    },
+    {
+      "name": "paragraph",
+      "input": "Witchcraft is a Rust reimplementation of XTR-Warp. It implements token-level semantic search with sub-linear retrieval. Switchcraft is its Swift port, targeting Apple platforms.",
+      "rows": 47,
+      "byteOffset": 3072,
+      "byteLength": 24064
+    }
+  ],
+  "provenance": {
+    "witchcraftCommit": "6ad59e51",
+    "generatedAt": "2026-05-02T20:11:44.834637+00:00",
+    "source": "crate::Embedder::embed (Q4K GGUF)",
+    "computeUnits": "all (Metal on Apple Silicon, fbgemm elsewhere)"
+  }
+}
