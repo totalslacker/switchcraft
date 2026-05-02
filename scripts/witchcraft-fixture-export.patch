@@ -2,7 +2,7 @@ diff --git a/src/tests.rs b/src/tests.rs
 index 9d4aec4..f000fff 100644
 --- a/src/tests.rs
 +++ b/src/tests.rs
-@@ -54,6 +54,373 @@ mod tests {
+@@ -54,6 +54,382 @@ mod tests {
      ];
      const THRESHOLD: f32 = 0.7;
 
@@ -268,8 +268,11 @@ index 9d4aec4..f000fff 100644
 +        let mut entries = Vec::<String>::new();
 +        let mut byte_offset = 0usize;
 +        for (name, input) in &vectors {
-+            let q4: Vec<u8> = crate::to_q4_bytes(input);
-+            let dequant: Vec<f32> = crate::from_companded_q4_bytes(&q4);
++            // to_q4_bytes / from_companded_q4_bytes moved to a trait in
++            // src/packops.rs at the pinned commit. Bring trait into scope.
++            use crate::packops::PackOps as _;
++            let q4: Vec<u8> = input.to_q4_bytes();
++            let dequant: Vec<f32> = q4.from_companded_q4_bytes();
 +            assert_eq!(dequant.len(), input.len());
 +            let dequant_bytes = floats_to_le_bytes(&dequant);
 +            let byte_length = dequant_bytes.len();
@@ -331,13 +334,14 @@ index 9d4aec4..f000fff 100644
 +        let mut byte_offset = 0usize;
 +        for (name, input) in inputs {
 +            let (rows_2d, _) = embedder.embed(input).unwrap();
-+            // `embed` returns Vec<Vec<f32>> with one inner vector per
-+            // token (sliding window already applied). Concatenate.
++            // `embed` returns a candle Tensor of shape [1, num_tokens, dims].
++            // Squeeze the batch dim and convert to Vec<Vec<f32>> for iteration.
++            let rows: Vec<Vec<f32>> = rows_2d.squeeze(0).unwrap().to_vec2::<f32>().unwrap();
 +            let mut flat: Vec<f32> = Vec::new();
-+            for row in rows_2d.iter() {
++            for row in &rows {
 +                flat.extend_from_slice(row);
 +            }
-+            let row_count = flat.len() / dims;
++            let row_count = rows.len();
 +            assert_eq!(flat.len(), row_count * dims, "embedding row length not a multiple of dims");
 +            let bytes = floats_to_le_bytes(&flat);
 +            let byte_length = bytes.len();
@@ -381,3 +385,11 @@ index 9d4aec4..f000fff 100644
      #[test]
      fn test_end_to_end() -> std::io::Result<()> {
          let dir = tempdir().unwrap();
+diff --git a/tools/quantize-tool/src/main.rs b/tools/quantize-tool/src/main.rs
+--- a/tools/quantize-tool/src/main.rs
++++ b/tools/quantize-tool/src/main.rs
+@@ -18,1 +18,3 @@
+-        if tensor.rank() == 2 && tensor.dim(1)? % 256 == 0 {
++        // "linear.weight" is the 2_Dense projection (768×128); keep as FP32.
++        // See Switchcraft issue #74. Upstream Witchcraft PR pending — see docs/porting/ggml-t5.md.
++        if name != "linear.weight" && tensor.rank() == 2 && tensor.dim(1)? % 256 == 0 {
