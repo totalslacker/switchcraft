@@ -208,14 +208,15 @@ struct T5MetalEmbedderLinearWeightTests {
             throw GGUFError.ioError("no Metal device")
         }
         // Build a minimal GGUF fixture with one F32 tensor named
-        // "linear.weight" (shape [128, 768] = 98304 elements, 393216 bytes).
-        // The data is zeros; we only care about name resolution.
+        // "linear.weight". GGUF shape is fastest-varying-first (GGML
+        // convention): for the 2_Dense projection [out=128, in=768] the
+        // on-disk shape is [768, 128]. 98304 elements = 393216 bytes.
         var fixture = GGUFFixture()
-        let byteCount = 128 * 768 * 4  // F32
+        let byteCount = 768 * 128 * 4  // F32
         fixture.tensors = [
             .init(
                 name: "linear.weight",
-                shape: [128, 768],
+                shape: [768, 128],  // fastest-varying-first: in_features=768, out_features=128
                 typeRaw: 0,  // F32
                 bytes: Data(count: byteCount)
             )
@@ -230,8 +231,8 @@ struct T5MetalEmbedderLinearWeightTests {
         // Confirm the tensor resolves with the correct dtype and shape.
         let tensor = try await reader.tensor("linear.weight")
         #expect(tensor.dtype == .f32)
-        #expect(tensor.shape == [128, 768])
-        #expect(tensor.elementCount == 128 * 768)
+        #expect(tensor.shape == [768, 128])
+        #expect(tensor.elementCount == 768 * 128)
     }
 }
 

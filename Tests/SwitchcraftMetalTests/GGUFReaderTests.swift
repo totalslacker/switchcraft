@@ -362,7 +362,7 @@ struct GGUFReaderHeaderTests {
         let dev = try device()
         do {
             let reader = try GGUFReader(url: url, device: dev)
-            let v = await reader.loadedVersion
+            let v = reader.loadedVersion
             #expect(v == 2)
         } catch {
             Issue.record("expected GGUF v2 to be accepted, got \(error)")
@@ -378,7 +378,7 @@ struct GGUFReaderHeaderTests {
         let dev = try device()
         do {
             let reader = try GGUFReader(url: url, device: dev)
-            let v = await reader.loadedVersion
+            let v = reader.loadedVersion
             #expect(v == 3)
         } catch {
             Issue.record("expected GGUF v3 to be accepted, got \(error)")
