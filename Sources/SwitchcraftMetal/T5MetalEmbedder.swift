@@ -522,28 +522,25 @@ public actor T5MetalEmbedder: Embedder {
             ? applyAttentionMask(tokenCount: tokens.count)
             : relposBiasBuf
 
-        // 2. Encode each layer in its own command buffer for per-layer bisection.
-        // GatedGELU NaN fix verified. Now bisect layer 0 intra-layer to
-        // investigate cosine ~0.81-0.88 (second root cause, Task 4).
-        for ℓ in 0..<nLayers {
-            if ℓ == 0 {
-                // Intra-layer bisection for layer 0 (investigate cosine error).
-                try bisectLayer2(layer: layers[ℓ], tokenCount: tokens.count, biasBuf: attnBiasBuf)
-            } else {
-                guard let cbL = context.queue.makeCommandBuffer() else {
-                    throw T5MetalEmbedderError.commandBufferCreationFailed
-                }
-                cbL.label = "T5MetalEmbedder.encodeWindow.layer\(ℓ)"
-                encodeAttentionSubLayer(commandBuffer: cbL, layer: layers[ℓ], biasBuf: attnBiasBuf)
-                encodeFFNSubLayer(commandBuffer: cbL, layer: layers[ℓ])
-                cbL.commit(); cbL.waitUntilCompleted()
-                if let err = cbL.error {
-                    throw T5MetalEmbedderError.commandBufferFailed("layer \(ℓ): \(err)")
-                }
-                bisectLog(residualBuf, count: tokens.count * dModel,
-                          label: "residualBuf[after layer \(ℓ)]")
-            }
+        // 2. Encode all 12 encoder layers in a single command buffer.
+        // Batching all layers in one CB matches the original structure from
+        // commit 53c86cc and avoids per-layer CPU-GPU round-trips that can
+        // affect Metal's FP32 accumulation ordering on some dispatch sizes.
+        guard let cbLayers = context.queue.makeCommandBuffer() else {
+            throw T5MetalEmbedderError.commandBufferCreationFailed
         }
+        cbLayers.label = "T5MetalEmbedder.encodeWindow.layers0to11"
+        for ℓ in 0..<nLayers {
+            encodeAttentionSubLayer(commandBuffer: cbLayers, layer: layers[ℓ], biasBuf: attnBiasBuf)
+            encodeFFNSubLayer(commandBuffer: cbLayers, layer: layers[ℓ])
+        }
+        cbLayers.commit(); cbLayers.waitUntilCompleted()
+        if let err = cbLayers.error {
+            throw T5MetalEmbedderError.commandBufferFailed("layers 0-11: \(err)")
+        }
+        // BISECT[2]: residual stream after all encoder layers.
+        bisectLog(residualBuf, count: tokens.count * dModel,
+                  label: "residualBuf[after all layers]")
 
         // 3–5. Final RMSNorm + 2_Dense projection + L2 norm.
         guard let cb2 = context.queue.makeCommandBuffer() else {
