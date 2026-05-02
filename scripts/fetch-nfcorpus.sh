@@ -41,9 +41,10 @@ that you want NFCorpus extracted into. Example:
     mkdir -p "$SWITCHCRAFT_NFCORPUS_DIR"
     ./scripts/fetch-nfcorpus.sh
 
-The directory will be populated with three required plaintext files
-(nfcorpus.tsv, questions.test.tsv, qrels.test.json) plus the optional
-collection_map.json, totalling ~5–6 MB.
+The directory will be populated with four required files:
+nfcorpus.tsv, questions.test.tsv, qrels.test.json, collection_map.json
+(totalling ~5–6 MB). collection_map.json maps numeric corpus IDs to
+MED-* doc IDs used in qrels — the benchmark requires all four files.
 
 Then point the test suite at it:
 

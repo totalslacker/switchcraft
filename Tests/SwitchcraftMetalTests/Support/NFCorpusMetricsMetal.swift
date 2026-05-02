@@ -18,31 +18,30 @@ struct NFCorpusRowMetal {
     let text: String
 }
 
-/// Parse the corpus TSV. Columns: `docid \t title \t body`. Title and
-/// body are concatenated as `"\(title)\n\(body)"` to match Witchcraft's
-/// text composition (pinned by `scripts/fetch-nfcorpus.sh` so the
-/// NDCG@10 band stays defensible).
-///
-/// Lines that do not have at least three tab-separated columns are
-/// skipped — NFCorpus contains a small number of body-only rows.
-func loadCorpusMetal(from url: URL) throws -> [NFCorpusRowMetal] {
+/// Parse `collection_map.json`: `{ "numeric_id": "MED-*" }`.
+/// Witchcraft's pre-staged corpus TSV uses numeric row indices; the map
+/// translates them to the `MED-*` IDs used in qrels.
+func loadCollectionMapMetal(from url: URL) throws -> [String: String] {
+    let data = try Data(contentsOf: url)
+    guard let dict = try JSONSerialization.jsonObject(with: data) as? [String: String] else {
+        throw NFCorpusFixtureErrorMetal.qrelsNotNestedDict
+    }
+    return dict
+}
+
+/// Parse the corpus TSV. Witchcraft's pre-staged format is two columns:
+/// `numeric_id \t text`. The numeric_id is mapped to a `MED-*` doc ID via
+/// the `collectionMap` from `collection_map.json` (required for qrel lookup).
+func loadCorpusMetal(from url: URL, collectionMap: [String: String]) throws -> [NFCorpusRowMetal] {
     let raw = try String(contentsOf: url, encoding: .utf8)
     var rows: [NFCorpusRowMetal] = []
     for line in raw.split(separator: "\n", omittingEmptySubsequences: true) {
         let cols = line.split(separator: "\t", omittingEmptySubsequences: false)
-        guard cols.count >= 3 else { continue }
-        let docId = String(cols[0])
-        let title = String(cols[1])
-        let body = String(cols[2...].joined(separator: "\t"))
-        if docId.isEmpty { continue }
-        let text: String
-        if title.isEmpty {
-            text = body
-        } else if body.isEmpty {
-            text = title
-        } else {
-            text = "\(title)\n\(body)"
-        }
+        guard cols.count >= 2 else { continue }
+        let numericId = String(cols[0])
+        let text = String(cols[1...].joined(separator: "\t"))
+        if numericId.isEmpty || text.isEmpty { continue }
+        guard let docId = collectionMap[numericId] else { continue }
         rows.append(NFCorpusRowMetal(docId: docId, text: text))
     }
     return rows
