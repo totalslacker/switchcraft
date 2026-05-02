@@ -93,8 +93,12 @@ struct NFCorpusMetalBenchmarkTests {
                 config: .default
             )
 
+            let collectionMap = try loadCollectionMapMetal(
+                from: datasetDir.appendingPathComponent(NFCorpusDatasetMetal.collectionMapFileName)
+            )
             let corpus = try loadCorpusMetal(
-                from: datasetDir.appendingPathComponent(NFCorpusDatasetMetal.corpusFileName)
+                from: datasetDir.appendingPathComponent(NFCorpusDatasetMetal.corpusFileName),
+                collectionMap: collectionMap
             )
             for row in corpus {
                 try await store.add(id: row.docId, body: row.text)
