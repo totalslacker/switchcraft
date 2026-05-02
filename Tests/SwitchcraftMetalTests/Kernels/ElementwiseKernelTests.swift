@@ -401,6 +401,64 @@ struct GatedGELUKernelEdgeCaseTests {
         }
     }
 
+    /// Regression test for issue #75: when gate ≈ 12, the GELU inner
+    /// argument to tanh is ≈ 71.6. Metal's built-in tanh() misbehaves
+    /// for |inner| > ~8 (returns NaN or 0 depending on argument magnitude)
+    /// because its internal exp(2·inner) overflows FP32 (max ~exp(88.7)).
+    /// The fix returns ±1.0 directly for |inner| ≥ 8, bypassing tanh;
+    /// this is lossless since tanh(8) rounds to exactly 1.0f in FP32.
+    ///
+    /// These exact inputs were observed at layer 1, FFN dim 644 (token 6,
+    /// index 12932) of the xtr-v3.gguf forward pass during issue #75
+    /// bisection, producing NaN that poisoned the entire pipeline.
+    @Test("large gate (≈12) produces finite output, not NaN (issue #75 regression)")
+    func largeGateNaNRegression() throws {
+        let ctx = try #require(MetalContext.shared)
+        let kernel = try GatedGELUKernel(context: ctx)
+
+        // Exact values observed in bisection: gate=12.0257, up=13.4234.
+        // inner = √(2/π) × (12.0257 + 0.044715 × 12.0257³) ≈ 71.64
+        // Expected: gelu_new(12.0257) ≈ 12.0257; result ≈ 161.4
+        let gate: [Float] = [12.0257]
+        let up:   [Float] = [13.4234]
+
+        let out = try GatedGELURunner.run(ctx: ctx, kernel: kernel, gate: gate, up: up)
+        #expect(out[0].isFinite,
+                "gated-GELU(gate=12.0257, up=13.4234) = \(out[0]); expected ~161.4 (NaN = tanh overflow bug)")
+
+        // Also verify it's close to the reference (~161.4).
+        let ref = GatedGELUReference.compute(gate: gate, up: up)
+        let err = abs(Double(out[0]) - Double(ref[0]))
+        #expect(err < 1.0, "large gate result deviated from reference by \(err)")
+    }
+
+    /// Stress test: 512×2048 inputs drawn from ±30 range. All inner
+    /// arguments exceed 44 (triggering the overflow zone); every element
+    /// must produce a finite output, not NaN.
+    @Test("inputs with large gate values (±30) produce all-finite output")
+    func largeGateAllFinite() throws {
+        let ctx = try #require(MetalContext.shared)
+        let kernel = try GatedGELUKernel(context: ctx)
+
+        let count = 512 * 2048
+        var rng = LCG(seed: 0xCE10_C0DE_0075)
+        var gate = [Float](repeating: 0, count: count)
+        var up   = [Float](repeating: 0, count: count)
+        for i in 0..<count {
+            gate[i] = rng.nextFloat() * 30.0
+            up[i]   = rng.nextFloat() * 30.0
+        }
+
+        let out = try GatedGELURunner.run(ctx: ctx, kernel: kernel, gate: gate, up: up)
+
+        var firstNaN: Int? = nil
+        for i in 0..<count where out[i].isNaN {
+            firstNaN = i; break
+        }
+        #expect(firstNaN == nil,
+                "gated-GELU ±30 range produced NaN at index \(firstNaN ?? -1) — tanh overflow fix needed")
+    }
+
     /// Gate near zero, large up: gate dominates, output near zero.
     /// `gelu_new(0) = 0` exactly in the formula, so output is exactly
     /// zero up to FP32 rounding regardless of up's magnitude.
