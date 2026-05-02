@@ -212,13 +212,26 @@ git apply /path/to/switchcraft/scripts/witchcraft-fixture-export.patch
 > both fact and fixture data, apply one, run, `git stash` or `git
 > checkout src/tests.rs`, then apply the other.
 
-> **`pub(crate)` visibility note**: the patch calls `crate::to_q4_bytes`
-> and `crate::from_companded_q4_bytes` directly. If upstream renames or
-> re-scopes those items, add a `#[cfg(test)] pub use` shim inside the
-> patch (still a single-file diff). The `dump_reference_centroids_fixture`
+> **Trait method calls**: as of the pinned Witchcraft commit, `to_q4_bytes`
+> and `from_companded_q4_bytes` are trait methods in `src/packops.rs`. The
+> patch imports `PackOps` via `use crate::packops::PackOps as _` to bring
+> them into scope. If the trait is renamed or the method signatures change,
+> adjust the `use` statement accordingly. The `dump_reference_centroids_fixture`
 > SQL also assumes `embedding.value` and `bucket.center` are the input/
 > output BLOB columns — adjust the SELECT statements if the schema has
 > moved.
+
+> **GGUF format note**: `make download` produces `assets/xtr.gguf` in GGUF
+> v2 format (the pinned Candle rev `5bd5618` emits v2). The Switchcraft
+> reader accepts both v2 and v3 — see ADR 016.
+
+> **`linear.weight` carve-out**: the patch also patches
+> `tools/quantize-tool/src/main.rs` to preserve the 2_Dense projection
+> (`linear.weight`) as FP32 rather than quantising it to Q4_K. If the
+> quantize-tool hunk does not apply cleanly due to context drift,
+> manually add `name != "linear.weight" &&` before the `tensor.rank() == 2`
+> condition on the Q4_K gate. See docs/porting/ggml-t5.md for the upstream
+> PR tracking note.
 
 ### Run
 
