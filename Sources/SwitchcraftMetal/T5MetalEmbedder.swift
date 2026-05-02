@@ -497,6 +497,10 @@ public actor T5MetalEmbedder: Embedder {
         // 1. Token embedding gather (CPU dequant, FP32 upload).
         gatherTokenEmbeddings(tokens: tokens)
 
+        // BISECT[1]: log embed table output before GPU work.
+        bisectLog(embedBuf, count: tokens.count * dModel,
+                  label: "embedBuf[after gather, \(tokens.count) tokens]")
+
         // Initialise residual stream to gathered embeddings.
         memcpy(
             residualBuf.contents(),
@@ -504,52 +508,81 @@ public actor T5MetalEmbedder: Embedder {
             windowSize * dModel * MemoryLayout<Float>.size
         )
 
-        // 2. Build the encoder forward pass into a single command buffer.
-        guard let cb = context.queue.makeCommandBuffer() else {
+        // 2a. Encoder layer 0 in its own command buffer (bisect readback).
+        guard let cb0 = context.queue.makeCommandBuffer() else {
             throw T5MetalEmbedderError.commandBufferCreationFailed
         }
-        cb.label = "T5MetalEmbedder.encodeWindow"
-
-        for ℓ in 0..<nLayers {
-            encodeAttentionSubLayer(commandBuffer: cb, layer: layers[ℓ])
-            encodeFFNSubLayer(commandBuffer: cb, layer: layers[ℓ])
+        cb0.label = "T5MetalEmbedder.encodeWindow.layer0"
+        encodeAttentionSubLayer(commandBuffer: cb0, layer: layers[0])
+        encodeFFNSubLayer(commandBuffer: cb0, layer: layers[0])
+        cb0.commit(); cb0.waitUntilCompleted()
+        if let err = cb0.error {
+            throw T5MetalEmbedderError.commandBufferFailed("layer 0: \(err)")
         }
 
-        // 3. Final RMSNorm on the residual stream.
+        // BISECT[2]: residual stream after layer 0.
+        bisectLog(residualBuf, count: tokens.count * dModel,
+                  label: "residualBuf[after layer 0]")
+
+        // 2b. Encoder layers 1–11.
+        guard let cb1 = context.queue.makeCommandBuffer() else {
+            throw T5MetalEmbedderError.commandBufferCreationFailed
+        }
+        cb1.label = "T5MetalEmbedder.encodeWindow.layers1to11"
+        for ℓ in 1..<nLayers {
+            encodeAttentionSubLayer(commandBuffer: cb1, layer: layers[ℓ])
+            encodeFFNSubLayer(commandBuffer: cb1, layer: layers[ℓ])
+        }
+        cb1.commit(); cb1.waitUntilCompleted()
+        if let err = cb1.error {
+            throw T5MetalEmbedderError.commandBufferFailed("layers 1-11: \(err)")
+        }
+
+        // BISECT[3]: residual stream after layer 11.
+        bisectLog(residualBuf, count: tokens.count * dModel,
+                  label: "residualBuf[after layer 11]")
+
+        // 3–5. Final RMSNorm + 2_Dense projection + L2 norm.
+        guard let cb2 = context.queue.makeCommandBuffer() else {
+            throw T5MetalEmbedderError.commandBufferCreationFailed
+        }
+        cb2.label = "T5MetalEmbedder.encodeWindow.projL2"
+
         rmsNormKernel.encode(
-            commandBuffer: cb,
+            commandBuffer: cb2,
             input: residualBuf,
             gain: finalNormGain,
             output: xNormBuf,
             M: windowSize, D: dModel,
             eps: layerNormEps
         )
-
-        // 4. 2_Dense projection: [M, dModel] · [dProj, dModel]ᵀ → [M, dProj].
         fp32MatMulKernel.encode(
-            commandBuffer: cb,
+            commandBuffer: cb2,
             a: xNormBuf,
             b: projWeightBuffer,
             output: projOutBuf,
             M: windowSize, N: dims, K: dModel,
             batch: 1, transposeB: true
         )
-
-        // 5. L2 norm.
         l2NormKernel.encode(
-            commandBuffer: cb,
+            commandBuffer: cb2,
             input: projOutBuf,
             output: l2OutBuf,
             rows: windowSize, cols: dims,
             epsilon: 1e-12
         )
-
-        cb.commit()
-        cb.waitUntilCompleted()
-
-        if let err = cb.error {
-            throw T5MetalEmbedderError.commandBufferFailed(String(describing: err))
+        cb2.commit(); cb2.waitUntilCompleted()
+        if let err = cb2.error {
+            throw T5MetalEmbedderError.commandBufferFailed("proj+l2: \(err)")
         }
+
+        // BISECT[4]: xNormBuf (after final RMSNorm, before 2_Dense).
+        bisectLog(xNormBuf, count: tokens.count * dModel,
+                  label: "xNormBuf[after final RMSNorm]")
+
+        // BISECT[5]: projOutBuf (after 2_Dense, before L2).
+        bisectLog(projOutBuf, count: tokens.count * dims,
+                  label: "projOutBuf[after 2_Dense]")
 
         // 6. Read back projOut + l2Out and compute pre-L2 row norms.
         let proj = readFloats(projOutBuf, count: windowSize * dims)
@@ -564,7 +597,37 @@ public actor T5MetalEmbedder: Embedder {
             }
             rawNorms[r] = Float(sumSq.squareRoot())
         }
+
+        // BISECT[6]: summary of raw norms and how many survive the minNorm gate.
+        let keepCount = rawNorms.filter { $0 >= minNorm }.count
+        let normMin = rawNorms.min() ?? 0
+        let normMax = rawNorms.max() ?? 0
+        print("[T5Bisect] rawNorms: min=\(normMin) max=\(normMax) "
+            + "keepCount=\(keepCount)/\(windowSize) (minNorm=\(minNorm))")
+
         return (normalised, rawNorms)
+    }
+
+    // BISECT helper — log min/max/mean of first 8 floats of a buffer.
+    // Temporary scaffolding; removed in Task 8.
+    private func bisectLog(_ buf: MTLBuffer, count: Int, label: String) {
+        guard count > 0 else {
+            print("[T5Bisect] \(label): count=0")
+            return
+        }
+        let raw = buf.contents().bindMemory(to: Float.self, capacity: count)
+        let sample = min(count, 8)
+        let vals = (0..<sample).map { raw[$0] }
+        let allFinite = vals.allSatisfy { $0.isFinite }
+        let hasNaN = vals.contains { $0.isNaN }
+        let hasInf = vals.contains { $0.isInfinite }
+        let absMax = vals.map { abs($0) }.max() ?? 0
+        let mean = vals.reduce(Float(0), +) / Float(vals.count)
+        print("[T5Bisect] \(label): "
+            + "first\(sample)=\(vals.map { String(format: "%.4f", $0) }) "
+            + "allFinite=\(allFinite) hasNaN=\(hasNaN) hasInf=\(hasInf) "
+            + "absMax=\(String(format: "%.4f", absMax)) "
+            + "mean=\(String(format: "%.6f", mean))")
     }
 
     /// One attention sub-layer. Reads/writes `residualBuf`. Uses the
