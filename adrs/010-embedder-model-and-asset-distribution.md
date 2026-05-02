@@ -406,7 +406,9 @@ without changing the FP32 build's parity contract".
 ## (j) Metal embedder asset distribution
 
 The Phase 2 Metal embedder (umbrella issue #57) consumes a Q4-quantised
-GGUF v3 asset (~80 MB) instead of (or alongside) the CoreML
+GGUF asset (~80 MB; v2 as produced by Witchcraft's `quantize-tool` at
+Candle rev `5bd5618`, or v3 — both accepted; see ADR 016 for rationale)
+instead of (or alongside) the CoreML
 `.mlpackage` covered by (a)–(i). The distribution policy mirrors (d)
 verbatim:
 
@@ -416,6 +418,9 @@ verbatim:
   `GGUFAsset` test helper in `Tests/SwitchcraftMetalTests/Support/`.
 - Asset acquisition uses the Witchcraft `quantize-tool` pipeline
   documented in `docs/porting/ggml-t5.md` §"Asset acquisition".
+- The `2_Dense` projection tensor (`linear.weight`) is preserved as
+  FP32 by a carve-out in `scripts/witchcraft-fixture-export.patch`
+  (issue #74, defect 5); see ADR 017 §(c) for the precision routing.
 
 The full design — GGUF reader scope, Q4_K decode parity policy,
 `@_spi(SwitchcraftMetal)` import pattern, deferred
