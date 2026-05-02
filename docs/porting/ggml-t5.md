@@ -100,7 +100,7 @@ forward references, not existing files.
 | FFN down matmul (`wo`) — `kernel_mul_mm_q4_K_f32` | reuses `Q4KMatMul.swift` from #60 | as Q4KMatMul row above |
 | Residual add (`x_out = x_in + sublayer(LN(x_in))`) — ggml `kernel_add_f32` | `Sources/SwitchcraftMetal/Kernels/ResidualAdd.swift` + `Sources/SwitchcraftMetal/Shaders/ResidualAdd.metal` (#63) | FP32 / FP32 / FP32. **Residual stream stays at FP32 throughout** per ADR 003 + ADR 014(b). |
 | Final encoder RMSNorm | reuses `RMSNorm.swift` from #61 | as RMSNorm row above |
-| Projection matmul (the absorbed `2_Dense/Linear` from sentence-transformers; FP16 weights at GGUF read time, no quantisation) — `kernel_mul_mm_f16` | **Landed by #64** via `FP32MatMul` after FP16→FP32 widening at `T5MetalEmbedder.init` (~384 KiB resident). Catalogue's `ProjectionMatMul.{swift,metal}` placeholder superseded. | **FP16 widened to FP32 at init** / FP32 compute / FP32 accumulator |
+| Projection matmul (the absorbed `2_Dense/Linear` from sentence-transformers; FP32 storage after issue #74 `quantize-tool` carve-out; FP16 widening path preserved as fallback) — `FP32MatMulKernel` | **Landed by #64** via `FP32MatMul`; weight arrives as FP32 after issue #74 carve-out (previously widened from FP16 at `T5MetalEmbedder.init`). Catalogue's `ProjectionMatMul.{swift,metal}` placeholder superseded. | **FP32 storage (issue #74) / FP32 compute / FP32 accumulator** |
 | L2 normalisation (unit norm per token) — element-wise `x / sqrt(sum(x²) + ε)`; ggml has no dedicated kernel for this combination, composed from `kernel_sqr_f32` + `kernel_sum_rows_f32` + element-wise scale | `Sources/SwitchcraftMetal/Kernels/L2Norm.swift` + `Sources/SwitchcraftMetal/Shaders/L2Norm.metal` (#63) | FP32 / FP32 / FP32. **Sensitive op** — `sum(x²)` over 768 elements has overflowed FP16 historically (ADR 014(b) point 2). |
 | Orchestrator — encoder forward pass dispatch order, `MTLBuffer` lifecycle, sliding-window integration | `Sources/SwitchcraftMetal/T5MetalEmbedder.swift` (#64) | n/a (orchestration) |
 
@@ -282,7 +282,7 @@ catalogue follows ggml's per-op kernel choices verbatim.
 | Gated-GELU `gelu_new(gate) * up` | 12 | n/a | FP32 (`gelu_new` uses `tanh`; FP32 has headroom) | FP32 |
 | FFN down matmul `wo` | 12 | Q4_K | dequantised → FP16 | FP32 |
 | Residual add | 24 (12 post-attn + 12 post-FFN) | n/a | **FP32 — residual stream stays FP32 throughout** (ADR 014(b)) | FP32 |
-| Projection matmul (absorbed `2_Dense.weight`, 768 → 128) | 1 | **FP16 widened to FP32 once at `T5MetalEmbedder.init`** (~384 KiB) — see "Deviations from upstream" §#64 | FP32 (via `FP32MatMul`) | FP32 |
+| Projection matmul (absorbed `2_Dense.weight` / `linear.weight`, 768 → 128) | 1 | **FP32 storage** (issue #74 `quantize-tool` carve-out; FP16 widening fallback retained at `T5MetalEmbedder.init`) — see "Deviations from upstream" §#64 + §#74 | FP32 (via `FP32MatMul`) | FP32 |
 | L2 normalisation | 1 | n/a | **FP32 — sensitive op**, `sum(x²)` overflows FP16 (ADR 014(b) point 2) | FP32 |
 
 **Total**: 184 op invocations per 512-token encode (or fewer per
@@ -446,9 +446,12 @@ python downloadweights.py
 cargo run -p quantize-tool xtr.safetensors assets/xtr.gguf
 ```
 
-Output: `assets/xtr.gguf`, ~80 MB, Q4_K weights + FP16
-projection matrix (the `2_Dense/Linear` is small and stays at FP16,
-not Q4_K).
+Output: `assets/xtr.gguf`, ~80 MB, in **GGUF v2 format** (the pinned
+Candle rev `5bd5618` emits v2; the Switchcraft reader accepts both v2
+and v3 — see ADR 016). Q4_K weights + **FP32 projection matrix** (the
+`2_Dense/Linear` is preserved as FP32 by the `linear.weight` carve-out
+in `scripts/witchcraft-fixture-export.patch`; without the carve-out the
+Q4_K gate incorrectly quantises this 768×128 tensor).
 
 The same commit + pipeline produced
 `Tests/Fixtures/reference_embeddings.{bin,json}` per ADR 013 (a),
@@ -457,6 +460,25 @@ which is what the cross-stack parity gate
 exact pipeline keeps the post-port parity test honest — divergence
 that surfaces in #65 cannot be attributed to a different
 quantisation toolchain.
+
+### Operator action: upstream Witchcraft PR for `linear.weight` carve-out
+
+**[PENDING UPSTREAM PR]** The `linear.weight` carve-out currently lives
+in `scripts/witchcraft-fixture-export.patch` as a local bundled fix
+(issue #74, defect 5 fallback path). To complete the upstream integration:
+
+1. Open a PR on [dropbox/witchcraft](https://github.com/dropbox/witchcraft)
+   adding `name != "linear.weight" &&` before the `tensor.rank() == 2`
+   Q4_K gate in `tools/quantize-tool/src/main.rs` (the same one-line
+   change in `scripts/witchcraft-fixture-export.patch`).
+2. Record the PR URL below once it is opened.
+3. If upstream accepts: update `WITCHCRAFT_COMMIT` in this catalogue and
+   in `scripts/README.md` to the new commit; remove the quantize-tool
+   hunk from `scripts/witchcraft-fixture-export.patch`.
+4. If upstream rejects or does not respond within two weeks: leave the
+   carve-out bundled in the patch and record that outcome below.
+
+**Upstream PR URL**: *(not yet opened — post-merge operator action)*
 
 ### SHA-256 fingerprint: omitted intentionally
 
@@ -577,11 +599,14 @@ future port-refresh against a new commit pin can audit them quickly.
   projection sees a contiguous input. Naive per-thread schedule —
   performance optimisation deferred to #65 / future work; correctness
   gate (≥0.99999 cosine vs PyTorch FP32) is the primary contract.
-- **2_Dense FP16 weight widened to FP32 once at `T5MetalEmbedder.init`**
-  (~384 KiB resident). Avoids landing a separate FP16 kernel family
-  for a single op. Storage line of the catalogue's "Projection matmul"
-  row is amended; activation and accumulator precision are unchanged.
-  See ADR 017 §(c) for the full rationale.
+- **2_Dense projection (`linear.weight`) stored as FP32** after issue #74
+  `quantize-tool` carve-out (~384 KiB resident). Previously the weight
+  arrived as FP16 and was widened at `T5MetalEmbedder.init`; the
+  carve-out fixes the upstream pipeline to write FP32 directly. The FP16
+  widening path is retained as a fallback for legacy assets. Storage line
+  of the catalogue's "Projection matmul" row is amended; activation and
+  accumulator precision are unchanged. See ADR 017 §(c) for the full
+  rationale.
 - **CPU dequant of token-embedding rows per window** (~1.5 MB per
   window). Catalogue planned a standalone `Q4KDequant.metal`/
   `kernel_get_rows_q4_K`; the orchestrator inlines a CPU pass via
@@ -591,8 +616,12 @@ future port-refresh against a new commit pin can audit them quickly.
 - **GGUF tensor naming pinned to HuggingFace transformers convention**
   (`encoder.block.<ℓ>.layer.0.SelfAttention.q.weight`, etc.) with one
   fallback enumeration for the `2_Dense` projection (the only tensor
-  whose name varies across conversion pipelines). A name miss throws a
-  typed `T5MetalEmbedderError.tensorMissing` listing the candidates.
+  whose name varies across conversion pipelines). The canonical name from
+  Witchcraft's `quantize-tool` is `linear.weight` (bare, no prefix);
+  the candidate list in `T5MetalEmbedder` tries `2_Dense.linear.weight`
+  first (fully-qualified), then `linear.weight`, then legacy variants.
+  A name miss throws a typed `T5MetalEmbedderError.tensorMissing`
+  listing the candidates. (Issue #74, defect 4.)
 - **No 1/√d_k attention scaling** in the FP32 matmul (T5 v1.1 omits
   it; HuggingFace's `T5Attention` matches). Verified during the port
   against `transformers/src/transformers/models/t5/modeling_t5.py`.

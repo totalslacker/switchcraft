@@ -88,7 +88,7 @@ that survives even if the catalogue's table is later restructured.
 | Gated-GELU activation (×12) | FP32 / FP32 (`gelu_new`, tanh-based) / FP32 | ADR 014(b) — `tanh` saturates safely at FP32; FP16 amplifies precision loss in the cubic term. |
 | FFN down `wo` (×12) | Q4_K / FP16 staging / FP32 | Same as Q4KMatMul row above. |
 | Residual add (×24) | FP32 / **FP32 — residual stream stays FP32** / FP32 | ADR 014(b) — every residual sum carries the cumulative encoder state; FP16 would alias adjacent residual contributions. |
-| 2_Dense projection (×1, 768→128) | **FP16 weights widened to FP32 once at init** / FP32 / FP32 | The catalogue planned a dedicated FP16 `ProjectionMatMul` kernel; the `T5MetalEmbedder` orchestrator instead widens the FP16 weight to FP32 at init (~384 KiB resident) and reuses `FP32MatMulKernel`. The activation path remains FP32; only the storage line of the catalogue's row is amended. |
+| 2_Dense projection (×1, 768→128) | **FP32 storage** (Witchcraft `quantize-tool` writes FP32 for `linear.weight` after issue #74 carve-out; FP16 widening path in `T5MetalEmbedder.init` preserved as fallback for legacy assets) / FP32 / FP32 | The catalogue planned a dedicated FP16 `ProjectionMatMul` kernel; the `T5MetalEmbedder` orchestrator instead widens the weight to FP32 at init (~384 KiB resident) and reuses `FP32MatMulKernel`. With the issue #74 `quantize-tool` carve-out the weight arrives as FP32 directly. Amendment (issue #74): parity gate (`SWITCHCRAFT_XTR_GGUF`) must be re-run by the operator before merge; amendment is upstream-pipeline-driven, not a kernel change. |
 | L2 normalisation (×1) | FP32 / **FP32 — sensitive op** / FP32 | ADR 014(b)(2) — `sum(x²)` over the projected row overflows FP16. |
 
 The two amendments to the catalogue's first guess are:
@@ -100,12 +100,13 @@ The two amendments to the catalogue's first guess are:
    unchanged — the kernel surface is narrower than the catalogue's
    first cut.
 2. **2_Dense projection**: the catalogue planned a dedicated FP16
-   matmul kernel; this ADR records the deviation to FP16→FP32 widening
-   at init. Justification: the FP16 path is one matmul, ~384 KiB of
-   widened weight, and would otherwise require an entire parallel
-   kernel family (FP16 weight × FP32 activation × FP32 accum) shipping
-   for a single op. The FP32-only path is correct, simpler, and
-   cheaper to maintain. ADR 012's 300 MB peak-RSS ceiling is unaffected.
+   matmul kernel; #64 recorded the deviation to FP16→FP32 widening at
+   init. Issue #74 amended further: Witchcraft's `quantize-tool` was
+   found to incorrectly quantise `linear.weight` to Q4_K; a carve-out
+   in `scripts/witchcraft-fixture-export.patch` now preserves it as
+   FP32. The weight arrives as FP32 directly; the FP16 widening path is
+   retained as a fallback. The FP32-only activation path and ADR 012's
+   300 MB ceiling are both unaffected.
 
 ## (d) Future-kernel rules
 

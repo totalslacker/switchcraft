@@ -4,8 +4,8 @@
 **Date**: 2026-05-01
 **Issue**: #59 (sub-issue of umbrella #57, Phase 2 Metal embedder — port of ggml's T5 inference to Swift + Metal)
 
-This ADR records the shape of the GGUF v3 asset that the Phase 2 Metal
-embedder consumes, the env-var test gate (`SWITCHCRAFT_XTR_GGUF`), the
+This ADR records the shape of the GGUF v2 or v3 asset that the Phase 2
+Metal embedder consumes, the env-var test gate (`SWITCHCRAFT_XTR_GGUF`), the
 relationship to the existing CoreML asset gate (ADR 010), and the
 deliberate carve-outs we make for Phase 2 — `MTLBuffer` storage mode,
 metadata KV surface, bit-equal Q4_K decode, and the `@_spi` import
@@ -45,13 +45,29 @@ needs:
   weights.
 - **F32** — small per-layer RMSNorm gain vectors and the relative-
   position bias table.
-- **F16** — the absorbed `2_Dense` projection weight (768 × 128).
+- **F32** — the `2_Dense` projection weight (768 × 128). Witchcraft's
+  `quantize-tool` writes this tensor as FP32 after the carve-out in
+  `scripts/witchcraft-fixture-export.patch` (see issue #74). The reader
+  also accepts FP16 here as a fallback for assets produced without the
+  carve-out.
 
 Other ggml dtypes (Q5_K, Q6_K, Q8_0, etc.) throw
 `GGUFError.unsupportedDType(name:raw:)` naming the offending tensor.
 This is deliberate: Phase 2 ships exactly the format the canonical
 asset uses; widening the reader to dtypes Switchcraft does not consume
 adds maintenance burden without enabling any concrete consumer.
+
+**GGUF version: v2 and v3 both accepted (amended by issue #74).** The
+canonical Witchcraft pipeline uses `quantize-tool` built against Candle
+rev `5bd5618`, which emits **GGUF v2**. The reader was initially strict
+v3-only; issue #74 diagnosed this as defect (3) and relaxed the check to
+accept v2 ∪ v3. The structural layouts are identical for Q4_K, F32, and
+F16 — the only observable difference is the version field. Rejecting v2
+would require owning the upstream writer or patching Candle, both of
+which are worse than a one-line version-range check. `GGUFReader.loadedVersion`
+exposes the on-disk version for future debugging; if v4 ever appears
+and diverges structurally, the version field will surface the discrepancy
+rather than silently producing corrupt tensors.
 
 ## (c) Lazy upload, eager parse
 
