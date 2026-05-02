@@ -125,6 +125,11 @@ public actor T5MetalEmbedder: Embedder {
     private let scoresBuf: MTLBuffer
     private let softmaxOutBuf: MTLBuffer
     private let relposBiasBuf: MTLBuffer
+    // Scratch buffer for attention masking when tokenCount < windowSize.
+    // CPU-filled once per window: copy relposBiasBuf then write -1e9 for
+    // all column positions n >= tokenCount so padding tokens receive zero
+    // attention weight (mirrors PyTorch's `attention_mask=(ids!=PAD).long()`).
+    private let maskedRelposBiasBuf: MTLBuffer
     private let attnMergedBuf: MTLBuffer
     private let oProjBuf: MTLBuffer
     private let ffnGateBuf: MTLBuffer
@@ -373,6 +378,7 @@ public actor T5MetalEmbedder: Embedder {
         let scoresBuf = try alloc(H * M * M, "scores")
         let softmaxOutBuf = try alloc(H * M * M, "softmaxOut")
         let relposBiasBuf = try alloc(H * M * M, "relposBias")
+        let maskedRelposBiasBuf = try alloc(H * M * M, "maskedRelposBias")
         let attnMergedBuf = try alloc(M * D, "attnMerged")
         let oProjBuf = try alloc(M * D, "oProj")
         let ffnGateBuf = try alloc(M * dFFLocal, "ffnGate")
@@ -432,6 +438,7 @@ public actor T5MetalEmbedder: Embedder {
         self.scoresBuf = scoresBuf
         self.softmaxOutBuf = softmaxOutBuf
         self.relposBiasBuf = relposBiasBuf
+        self.maskedRelposBiasBuf = maskedRelposBiasBuf
         self.attnMergedBuf = attnMergedBuf
         self.oProjBuf = oProjBuf
         self.ffnGateBuf = ffnGateBuf
@@ -508,39 +515,35 @@ public actor T5MetalEmbedder: Embedder {
             windowSize * dModel * MemoryLayout<Float>.size
         )
 
-        // 2a. Encoder layer 0 in its own command buffer (bisect readback).
-        guard let cb0 = context.queue.makeCommandBuffer() else {
-            throw T5MetalEmbedderError.commandBufferCreationFailed
-        }
-        cb0.label = "T5MetalEmbedder.encodeWindow.layer0"
-        encodeAttentionSubLayer(commandBuffer: cb0, layer: layers[0])
-        encodeFFNSubLayer(commandBuffer: cb0, layer: layers[0])
-        cb0.commit(); cb0.waitUntilCompleted()
-        if let err = cb0.error {
-            throw T5MetalEmbedderError.commandBufferFailed("layer 0: \(err)")
-        }
+        // Compute the softmax bias buffer for this window: apply -1e9 at
+        // pad positions when the input is shorter than windowSize so that
+        // attention doesn't leak to the PAD token embeddings.
+        let attnBiasBuf = tokens.count < windowSize
+            ? applyAttentionMask(tokenCount: tokens.count)
+            : relposBiasBuf
 
-        // BISECT[2]: residual stream after layer 0.
-        bisectLog(residualBuf, count: tokens.count * dModel,
-                  label: "residualBuf[after layer 0]")
-
-        // 2b. Encoder layers 1–11.
-        guard let cb1 = context.queue.makeCommandBuffer() else {
-            throw T5MetalEmbedderError.commandBufferCreationFailed
+        // 2. Encode each layer in its own command buffer for per-layer bisection.
+        // GatedGELU NaN fix verified. Now bisect layer 0 intra-layer to
+        // investigate cosine ~0.81-0.88 (second root cause, Task 4).
+        for ℓ in 0..<nLayers {
+            if ℓ == 0 {
+                // Intra-layer bisection for layer 0 (investigate cosine error).
+                try bisectLayer2(layer: layers[ℓ], tokenCount: tokens.count, biasBuf: attnBiasBuf)
+            } else {
+                guard let cbL = context.queue.makeCommandBuffer() else {
+                    throw T5MetalEmbedderError.commandBufferCreationFailed
+                }
+                cbL.label = "T5MetalEmbedder.encodeWindow.layer\(ℓ)"
+                encodeAttentionSubLayer(commandBuffer: cbL, layer: layers[ℓ], biasBuf: attnBiasBuf)
+                encodeFFNSubLayer(commandBuffer: cbL, layer: layers[ℓ])
+                cbL.commit(); cbL.waitUntilCompleted()
+                if let err = cbL.error {
+                    throw T5MetalEmbedderError.commandBufferFailed("layer \(ℓ): \(err)")
+                }
+                bisectLog(residualBuf, count: tokens.count * dModel,
+                          label: "residualBuf[after layer \(ℓ)]")
+            }
         }
-        cb1.label = "T5MetalEmbedder.encodeWindow.layers1to11"
-        for ℓ in 1..<nLayers {
-            encodeAttentionSubLayer(commandBuffer: cb1, layer: layers[ℓ])
-            encodeFFNSubLayer(commandBuffer: cb1, layer: layers[ℓ])
-        }
-        cb1.commit(); cb1.waitUntilCompleted()
-        if let err = cb1.error {
-            throw T5MetalEmbedderError.commandBufferFailed("layers 1-11: \(err)")
-        }
-
-        // BISECT[3]: residual stream after layer 11.
-        bisectLog(residualBuf, count: tokens.count * dModel,
-                  label: "residualBuf[after layer 11]")
 
         // 3–5. Final RMSNorm + 2_Dense projection + L2 norm.
         guard let cb2 = context.queue.makeCommandBuffer() else {
@@ -608,7 +611,153 @@ public actor T5MetalEmbedder: Embedder {
         return (normalised, rawNorms)
     }
 
-    // BISECT helper — log min/max/mean of first 8 floats of a buffer.
+    // Intra-layer bisection for layer 2 (first NaN layer). Each sub-operation
+    // runs in its own command buffer so we can log the intermediate buffer values
+    // after each step. Temporary scaffolding; removed in Task 8.
+    private func bisectLayer2(layer: LayerWeights, tokenCount: Int, biasBuf: MTLBuffer) throws {
+        let M = windowSize
+        let D = dModel
+        let H = nHeads
+        let dH = dHead
+        let dFF_ = dFF
+
+        func run(_ label: String, _ body: (MTLCommandBuffer) -> Void) throws {
+            guard let cb = context.queue.makeCommandBuffer() else {
+                throw T5MetalEmbedderError.commandBufferCreationFailed
+            }
+            cb.label = label
+            body(cb)
+            cb.commit(); cb.waitUntilCompleted()
+            if let err = cb.error {
+                throw T5MetalEmbedderError.commandBufferFailed("\(label): \(err)")
+            }
+        }
+
+        // Attn sub-layer: pre-norm
+        try run("L2.attn.rmsNorm") { cb in
+            rmsNormKernel.encode(commandBuffer: cb, input: residualBuf, gain: layer.preAttnNormGain,
+                                 output: xNormBuf, M: M, D: D, eps: layerNormEps)
+        }
+        bisectLog(xNormBuf, count: tokenCount * D, label: "L2.xNorm[after preAttnNorm]")
+
+        // Q projection
+        try run("L2.Q") { cb in
+            q4kMatMul.encode(commandBuffer: cb, weight: layer.qWeight, weightShape: (D, D),
+                             input: xNormBuf, output: qBuf, M: M)
+        }
+        bisectLog(qBuf, count: tokenCount * D, label: "L2.qBuf[after Q proj]")
+
+        // K, V projections
+        try run("L2.KV") { cb in
+            q4kMatMul.encode(commandBuffer: cb, weight: layer.kWeight, weightShape: (D, D),
+                             input: xNormBuf, output: kBuf, M: M)
+            q4kMatMul.encode(commandBuffer: cb, weight: layer.vWeight, weightShape: (D, D),
+                             input: xNormBuf, output: vBuf, M: M)
+        }
+        bisectLog(kBuf, count: tokenCount * D, label: "L2.kBuf[after K proj]")
+
+        // Q·Kᵀ scores
+        try run("L2.scores") { cb in
+            fp32MatMulKernel.encode(commandBuffer: cb, a: qBuf, b: kBuf, output: scoresBuf,
+                                    M: M, N: M, K: dH, batch: H, transposeB: true,
+                                    aStrideBatch: dH, bStrideBatch: dH,
+                                    cStrideBatch: M * M, aRowStride: D, bRowStride: D, cRowStride: M)
+        }
+        bisectLog(scoresBuf, count: tokenCount * M, label: "L2.scoresBuf[after Q·Kᵀ, head 0 rows 0-7]")
+
+        // Softmax + relpos bias (with attention mask for pad positions).
+        try run("L2.softmax") { cb in
+            softmaxKernel.encode(commandBuffer: cb, input: scoresBuf, bias: biasBuf,
+                                 output: softmaxOutBuf, B: H * M, N: M, scale: 1.0)
+        }
+        bisectLog(softmaxOutBuf, count: tokenCount * M, label: "L2.softmaxOut[after softmax]")
+
+        // softmax·V → attnMerged
+        try run("L2.attnMerge") { cb in
+            fp32MatMulKernel.encode(commandBuffer: cb, a: softmaxOutBuf, b: vBuf, output: attnMergedBuf,
+                                    M: M, N: dH, K: M, batch: H, transposeB: false,
+                                    aStrideBatch: M * M, bStrideBatch: dH,
+                                    cStrideBatch: dH, aRowStride: M, bRowStride: D, cRowStride: D)
+        }
+        bisectLog(attnMergedBuf, count: tokenCount * D, label: "L2.attnMergedBuf[after softmax·V]")
+
+        // O projection
+        try run("L2.O") { cb in
+            q4kMatMul.encode(commandBuffer: cb, weight: layer.oWeight, weightShape: (D, D),
+                             input: attnMergedBuf, output: oProjBuf, M: M)
+        }
+        bisectLog(oProjBuf, count: tokenCount * D, label: "L2.oProjBuf[after O proj]")
+
+        // Residual add (attn)
+        try run("L2.residualAdd1") { cb in
+            residualAddKernel.encode(commandBuffer: cb, a: residualBuf, b: oProjBuf, output: residualBuf, count: M * D)
+        }
+        bisectLog(residualBuf, count: tokenCount * D, label: "L2.residualBuf[after attn residual add]")
+
+        // FFN sub-layer: pre-norm
+        try run("L2.ffn.rmsNorm") { cb in
+            rmsNormKernel.encode(commandBuffer: cb, input: residualBuf, gain: layer.preFFNNormGain,
+                                 output: xNormBuf, M: M, D: D, eps: layerNormEps)
+        }
+        bisectLog(xNormBuf, count: tokenCount * D, label: "L2.xNorm[after preFFNNorm]")
+
+        // wi_0, wi_1 projections
+        try run("L2.wi") { cb in
+            q4kMatMul.encode(commandBuffer: cb, weight: layer.wi0Weight, weightShape: (dFF_, D),
+                             input: xNormBuf, output: ffnGateBuf, M: M)
+            q4kMatMul.encode(commandBuffer: cb, weight: layer.wi1Weight, weightShape: (dFF_, D),
+                             input: xNormBuf, output: ffnUpBuf, M: M)
+        }
+        bisectLog(ffnGateBuf, count: tokenCount * dFF_, label: "L2.ffnGateBuf[after wi_0]")
+        bisectLog(ffnUpBuf, count: tokenCount * dFF_, label: "L2.ffnUpBuf[after wi_1]")
+
+        // Spotlight: directly read elements around the known NaN position (token 6, dim 324 → index 12932).
+        do {
+            let nanIdx = 12932
+            let gateRaw = ffnGateBuf.contents().bindMemory(to: Float.self, capacity: tokenCount * dFF_)
+            let upRaw   = ffnUpBuf.contents().bindMemory(to: Float.self, capacity: tokenCount * dFF_)
+            let lo = max(0, nanIdx - 3); let hi = min(tokenCount * dFF_ - 1, nanIdx + 3)
+            let gateCtx = (lo...hi).map { "[\($0)]=\(String(format: "%.4f", gateRaw[$0]))" }.joined(separator: " ")
+            let upCtx   = (lo...hi).map { "[\($0)]=\(String(format: "%.4f", upRaw[$0]))"   }.joined(separator: " ")
+            print("[T5Bisect] SPOTLIGHT gate around \(nanIdx): \(gateCtx)")
+            print("[T5Bisect] SPOTLIGHT up around \(nanIdx): \(upCtx)")
+            // Also scan all of row 6 (indices 12288..14335) for any NaN/Inf.
+            let row6Start = 6 * dFF_; let row6End = row6Start + dFF_ - 1
+            var row6NaN: Int? = nil; var row6Inf: Int? = nil
+            for i in row6Start...row6End {
+                if gateRaw[i].isNaN && row6NaN == nil { row6NaN = i }
+                if gateRaw[i].isInfinite && row6Inf == nil { row6Inf = i }
+            }
+            print("[T5Bisect] SPOTLIGHT ffnGateBuf row6 (\(row6Start)..\(row6End)): firstNaN=\(row6NaN.map{"\($0)"}  ?? "none") firstInf=\(row6Inf.map{"\($0)"} ?? "none")")
+            row6NaN = nil; row6Inf = nil
+            for i in row6Start...row6End {
+                if upRaw[i].isNaN && row6NaN == nil { row6NaN = i }
+                if upRaw[i].isInfinite && row6Inf == nil { row6Inf = i }
+            }
+            print("[T5Bisect] SPOTLIGHT ffnUpBuf row6 (\(row6Start)..\(row6End)): firstNaN=\(row6NaN.map{"\($0)"} ?? "none") firstInf=\(row6Inf.map{"\($0)"} ?? "none")")
+        }
+
+        // GatedGELU
+        try run("L2.gatedGELU") { cb in
+            gatedGELUKernel.encode(commandBuffer: cb, gate: ffnGateBuf, up: ffnUpBuf, output: ffnActBuf, count: M * dFF_)
+        }
+        bisectLog(ffnActBuf, count: tokenCount * dFF_, label: "L2.ffnActBuf[after gated-GELU]")
+
+        // wo projection
+        try run("L2.wo") { cb in
+            q4kMatMul.encode(commandBuffer: cb, weight: layer.woWeight, weightShape: (D, dFF_),
+                             input: ffnActBuf, output: ffnDownBuf, M: M)
+        }
+        bisectLog(ffnDownBuf, count: tokenCount * D, label: "L2.ffnDownBuf[after wo proj]")
+
+        // Residual add (FFN)
+        try run("L2.residualAdd2") { cb in
+            residualAddKernel.encode(commandBuffer: cb, a: residualBuf, b: ffnDownBuf, output: residualBuf, count: M * D)
+        }
+        bisectLog(residualBuf, count: tokenCount * D, label: "L2.residualBuf[after FFN residual add = layer 2 done]")
+    }
+
+    // BISECT helper — log first-8 + full-buffer NaN scan of a buffer.
     // Temporary scaffolding; removed in Task 8.
     private func bisectLog(_ buf: MTLBuffer, count: Int, label: String) {
         guard count > 0 else {
@@ -618,16 +767,39 @@ public actor T5MetalEmbedder: Embedder {
         let raw = buf.contents().bindMemory(to: Float.self, capacity: count)
         let sample = min(count, 8)
         let vals = (0..<sample).map { raw[$0] }
-        let allFinite = vals.allSatisfy { $0.isFinite }
-        let hasNaN = vals.contains { $0.isNaN }
-        let hasInf = vals.contains { $0.isInfinite }
-        let absMax = vals.map { abs($0) }.max() ?? 0
+        let first8Finite = vals.allSatisfy { $0.isFinite }
+        // Scan full buffer for first NaN/Inf index.
+        var firstNaNIdx: Int? = nil
+        var firstInfIdx: Int? = nil
+        var globalMaxAbs: Float = 0
+        for i in 0..<count {
+            let v = raw[i]
+            if v.isNaN && firstNaNIdx == nil { firstNaNIdx = i }
+            if v.isInfinite && firstInfIdx == nil { firstInfIdx = i }
+            let a = abs(v)
+            if a.isFinite && a > globalMaxAbs { globalMaxAbs = a }
+        }
+        let anyNaN = firstNaNIdx != nil
+        let anyInf = firstInfIdx != nil
+        let allFinite = !anyNaN && !anyInf
         let mean = vals.reduce(Float(0), +) / Float(vals.count)
         print("[T5Bisect] \(label): "
-            + "first\(sample)=\(vals.map { String(format: "%.4f", $0) }) "
-            + "allFinite=\(allFinite) hasNaN=\(hasNaN) hasInf=\(hasInf) "
-            + "absMax=\(String(format: "%.4f", absMax)) "
+            + "first8=\(vals.map { String(format: "%.4f", $0) }) "
+            + "allFinite=\(allFinite) "
+            + (anyNaN ? "firstNaN@\(firstNaNIdx!) " : "")
+            + (anyInf ? "firstInf@\(firstInfIdx!) " : "")
+            + "globalMaxAbs=\(String(format: "%.4f", globalMaxAbs)) "
             + "mean=\(String(format: "%.6f", mean))")
+        // If NaN found, log the surrounding context (10 elements either side).
+        if let nanIdx = firstNaNIdx {
+            let lo = max(0, nanIdx - 2)
+            let hi = min(count - 1, nanIdx + 5)
+            let ctx = (lo...hi).map { i -> String in
+                let v = raw[i]
+                return "[\(i)]=\(v.isNaN ? "NaN" : String(format: "%.4f", v))"
+            }
+            print("[T5Bisect] \(label) NaN context: \(ctx.joined(separator: " "))")
+        }
     }
 
     /// One attention sub-layer. Reads/writes `residualBuf`. Uses the
@@ -641,7 +813,8 @@ public actor T5MetalEmbedder: Embedder {
     /// so the O projection sees a contiguous `[M, D]` input.
     private func encodeAttentionSubLayer(
         commandBuffer cb: MTLCommandBuffer,
-        layer: LayerWeights
+        layer: LayerWeights,
+        biasBuf: MTLBuffer
     ) {
         let M = windowSize
         let D = dModel
@@ -688,11 +861,14 @@ public actor T5MetalEmbedder: Embedder {
             cRowStride: M
         )
 
-        // Softmax with relpos bias. Flatten (H, M, M) → (B=H*M, N=M).
+        // Softmax with relpos bias (plus attention mask for pad positions).
+        // Flatten (H, M, M) → (B=H*M, N=M). Caller supplies biasBuf which
+        // is either the raw relposBiasBuf (full-window input) or the
+        // maskedRelposBiasBuf with -1e9 for pad columns (short inputs).
         softmaxKernel.encode(
             commandBuffer: cb,
             input: scoresBuf,
-            bias: relposBiasBuf,
+            bias: biasBuf,
             output: softmaxOutBuf,
             B: H * M, N: M, scale: 1.0
         )
@@ -774,6 +950,39 @@ public actor T5MetalEmbedder: Embedder {
             a: residualBuf, b: ffnDownBuf, output: residualBuf,
             count: M * D
         )
+    }
+
+    // MARK: - Attention mask
+
+    /// Copy `relposBiasBuf` into `maskedRelposBiasBuf` and write -1e9 into
+    /// every column position n >= `tokenCount` for all (head, query-row)
+    /// pairs. The result is returned as the bias argument for
+    /// `encodeAttentionSubLayer` when `tokenCount < windowSize`.
+    ///
+    /// This mirrors PyTorch's `attention_mask = (input_ids != PAD_ID).long()`
+    /// which the reference embedder in `scripts/convert-xtr-to-coreml.py`
+    /// applies before every T5EncoderModel call. Without this masking,
+    /// softmax distributes ~(windowSize-tokenCount)/windowSize of each
+    /// query token's attention weight to padding positions, degrading
+    /// cosine similarity (issue #75, second root cause).
+    private func applyAttentionMask(tokenCount: Int) -> MTLBuffer {
+        let M = windowSize
+        let H = nHeads
+        let total = H * M * M
+        memcpy(maskedRelposBiasBuf.contents(), relposBiasBuf.contents(),
+               total * MemoryLayout<Float>.size)
+        let ptr = maskedRelposBiasBuf.contents()
+            .bindMemory(to: Float.self, capacity: total)
+        let maskVal: Float = -1e9
+        for h in 0..<H {
+            for m in 0..<M {
+                let rowBase = h * M * M + m * M
+                for n in tokenCount..<M {
+                    ptr[rowBase + n] = maskVal
+                }
+            }
+        }
+        return maskedRelposBiasBuf
     }
 
     // MARK: - Token embedding gather

@@ -417,6 +417,68 @@ struct SoftmaxKernelEdgeCaseTests {
                     "row \(r) unmasked sum \(s) deviates from 1.0")
         }
     }
+
+    /// Attention-mask regression test (issue #75 — second root cause).
+    ///
+    /// Before the issue #75 fix, `T5MetalEmbedder.encodeAttentionSubLayer`
+    /// passed the precomputed `relposBiasBuf` (which has non-zero values at
+    /// every (h, m, n) position) unchanged to `SoftmaxKernel.encode`, so
+    /// attention distributed weight across all `windowSize=512` positions
+    /// even when the input had far fewer real tokens. For the 7-token
+    /// `short` fixture this meant ~98.6% of attention (505/512 positions)
+    /// went to padding tokens, producing cosine ≈ 0.81-0.88 vs the PyTorch
+    /// reference that applies `attention_mask = (ids != PAD_ID).long()`.
+    ///
+    /// The fix: before calling softmax for inputs shorter than `windowSize`,
+    /// `T5MetalEmbedder.applyAttentionMask` copies `relposBiasBuf` into
+    /// `maskedRelposBiasBuf` and writes -1e9 into all column positions
+    /// n >= tokenCount for every (head, query-row) pair. This test verifies
+    /// the kernel-level contract that -1e9 bias at column n produces exactly
+    /// zero output weight at n, and that the un-masked columns still sum to 1.
+    ///
+    /// T5 attention shape: H=12 heads, M=512 sequence length, B=H*M=6144
+    /// rows, N=M=512 columns per row, tokenCount=7 real tokens.
+    @Test("T5 attention padding mask: -1e9 at n>=tokenCount yields zero weight (issue #75 regression)")
+    func t5AttentionPaddingMaskRegression() throws {
+        let ctx = try #require(MetalContext.shared)
+        let kernel = try SoftmaxKernel(context: ctx)
+
+        let H = 12, M = 512, tokenCount = 7
+        let B = H * M   // 6144 softmax rows
+        let N = M       // 512 columns
+
+        // Uniform scores: without a mask, every column gets weight 1/N.
+        // With -1e9 for n >= tokenCount, only positions 0..<tokenCount
+        // should receive non-zero weight.
+        let scores = [Float](repeating: 0.0, count: B * N)
+
+        // Masked relpos bias: 0.0 for real-token columns, -1e9 for pad columns.
+        var maskedBias = [Float](repeating: 0.0, count: B * N)
+        for r in 0..<B {
+            for n in tokenCount..<N {
+                maskedBias[r * N + n] = -1e9
+            }
+        }
+
+        let out = try SoftmaxRunner.run(
+            ctx: ctx, kernel: kernel,
+            x: scores, bias: maskedBias, B: B, N: N, scale: 1.0
+        )
+
+        // Verify for every (head, query-row) pair:
+        //  - columns n >= tokenCount have exactly 0 weight
+        //  - columns 0..<tokenCount sum to 1
+        for r in 0..<B {
+            for n in tokenCount..<N {
+                #expect(out[r * N + n] == 0.0,
+                        "row \(r) pad position \(n) = \(out[r * N + n]); expected 0 (mask failed)")
+            }
+            var s: Double = 0
+            for n in 0..<tokenCount { s += Double(out[r * N + n]) }
+            #expect(abs(s - 1.0) < 1e-5,
+                    "row \(r) real-token columns sum \(s) ≠ 1.0")
+        }
+    }
 }
 
 #endif // canImport(Metal)
