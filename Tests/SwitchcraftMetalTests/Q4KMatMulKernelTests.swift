@@ -2,8 +2,10 @@
 //
 // Parity + edge-case tests for `Q4KMatMulKernel` (issue #60). Validates
 // that the Metal `kernel_mul_mm_q4_K_f32` produces output matching a
-// CPU reference (`Q4KDecode.dequantise` + `cblas_sgemm`) on the three
-// T5-base Q4_K-stored shapes plus M=1 and a non-tile-aligned N.
+// CPU reference (`Q4KDecode.dequantise` + `cblas_sgemm`) on the four
+// xtr-base-en (dFF=2048) Q4_K-stored shapes plus M=1 and a non-tile-
+// aligned N. NOTE: classic T5-base uses dFF=3072; xtr-base-en is T5 v1.1
+// with dFF=2048 — prior tests used the wrong shape (issue #75 gap fix).
 //
 // Reference path
 // --------------
@@ -241,23 +243,26 @@ private enum Q4KMatMulRunner {
                 "Metal unavailable on this host (or SWITCHCRAFT_FORCE_ACCELERATE is set)"))
 struct Q4KMatMulKernelTests {
 
-    // T5-base shapes from the spec — Q/K/V/O projections share
-    // (M=512, K=768, N=768); FFN gate/up share (M=512, K=768, N=3072);
-    // FFN down is (M=512, K=3072, N=768).
+    // xtr-base-en (T5 v1.1) shapes — Q/K/V/O projections share
+    // (M=512, K=768, N=768); FFN gate/up share (M=512, K=768, N=2048);
+    // FFN down is (M=512, K=2048, N=768).
+    // NOTE: dFF=2048 is the xtr-base-en / T5 v1.1 value; classic T5-base
+    // uses dFF=3072. The prior N=3072 tests were the wrong shape and gave
+    // no coverage for the actual asset (issue #75 coverage gap).
 
     @Test("qkv_proj parity (M=512, K=768, N=768)")
     func parityQKVProj() throws {
         try runParity(M: 512, K: 768, N: 768, seed: 0xDA7A_C0DE_0001)
     }
 
-    @Test("ffn_wi parity (M=512, K=768, N=3072)")
+    @Test("ffn_wi parity (M=512, K=768, N=2048)")
     func parityFFNWi() throws {
-        try runParity(M: 512, K: 768, N: 3072, seed: 0xDA7A_C0DE_0002)
+        try runParity(M: 512, K: 768, N: 2048, seed: 0xDA7A_C0DE_0002)
     }
 
-    @Test("ffn_wo parity (M=512, K=3072, N=768)")
+    @Test("ffn_wo parity (M=512, K=2048, N=768)")
     func parityFFNWo() throws {
-        try runParity(M: 512, K: 3072, N: 768, seed: 0xDA7A_C0DE_0003)
+        try runParity(M: 512, K: 2048, N: 768, seed: 0xDA7A_C0DE_0003)
     }
 
     // MARK: - Helper
