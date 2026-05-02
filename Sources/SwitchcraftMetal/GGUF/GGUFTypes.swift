@@ -2,7 +2,7 @@
 //
 // Public types for the SwitchcraftMetal GGUF reader (issue #59).
 //
-// The reader parses GGUF v3 (`ggml/docs/gguf.md`) and surfaces the
+// The reader parses GGUF v2 and v3 (`ggml/docs/gguf.md`) and surfaces the
 // subset Switchcraft consumes: weight tensors in `Q4_K`, `F32`, and
 // `F16`, plus a typed subset of metadata KV values (string / int /
 // float / bool — arrays and small integer widths are parsed-but-not-
@@ -105,7 +105,7 @@ public enum GGUFValue: Sendable, Equatable {
 public enum GGUFError: Error, CustomStringConvertible, Equatable {
     /// The file's first four bytes are not `"GGUF"`.
     case invalidMagic
-    /// The file's version field is not 3. Found version is reported.
+    /// The file's version field is not 2 or 3. Found version is reported.
     case unsupportedVersion(found: UInt32)
     /// A read attempted to consume more bytes than the file contains.
     case truncated(at: Int, needed: Int)
@@ -137,7 +137,7 @@ public enum GGUFError: Error, CustomStringConvertible, Equatable {
         case .invalidMagic:
             return "GGUF: bad magic — first 4 bytes are not 'GGUF'"
         case .unsupportedVersion(let v):
-            return "GGUF: unsupported version \(v) — only v3 is supported"
+            return "GGUF: unsupported version \(v) — only v2 and v3 are supported"
         case .truncated(let at, let needed):
             return "GGUF: truncated read at offset \(at), needed \(needed) more bytes"
         case .malformedString(let at):

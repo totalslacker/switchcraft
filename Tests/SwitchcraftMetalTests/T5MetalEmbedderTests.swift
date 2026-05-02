@@ -192,4 +192,47 @@ struct T5MetalEmbedderParityTests {
     }
 }
 
+// MARK: - Tensor-name regression (issue #74)
+
+/// Verifies that GGUFReader correctly surfaces a tensor named
+/// "linear.weight" — the bare name Witchcraft's `quantize-tool` writes
+/// for the 2_Dense projection at the pinned Candle rev `5bd5618`.
+/// This regression test ensures T5MetalEmbedder's candidate-name probe
+/// can find the tensor if the GGUF asset uses this naming convention.
+@Suite("T5MetalEmbedder linear.weight tensor-name regression")
+struct T5MetalEmbedderLinearWeightTests {
+
+    @Test("GGUFReader surfaces a tensor named linear.weight")
+    func linearWeightTensorName() async throws {
+        guard let dev = MTLCreateSystemDefaultDevice() else {
+            throw GGUFError.ioError("no Metal device")
+        }
+        // Build a minimal GGUF fixture with one F32 tensor named
+        // "linear.weight" (shape [128, 768] = 98304 elements, 393216 bytes).
+        // The data is zeros; we only care about name resolution.
+        var fixture = GGUFFixture()
+        let byteCount = 128 * 768 * 4  // F32
+        fixture.tensors = [
+            .init(
+                name: "linear.weight",
+                shape: [128, 768],
+                typeRaw: 0,  // F32
+                bytes: Data(count: byteCount)
+            )
+        ]
+        let url = try writeFixture(fixture, named: "linear-weight.gguf")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let reader = try GGUFReader(url: url, device: dev)
+        let names = await reader.tensorNames()
+        #expect(names.contains("linear.weight"), "tensor named linear.weight not found; got: \(names)")
+
+        // Confirm the tensor resolves with the correct dtype and shape.
+        let tensor = try await reader.tensor("linear.weight")
+        #expect(tensor.dtype == .f32)
+        #expect(tensor.shape == [128, 768])
+        #expect(tensor.elementCount == 128 * 768)
+    }
+}
+
 #endif // canImport(Metal)
