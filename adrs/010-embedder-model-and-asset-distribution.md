@@ -244,12 +244,19 @@ back toward ±0.01 in the same commit that updates the references.
 
 ### Cross-stack tolerance for the Metal embedder (`T5MetalEmbedder`)
 
-> **Status (2026-05-01):** scaffolding only — **not yet calibrated**.
-> The `2 × empirical maxAbs` policy below is the intended contract;
-> the in-tree constant is still a conservative `0.01` ceiling pending
-> the first empirical measurement on a developer machine. The operator
-> step in issue #65's task list has not been run; the umbrella #57 and
-> #65 Plan rows are correspondingly unticked until it is.
+> **Status (2026-05-02, issue #75):** pipeline defects fixed; **not yet
+> calibrated**. Three root-cause kernel defects were identified via bisect
+> against the real Q4K GGUF asset and fixed in issue #75 (see defect log
+> below). The `2 × empirical maxAbs` policy below is the intended contract;
+> the in-tree constant is still a conservative `0.01` ceiling pending the
+> first full empirical measurement on a developer machine with
+> `SWITCHCRAFT_XTR_GGUF` set. The NDCG@10 gate and per-token cosine gate
+> must both pass before the tolerance is derived and this status updated.
+
+**Defects fixed in issue #75 bisect** (each in its own commit per R6):
+- *GatedGELU tanh overflow* (commit `a32c00b`): Metal's built-in `tanh(x)` produces NaN for `|inner| ≥ 8` because `exp(2x)` overflows FP32; fixed by clamping to `±1.0f` for large arguments. Missed by #63's kernel tests because synthetic inputs had small gate values.
+- *Attention mask for pad positions* (commit `9ad60b7`): when `tokenCount < windowSize`, softmax distributed attention weight to PAD-position embeddings; fixed by writing `−1e9` at `n ≥ tokenCount` in the relpos-bias buffer before each partial window. Missed because prior tests used full 512-token windows only.
+- *Single-CB batching regression* (commit `9bd84f0`): the attention-mask fix inadvertently replaced the single-command-buffer layer batching with per-sub-step CBs; restored the original single-CB structure. Missed because this regression and the mask fix were committed together.
 
 `T5MetalEmbedder` (Phase 2, umbrella #57) runs the same Q4K asset
 distributed in (j) directly on Apple Metal — the storage axis is
