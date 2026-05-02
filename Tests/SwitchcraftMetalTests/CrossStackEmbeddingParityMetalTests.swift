@@ -18,9 +18,9 @@
 //
 // Triple-gated:
 //   * `SWITCHCRAFT_XTR_GGUF` must point at the Q4K GGUF asset.
-//   * `Tests/Fixtures/reference_embeddings.{bin,json}` must be present
-//     (regenerated locally via `scripts/witchcraft-fixture-export.patch`
-//     per ADR 013 — the fixture is **not committed**).
+//   * `Tests/Fixtures/reference_embeddings.{bin,json}` — committed to the
+//     repo (regenerated via `scripts/witchcraft-fixture-export.patch` per
+//     ADR 013; regenerate locally if the Metal pipeline changes).
 //   * Metal-capable host (no `SWITCHCRAFT_FORCE_ACCELERATE`).
 //
 // All gates absent → suite skips cleanly. Fresh checkouts stay green.
@@ -32,6 +32,7 @@ import Testing
 @_spi(SwitchcraftMetal) import SwitchcraftCore
 @_spi(SwitchcraftMetal) import SwitchcraftMetal
 
+// ASSET-GATED: requires SWITCHCRAFT_XTR_GGUF + reference_embeddings fixture — skips in CI
 @Suite(
     "Cross-stack embedding parity Metal (asset-gated)",
     .enabled(if: GGUFAsset.isAvailable

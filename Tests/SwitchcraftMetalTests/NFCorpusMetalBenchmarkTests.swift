@@ -30,6 +30,7 @@ import Testing
 @_spi(SwitchcraftMetal) import SwitchcraftCore
 @_spi(SwitchcraftMetal) import SwitchcraftMetal
 
+// ASSET-GATED: requires SWITCHCRAFT_XTR_GGUF + SWITCHCRAFT_NFCORPUS_DIR — skips in CI
 @Suite(
     "NFCorpus Metal Benchmark (asset-gated)",
     .enabled(if: GGUFAsset.isAvailable

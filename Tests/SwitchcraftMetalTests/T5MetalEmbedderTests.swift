@@ -102,6 +102,7 @@ struct T5MetalEmbedderInitFailureTests {
 
 // MARK: - Asset-gated parity tests
 
+// ASSET-GATED: requires SWITCHCRAFT_XTR_GGUF — skips in CI and on fresh checkouts
 @Suite("T5MetalEmbedder PyTorch FP32 parity",
        .enabled(if: GGUFAsset.isAvailable
                     && CoreMLEmbeddingFixtures.isAvailable
