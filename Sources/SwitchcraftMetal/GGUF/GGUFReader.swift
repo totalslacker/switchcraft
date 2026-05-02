@@ -65,7 +65,7 @@ public actor GGUFReader {
     /// file accepted by this reader. Exposed for debuggability — a future
     /// structural divergence between v2 and v3 would be visible here
     /// rather than silently tolerated.
-    public let loadedVersion: UInt32
+    public nonisolated let loadedVersion: UInt32
 
     /// Description of one tensor as parsed from the tensor-info block.
     /// The MTLBuffer is allocated on demand and held in `cache`.
