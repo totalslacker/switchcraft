@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import struct
 import sys
 from pathlib import Path
 from typing import List, Tuple
@@ -106,7 +105,7 @@ def load_tokenizer(path: str):
 
 
 def tokenize(tok, text: str) -> List[int]:
-    """Tokenize and pad/truncate to WINDOW_SIZE. Returns int list of length ≤ WINDOW_SIZE."""
+    """Tokenize and truncate to WINDOW_SIZE. Returns int list of length ≤ WINDOW_SIZE."""
     enc = tok.encode(text, add_special_tokens=True)
     ids = enc.ids[:WINDOW_SIZE]
     return ids
@@ -157,7 +156,7 @@ def dump_hidden_states(
         for layer_idx, hs in enumerate(hidden_states):
             # Slice to real token positions only (first W rows).
             hs_np = hs[0, :W, :].float().numpy()  # [W, 768]
-            raw = struct.pack(f"{W * 768}f", *hs_np.flatten().tolist())
+            raw = hs_np.astype("<f4").tobytes()  # explicit little-endian FP32
             byte_length = len(raw)
 
             entry = {

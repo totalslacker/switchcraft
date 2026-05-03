@@ -220,7 +220,7 @@ private struct NFCorpusRow {
 private func loadCollectionMap(from url: URL) throws -> [String: String] {
     let data = try Data(contentsOf: url)
     guard let dict = try JSONSerialization.jsonObject(with: data) as? [String: String] else {
-        throw NFCorpusFixtureError.qrelsNotNestedDict
+        throw NFCorpusFixtureError.collectionMapInvalid
     }
     return dict
 }
@@ -294,11 +294,14 @@ private func loadQrels(from url: URL) throws -> [String: [String: Int]] {
 }
 
 private enum NFCorpusFixtureError: Error, CustomStringConvertible {
+    case collectionMapInvalid
     case qrelsNotNestedDict
     case qrelsGradeNotInt(qid: String, docId: String)
 
     var description: String {
         switch self {
+        case .collectionMapInvalid:
+            return "collection_map.json must be a flat { \"numeric_id\": \"MED-*\" } dict — see scripts/fetch-nfcorpus.sh"
         case .qrelsNotNestedDict:
             return "qrels.test.json must be a nested-dict { qid: { docid: grade } } — see scripts/fetch-nfcorpus.sh"
         case .qrelsGradeNotInt(let qid, let docId):
