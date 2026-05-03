@@ -2,10 +2,13 @@
 //
 // Parity + edge-case tests for `T5MetalEmbedder` (issue #64).
 //
-// The cosine ≥ 0.99999 gate against the committed PyTorch FP32 reference
+// The per-token cosine gate against the committed PyTorch FP32 reference
 // (`Tests/Fixtures/xtr-base-en.embeddings.bin`) is the primary
-// correctness contract. All asset-gated tests skip cleanly when
-// `SWITCHCRAFT_XTR_GGUF` is unset — fresh checkouts stay green.
+// correctness contract for the Q4K Metal path. Q4K quantisation introduces
+// empirically observed maxAbs ≈ 0.033 per-dim vs FP32; the tolerance is
+// set to 2 × observed maxAbs (per ADR 010(h) / R8 of issue #75).
+// All asset-gated tests skip cleanly when `SWITCHCRAFT_XTR_GGUF` is unset
+// — fresh checkouts stay green.
 
 #if canImport(Metal)
 
@@ -110,11 +113,22 @@ struct T5MetalEmbedderInitFailureTests {
                 "Set SWITCHCRAFT_XTR_GGUF=<path>; requires Metal."))
 struct T5MetalEmbedderParityTests {
 
-    /// Per-token cosine ≥ 0.99999 vs PyTorch FP32 reference for every
-    /// fixture in `xtr-base-en.embeddings.bin`. This is issue #64's
-    /// primary correctness gate.
-    @Test("Per-token cosine ≥ 0.99999 vs PyTorch FP32 reference")
+    /// Per-token cosine ≥ 0.99 vs PyTorch FP32 reference for every fixture
+    /// in `xtr-base-en.embeddings.bin`. This is the Q4K Metal correctness
+    /// gate (issue #75 R8).
+    ///
+    /// Threshold rationale: Q4K quantisation introduces empirically observed
+    /// maxAbs ≈ 0.033 per-dim (worst case across all fixtures vs PyTorch FP32;
+    /// measured in issue #75). Both thresholds set to 2 × observed maxAbs per
+    /// ADR 010(h) tolerance policy:
+    ///   - cosineMin: 0.99    (observed min ≈ 0.994; 2 × deviation from 1)
+    ///   - maxAbsTol: 0.07    (2 × 0.033 = 0.066, rounded to 0.07)
+    @Test("Per-token cosine ≥ 0.99 vs PyTorch FP32 reference (Q4K quantisation floor)")
     func perTokenCosine() async throws {
+        // 2 × observed maxAbs tolerance per ADR 010(h) / issue #75 R8.
+        let cosineMin: Double = 0.99
+        let maxAbsTol: Double = 0.07
+
         let env = try await makeEmbedder()
         for fixture in env.index.fixtures {
             // Whitespace-only fixture has zero rows; skip — the embedder
@@ -135,12 +149,12 @@ struct T5MetalEmbedderParityTests {
                 let cos = cosine(actual, expected[r])
                 let abs = maxAbs(actual, expected[r])
                 #expect(
-                    cos >= 0.99999,
-                    "Fixture '\(fixture.name)' row \(r): cosine \(cos) < 0.99999"
+                    cos >= cosineMin,
+                    "Fixture '\(fixture.name)' row \(r): cosine \(cos) < \(cosineMin)"
                 )
                 #expect(
-                    abs < 1e-4,
-                    "Fixture '\(fixture.name)' row \(r): maxAbsError \(abs) ≥ 1e-4"
+                    abs < maxAbsTol,
+                    "Fixture '\(fixture.name)' row \(r): maxAbsError \(abs) ≥ \(maxAbsTol)"
                 )
             }
         }
@@ -184,11 +198,12 @@ struct T5MetalEmbedderParityTests {
         // Spot-check a handful of rows — the parity test above already
         // covers all rows; this guarantees the merge path itself is
         // exercised even if the parity test name is changed.
+        // Threshold 0.99 = 2 × observed Q4K deviation per ADR 010(h).
         let sampleRows = [0, fixture.rows / 2, fixture.rows - 1]
         for r in sampleRows {
             let actual = Array(actualFlat[(r * dims)..<((r + 1) * dims)])
             let cos = cosine(actual, expected[r])
-            #expect(cos >= 0.99999, "Frankenstein row \(r): cosine \(cos)")
+            #expect(cos >= 0.99, "Frankenstein row \(r): cosine \(cos)")
         }
     }
 }

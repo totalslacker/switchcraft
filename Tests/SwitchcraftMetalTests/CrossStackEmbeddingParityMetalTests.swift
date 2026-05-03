@@ -45,23 +45,18 @@ struct CrossStackEmbeddingParityMetalTests {
     /// Per-dim absolute tolerance for `T5MetalEmbedder` vs Witchcraft
     /// GGUF reference embeddings.
     ///
-    /// **PLACEHOLDER, NOT CALIBRATED.** Per the issue #65 plan
-    /// §"Tolerance retune mechanics", the intended value is
-    /// `2 × observed maxAbs` from a one-time empirical measurement on a
-    /// developer machine with the regenerated reference fixture and
-    /// `SWITCHCRAFT_XTR_GGUF` set. The test prints `maxAbs` on every
-    /// run; once the operator has run this suite once, replace this
-    /// constant with `2 × observed maxAbs` and update ADR 010(h)'s Metal
-    /// sub-section in lockstep — that same commit ticks the issue #65
-    /// and umbrella #57 Plan rows. Subsequent fixture regenerations or
-    /// kernel revisions that push the observation past `tolerance / 2`
-    /// re-trigger the same lockstep retune.
+    /// **Calibrated (issue #75, 2026-05-02).** Observed `maxAbs = 0.000216`
+    /// on a developer machine with `xtr-v3.gguf` (Q4K) and the committed
+    /// `reference_embeddings.bin` (Witchcraft Q4K reference). Both sides are
+    /// Q4K-derived so the drift is arithmetic-order rounding only.
     ///
-    /// Current value `0.01` is a conservative ceiling — both sides
-    /// Q4K-derived, so the empirical drift is expected to be
-    /// substantially tighter than the CoreML ±0.025 tolerance per ADR
-    /// 014, but the actual figure has not yet been measured in-tree.
-    private static let tolerance: Float = 0.01
+    /// Value = `2 × observed maxAbs` per ADR 010(h) tolerance policy:
+    ///   `2 × 0.000216 = 0.000432 → 0.0005` (rounded to 1 sig fig).
+    ///
+    /// If a kernel revision pushes `observed maxAbs` past `tolerance / 2`
+    /// (= 0.00025), re-derive and update ADR 010(h)'s Metal sub-section
+    /// in the same commit.
+    private static let tolerance: Float = 0.0005
 
     actor SharedEmbedder {
         static let shared = SharedEmbedder()

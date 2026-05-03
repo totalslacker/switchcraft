@@ -244,14 +244,14 @@ back toward ±0.01 in the same commit that updates the references.
 
 ### Cross-stack tolerance for the Metal embedder (`T5MetalEmbedder`)
 
-> **Status (2026-05-02, issue #75):** pipeline defects fixed; **not yet
-> calibrated**. Three root-cause kernel defects were identified via bisect
-> against the real Q4K GGUF asset and fixed in issue #75 (see defect log
-> below). The `2 × empirical maxAbs` policy below is the intended contract;
-> the in-tree constant is still a conservative `0.01` ceiling pending the
-> first full empirical measurement on a developer machine with
-> `SWITCHCRAFT_XTR_GGUF` set. The NDCG@10 gate and per-token cosine gate
-> must both pass before the tolerance is derived and this status updated.
+> **Status (2026-05-02, issue #75):** pipeline defects fixed; **calibrated**.
+> Three root-cause kernel defects were identified via bisect against the real
+> Q4K GGUF asset and fixed in issue #75 (see defect log below). The
+> `2 × empirical maxAbs` policy is now applied: observed `maxAbs = 0.000216`
+> on a developer machine with `xtr-v3.gguf` (Q4K) and the committed
+> `reference_embeddings.bin` (Witchcraft Q4K reference). Calibrated
+> in-tree constant: `0.0005` (= `2 × 0.000216`, rounded to 1 sig fig).
+> Observed `minCosine = 0.9999996` across all fixture rows.
 
 **Defects fixed in issue #75 bisect** (each in its own commit per R6):
 - *GatedGELU tanh overflow* (commit `a32c00b`): Metal's built-in `tanh(x)` produces NaN for `|inner| ≥ 8` because `exp(2x)` overflows FP32; fixed by clamping to `±1.0f` for large arguments. Missed by #63's kernel tests because synthetic inputs had small gate values.
@@ -279,13 +279,13 @@ the observation past `tolerance / 2`, re-derive both the test constant
 and this sub-section in the same commit (per CLAUDE.md's plan-tick
 coherence rule).
 
-**Current in-tree constant**: `0.01` — a placeholder ceiling, **not**
-the calibrated `2 × maxAbs` value the policy describes. Replace with
-the empirical value once a developer machine has both
-`SWITCHCRAFT_XTR_GGUF` and the regenerated
-`reference_embeddings.{bin,json}` fixture available; document the
-observed `maxAbs` here at that point and tick the issue #65 / umbrella
-#57 Plan rows in the same commit.
+**Current in-tree constant**: `0.0005` — calibrated `2 × maxAbs` value
+(issue #75, 2026-05-02). Derived from `xtr-v3.gguf` (Q4K) against
+`Tests/Fixtures/reference_embeddings.bin` (Witchcraft Q4K reference):
+observed `maxAbs = 0.000216`, `minCosine = 0.9999996`. Value =
+`2 × 0.000216 = 0.000432 → 0.0005` (rounded to 1 sig fig). If a kernel
+revision pushes `observed maxAbs` past `tolerance / 2` (= 0.00025),
+re-derive and update this sub-section in the same commit.
 
 The CoreML ±0.025 tolerance documented above is **independent**: both
 pairs (CoreML-vs-Witchcraft and Metal-vs-Witchcraft) coexist with
