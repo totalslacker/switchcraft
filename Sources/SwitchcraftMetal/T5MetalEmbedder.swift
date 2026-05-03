@@ -518,54 +518,49 @@ public actor T5MetalEmbedder: Embedder {
             ? applyAttentionMask(tokenCount: tokens.count)
             : relposBiasBuf
 
-        // 2. Encode all 12 encoder layers in a single command buffer.
-        // Batching all layers in one CB matches the original structure from
-        // commit 53c86cc and avoids per-layer CPU-GPU round-trips that can
-        // affect Metal's FP32 accumulation ordering on some dispatch sizes.
-        guard let cbLayers = context.queue.makeCommandBuffer() else {
+        // 2–5. Encode all 12 encoder layers + final norm + projection + L2
+        // in a single command buffer. Batching all GPU work into one CB
+        // matches the original pre-#75 structure, eliminates the extra
+        // CPU-GPU sync that was accidentally introduced when steps 3–5 were
+        // split off during the attention-mask fix, and avoids the per-layer
+        // round-trips that can affect Metal's FP32 accumulation ordering.
+        guard let cb = context.queue.makeCommandBuffer() else {
             throw T5MetalEmbedderError.commandBufferCreationFailed
         }
-        cbLayers.label = "T5MetalEmbedder.encodeWindow.layers0to11"
+        cb.label = "T5MetalEmbedder.encodeWindow"
         for ℓ in 0..<nLayers {
-            encodeAttentionSubLayer(commandBuffer: cbLayers, layer: layers[ℓ], biasBuf: attnBiasBuf)
-            encodeFFNSubLayer(commandBuffer: cbLayers, layer: layers[ℓ])
+            encodeAttentionSubLayer(commandBuffer: cb, layer: layers[ℓ], biasBuf: attnBiasBuf)
+            encodeFFNSubLayer(commandBuffer: cb, layer: layers[ℓ])
         }
-        cbLayers.commit(); cbLayers.waitUntilCompleted()
-        if let err = cbLayers.error {
-            throw T5MetalEmbedderError.commandBufferFailed("layers 0-11: \(err)")
-        }
-        // 3–5. Final RMSNorm + 2_Dense projection + L2 norm.
-        guard let cb2 = context.queue.makeCommandBuffer() else {
-            throw T5MetalEmbedderError.commandBufferCreationFailed
-        }
-        cb2.label = "T5MetalEmbedder.encodeWindow.projL2"
-
+        // 3. Final RMSNorm.
         rmsNormKernel.encode(
-            commandBuffer: cb2,
+            commandBuffer: cb,
             input: residualBuf,
             gain: finalNormGain,
             output: xNormBuf,
             M: windowSize, D: dModel,
             eps: layerNormEps
         )
+        // 4. 2_Dense projection [W, 768] → [W, 128].
         fp32MatMulKernel.encode(
-            commandBuffer: cb2,
+            commandBuffer: cb,
             a: xNormBuf,
             b: projWeightBuffer,
             output: projOutBuf,
             M: windowSize, N: dims, K: dModel,
             batch: 1, transposeB: true
         )
+        // 5. Per-row L2 normalisation.
         l2NormKernel.encode(
-            commandBuffer: cb2,
+            commandBuffer: cb,
             input: projOutBuf,
             output: l2OutBuf,
             rows: windowSize, cols: dims,
             epsilon: 1e-12
         )
-        cb2.commit(); cb2.waitUntilCompleted()
-        if let err = cb2.error {
-            throw T5MetalEmbedderError.commandBufferFailed("proj+l2: \(err)")
+        cb.commit(); cb.waitUntilCompleted()
+        if let err = cb.error {
+            throw T5MetalEmbedderError.commandBufferFailed("encodeWindow: \(err)")
         }
 
         // 6. Read back projOut + l2Out and compute pre-L2 row norms.
