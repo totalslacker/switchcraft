@@ -424,8 +424,8 @@ struct SoftmaxKernelEdgeCaseTests {
     /// passed the precomputed `relposBiasBuf` (which has non-zero values at
     /// every (h, m, n) position) unchanged to `SoftmaxKernel.encode`, so
     /// attention distributed weight across all `windowSize=512` positions
-    /// even when the input had far fewer real tokens. For the 7-token
-    /// `short` fixture this meant ~98.6% of attention (505/512 positions)
+    /// even when the input had far fewer real tokens. For the 6-token
+    /// `short` fixture this meant ~98.8% of attention (506/512 positions)
     /// went to padding tokens, producing cosine ≈ 0.81-0.88 vs the PyTorch
     /// reference that applies `attention_mask = (ids != PAD_ID).long()`.
     ///
@@ -437,13 +437,14 @@ struct SoftmaxKernelEdgeCaseTests {
     /// zero output weight at n, and that the un-masked columns still sum to 1.
     ///
     /// T5 attention shape: H=12 heads, M=512 sequence length, B=H*M=6144
-    /// rows, N=M=512 columns per row, tokenCount=7 real tokens.
+    /// rows, N=M=512 columns per row, tokenCount=6 real tokens (matching
+    /// the committed `short` fixture: "the apple is red and round").
     @Test("T5 attention padding mask: -1e9 at n>=tokenCount yields zero weight (issue #75 regression)")
     func t5AttentionPaddingMaskRegression() throws {
         let ctx = try #require(MetalContext.shared)
         let kernel = try SoftmaxKernel(context: ctx)
 
-        let H = 12, M = 512, tokenCount = 7
+        let H = 12, M = 512, tokenCount = 6
         let B = H * M   // 6144 softmax rows
         let N = M       // 512 columns
 
