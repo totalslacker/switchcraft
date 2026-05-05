@@ -193,16 +193,36 @@ public actor SwitchcraftStore {
     ///   - query: free-text query.
     ///   - topK: maximum number of fused hits to return. Defaults to 10.
     ///   - filter: document predicate applied before fusion.
+    ///   - deadline: per-call wall-time budget measured from the instant
+    ///     this method is entered. Overrides `config.search.searchDeadline`
+    ///     when non-nil. Pass `.seconds(0)` to enforce a pre-SQLite-only
+    ///     check (useful in tests). When the budget is exhausted the call
+    ///     throws `SwitchcraftStoreError.searchTimedOut(elapsed:)`.
     /// - Returns: hits sorted by `(score DESC, uuid ASC)`.
     /// - Throws: `SwitchcraftStoreError.alreadyShutDown` /
-    ///   `embeddingMismatch`; storage and embedder errors.
+    ///   `embeddingMismatch` / `searchTimedOut`; storage and embedder errors.
     public func search(
         query: String,
         topK: Int = 10,
-        filter: StorageFilter = .all
+        filter: StorageFilter = .all,
+        deadline: Duration? = nil
     ) async throws -> [HybridHit] {
         try ensureRunning()
+
+        let searchStart = ContinuousClock.now
+        let effectiveDeadline = deadline ?? config.search.searchDeadline
+        let deadlineCtx = SearchDeadlineContext(
+            searchStart: searchStart,
+            deadline: effectiveDeadline
+        )
+
         try await indexer.flush()
+
+        // Pre-SQLite checkpoint: flush may have consumed the budget.
+        if deadlineCtx.isExpired {
+            throw SwitchcraftStoreError.searchTimedOut(elapsed: deadlineCtx.elapsed)
+        }
+
         let queryEmbeddings = try await embedder.encode(query)
         let dims = embedder.dims
         guard queryEmbeddings.count % dims == 0 else {
@@ -210,14 +230,39 @@ public actor SwitchcraftStore {
                 count: queryEmbeddings.count, dims: dims
             )
         }
-        return try await searchEngine.searchHybrid(
-            queryEmbeddings: queryEmbeddings,
-            dims: dims,
-            queryText: query,
-            topK: topK,
-            filter: filter,
-            config: config.hybrid
-        )
+
+        // Pre-SQLite checkpoint: encode may have consumed the budget.
+        if deadlineCtx.isExpired {
+            throw SwitchcraftStoreError.searchTimedOut(elapsed: deadlineCtx.elapsed)
+        }
+
+        // Arm the progress handler with the remaining budget just before
+        // entering the SQL phase. Disarmed in all branches below so that
+        // write operations after search never see a stale armed handler.
+        await storage.configureSearchDeadline(deadlineCtx)
+
+        do {
+            let hits = try await searchEngine.searchHybrid(
+                queryEmbeddings: queryEmbeddings,
+                dims: dims,
+                queryText: query,
+                topK: topK,
+                filter: filter,
+                config: config.hybrid,
+                deadlineContext: deadlineCtx
+            )
+            await storage.configureSearchDeadline(nil)
+            return hits
+        } catch let e as SearchEngine.Error {
+            await storage.configureSearchDeadline(nil)
+            if case .deadlineExceeded(let elapsed) = e {
+                throw SwitchcraftStoreError.searchTimedOut(elapsed: elapsed)
+            }
+            throw e
+        } catch {
+            await storage.configureSearchDeadline(nil)
+            throw error
+        }
     }
 
     /// Score `passages` against `query`. Returns one MaxSim score per

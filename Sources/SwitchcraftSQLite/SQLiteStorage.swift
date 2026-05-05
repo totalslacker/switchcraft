@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import SwitchcraftCore
+import Switchcraft
+
+/// SQLITE_INTERRUPT result code (decimal 9). Defined here rather than
+/// relying on the C-header name to avoid brittle cross-module constant
+/// references.
+private let sqliteInterruptCode: Int32 = 9
 
 /// SQLite-backed implementation of `SwitchcraftStorage`.
 ///
@@ -27,6 +33,12 @@ public actor SQLiteStorage: SwitchcraftStorage {
         /// Dual-actor path for file-backed WAL databases.
         case fileBacked(SQLiteWriterActor, SQLiteReaderActor)
     }
+
+    /// Deadline context for the currently running search call. Set by
+    /// `configureSearchDeadline` at the top of `SearchEngine.searchHybrid`
+    /// and cleared when the call completes. Provides `searchStart` for
+    /// computing total elapsed time when translating `SQLITE_INTERRUPT`.
+    private var currentDeadlineContext: SearchDeadlineContext?
 
     public init(path: String) {
         self.path = path
@@ -188,6 +200,7 @@ public actor SQLiteStorage: SwitchcraftStorage {
     }
 
     public func documents(forChunkHash hash: String) async throws -> [DocumentRecord] {
+        try Task.checkCancellation()
         switch mode {
         case .closed:
             throw SQLiteError(code: 1, message: "storage is not open")
@@ -199,12 +212,20 @@ public actor SQLiteStorage: SwitchcraftStorage {
                 """)
             try stmt.bind([.text(hash)])
             var results: [DocumentRecord] = []
-            while try stmt.step() {
-                results.append(decodeDocument(stmt))
+            do {
+                while try stmt.step() {
+                    results.append(decodeDocument(stmt))
+                }
+            } catch {
+                try translateIfInterrupt(error)
             }
             return results
         case .fileBacked(_, let reader):
-            return try await reader.documents(forChunkHash: hash)
+            do {
+                return try await reader.documents(forChunkHash: hash)
+            } catch {
+                try translateIfInterrupt(error)
+            }
         }
     }
 
@@ -262,6 +283,7 @@ public actor SQLiteStorage: SwitchcraftStorage {
     }
 
     public func chunk(id: Int64) async throws -> ChunkRecord? {
+        try Task.checkCancellation()
         switch mode {
         case .closed:
             throw SQLiteError(code: 1, message: "storage is not open")
@@ -272,10 +294,18 @@ public actor SQLiteStorage: SwitchcraftStorage {
                 WHERE id = ?
                 """)
             try stmt.bind([.int(id)])
-            guard try stmt.step() else { return nil }
+            do {
+                guard try stmt.step() else { return nil }
+            } catch {
+                try translateIfInterrupt(error)
+            }
             return decodeChunk(stmt)
         case .fileBacked(_, let reader):
-            return try await reader.chunk(id: id)
+            do {
+                return try await reader.chunk(id: id)
+            } catch {
+                try translateIfInterrupt(error)
+            }
         }
     }
 
@@ -320,6 +350,7 @@ public actor SQLiteStorage: SwitchcraftStorage {
     }
 
     public func generations() async throws -> [GenerationRecord] {
+        try Task.checkCancellation()
         switch mode {
         case .closed:
             throw SQLiteError(code: 1, message: "storage is not open")
@@ -330,19 +361,27 @@ public actor SQLiteStorage: SwitchcraftStorage {
                 ORDER BY id ASC
                 """)
             var rows: [GenerationRecord] = []
-            while try stmt.step() {
-                rows.append(GenerationRecord(
-                    id: stmt.columnInt64(0),
-                    level: Int(stmt.columnInt64(1)),
-                    numEmbeddings: Int(stmt.columnInt64(2)),
-                    minChunkID: stmt.columnInt64(3),
-                    maxChunkID: stmt.columnInt64(4),
-                    created: Codecs.decodeDate(stmt.columnDouble(5))
-                ))
+            do {
+                while try stmt.step() {
+                    rows.append(GenerationRecord(
+                        id: stmt.columnInt64(0),
+                        level: Int(stmt.columnInt64(1)),
+                        numEmbeddings: Int(stmt.columnInt64(2)),
+                        minChunkID: stmt.columnInt64(3),
+                        maxChunkID: stmt.columnInt64(4),
+                        created: Codecs.decodeDate(stmt.columnDouble(5))
+                    ))
+                }
+            } catch {
+                try translateIfInterrupt(error)
             }
             return rows
         case .fileBacked(_, let reader):
-            return try await reader.generations()
+            do {
+                return try await reader.generations()
+            } catch {
+                try translateIfInterrupt(error)
+            }
         }
     }
 
@@ -386,6 +425,7 @@ public actor SQLiteStorage: SwitchcraftStorage {
     }
 
     public func buckets(forGeneration generationID: Int64) async throws -> [BucketRecord] {
+        try Task.checkCancellation()
         switch mode {
         case .closed:
             throw SQLiteError(code: 1, message: "storage is not open")
@@ -398,18 +438,26 @@ public actor SQLiteStorage: SwitchcraftStorage {
                 """)
             try stmt.bind([.int(generationID)])
             var rows: [BucketRecord] = []
-            while try stmt.step() {
-                rows.append(BucketRecord(
-                    id: stmt.columnInt64(0),
-                    generationID: stmt.columnInt64(1),
-                    center: stmt.columnBlob(2),
-                    indices: stmt.columnBlob(3),
-                    residuals: stmt.columnBlob(4)
-                ))
+            do {
+                while try stmt.step() {
+                    rows.append(BucketRecord(
+                        id: stmt.columnInt64(0),
+                        generationID: stmt.columnInt64(1),
+                        center: stmt.columnBlob(2),
+                        indices: stmt.columnBlob(3),
+                        residuals: stmt.columnBlob(4)
+                    ))
+                }
+            } catch {
+                try translateIfInterrupt(error)
             }
             return rows
         case .fileBacked(_, let reader):
-            return try await reader.buckets(forGeneration: generationID)
+            do {
+                return try await reader.buckets(forGeneration: generationID)
+            } catch {
+                try translateIfInterrupt(error)
+            }
         }
     }
 
@@ -427,12 +475,18 @@ public actor SQLiteStorage: SwitchcraftStorage {
             guard limit > 0, !query.trimmingCharacters(in: .whitespaces).isEmpty else {
                 return []
             }
+            // FTS5's MATCH grammar treats punctuation (".", "(", ":", quotes, etc.)
+            // as syntax. Sanitise by splitting on alphanumeric boundaries, then
+            // double-quoting each token so FTS5 reserved keywords (AND/OR/NOT/NEAR)
+            // can't be parsed as operators.
             let ftsTerms = query
                 .split { !$0.isLetter && !$0.isNumber }
                 .map { "\"\(String($0))\"" }
             guard !ftsTerms.isEmpty else { return [] }
             let ftsQuery = ftsTerms.joined(separator: " ")
             let clause = filter.lower(tableAlias: "d")
+            // bm25() returns lower = more relevant; negate so higher = better.
+            // Tie-break on uuid ascending for deterministic ordering (see ADR 008).
             let sql = """
                 SELECT d.uuid, -bm25(document_fts) AS score
                 FROM document_fts
@@ -447,15 +501,53 @@ public actor SQLiteStorage: SwitchcraftStorage {
             bindings.append(.int(Int64(limit)))
             try stmt.bind(bindings)
             var hits: [FullTextHit] = []
-            while try stmt.step() {
-                hits.append(FullTextHit(
-                    uuid: stmt.columnText(0),
-                    score: Float(stmt.columnDouble(1))
-                ))
+            do {
+                // Check cancellation before each step so that a cancelled task
+                // does not have to wait for an in-progress sqlite3_step to
+                // return before the CancellationError is observed.
+                while true {
+                    try Task.checkCancellation()
+                    guard try stmt.step() else { break }
+                    hits.append(FullTextHit(
+                        uuid: stmt.columnText(0),
+                        score: Float(stmt.columnDouble(1))
+                    ))
+                }
+            } catch {
+                try translateIfInterrupt(error)
             }
             return hits
         case .fileBacked(_, let reader):
-            return try await reader.searchFullText(query: query, limit: limit, filter: filter)
+            do {
+                return try await reader.searchFullText(query: query, limit: limit, filter: filter)
+            } catch {
+                try translateIfInterrupt(error)
+            }
+        }
+    }
+
+    // MARK: - Search Deadline
+
+    public func configureSearchDeadline(_ ctx: SearchDeadlineContext?) async {
+        currentDeadlineContext = ctx
+        func arm(_ conn: SQLiteConnection) {
+            if let ctx {
+                let sqlPhaseStart = ContinuousClock.now
+                let elapsed = sqlPhaseStart - ctx.searchStart
+                conn.progressState.sqlPhaseStart = sqlPhaseStart
+                conn.progressState.remainingBudget = max(.zero, ctx.deadline - elapsed)
+                conn.progressState.isActive = true
+            } else {
+                conn.progressState.isActive = false
+            }
+        }
+        switch mode {
+        case .closed:
+            break
+        case .inMemory(let conn):
+            arm(conn)
+        case .fileBacked(_, let reader):
+            await reader.configureProgressHandler(ctx)
         }
     }
 
@@ -470,6 +562,24 @@ public actor SQLiteStorage: SwitchcraftStorage {
         try stmt.bind([.text(hash)])
         guard try stmt.step() else { return nil }
         return decodeChunk(stmt)
+    }
+
+    /// Translate a `SQLiteError` with code `SQLITE_INTERRUPT` into
+    /// `SwitchcraftStoreError.searchTimedOut` using the stored deadline
+    /// context. For all other errors, rethrows unchanged.
+    ///
+    /// Translation only happens when `currentDeadlineContext` is non-nil.
+    /// If an interrupt arrives with no active deadline context (shouldn't
+    /// happen in normal use, but possible if a caller bypasses the search
+    /// pipeline), the original `SQLiteError` is rethrown unchanged rather
+    /// than emitting a misleading `searchTimedOut(elapsed: .zero)`.
+    private func translateIfInterrupt(_ error: Error) throws -> Never {
+        if let sqliteError = error as? SQLiteError,
+           sqliteError.code == sqliteInterruptCode,
+           let ctx = currentDeadlineContext {
+            throw SwitchcraftStoreError.searchTimedOut(elapsed: ContinuousClock.now - ctx.searchStart)
+        }
+        throw error
     }
 
     private func decodeDocument(_ stmt: SQLiteStatement) -> DocumentRecord {

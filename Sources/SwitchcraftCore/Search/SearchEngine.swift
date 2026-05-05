@@ -38,7 +38,8 @@ import Accelerate
 /// `adrs/007-search-vs-index-responsibility.md`.
 public actor SearchEngine {
 
-    /// Errors thrown by `SearchEngine` when input shapes are malformed.
+    /// Errors thrown by `SearchEngine` when input shapes are malformed
+    /// or a pre-SQLite deadline check fires.
     public enum Error: Swift.Error, Sendable, Equatable {
         /// `dims` was zero, negative, or odd. Q4 residuals pack two
         /// floats per byte so `dims` must be a positive even number.
@@ -51,6 +52,10 @@ public actor SearchEngine {
         case bucketSizeMismatch(pairs: Int, residualBytes: Int, dims: Int)
         /// A bucket's centre blob was not `dims * 4` bytes.
         case centerSizeMismatch(bytes: Int, expected: Int)
+        /// A pre-SQLite deadline check at the top of `searchHybrid`
+        /// found the budget already exhausted. Translated to
+        /// `SwitchcraftStoreError.searchTimedOut` by the caller.
+        case deadlineExceeded(elapsed: Duration)
     }
 
     private let storage: any SwitchcraftStorage
@@ -335,9 +340,23 @@ public actor SearchEngine {
         queryText: String,
         topK: Int,
         filter: StorageFilter = .all,
-        config: HybridConfig = HybridConfig()
+        config: HybridConfig = HybridConfig(),
+        deadlineContext: SearchDeadlineContext? = nil
     ) async throws -> [HybridHit] {
         guard topK > 0 else { return [] }
+
+        // Pre-phase deadline check. Must run before any storage access.
+        if let ctx = deadlineContext, ctx.isExpired {
+            throw Error.deadlineExceeded(elapsed: ctx.elapsed)
+        }
+
+        // Note: this method does NOT arm or disarm the backend's progress
+        // handler. Callers that want progress-handler timeout enforcement
+        // must call `await storage.configureSearchDeadline(ctx)` before
+        // calling this method and `await storage.configureSearchDeadline(nil)`
+        // after (on both success and error paths). `SwitchcraftStore.search()`
+        // owns the arm/disarm lifecycle. Direct callers of `searchHybrid`
+        // are responsible for the same contract.
 
         let trimmedQuery = queryText.trimmingCharacters(in: .whitespacesAndNewlines)
         let hasVector = !queryEmbeddings.isEmpty
@@ -345,6 +364,12 @@ public actor SearchEngine {
         if !hasVector && !hasText { return [] }
 
         // 1. Vector candidates (skipped if no embeddings).
+        // Check both task cancellation and wall-time deadline before the
+        // vector search (BLAS matmuls can run long on large indices).
+        try Task.checkCancellation()
+        if let ctx = deadlineContext, ctx.isExpired {
+            throw Error.deadlineExceeded(elapsed: ctx.elapsed)
+        }
         let vectorHits: [SearchHit]
         if hasVector {
             vectorHits = try await search(
@@ -358,6 +383,10 @@ public actor SearchEngine {
         }
 
         // 2. FTS candidates (skipped if no text).
+        try Task.checkCancellation()
+        if let ctx = deadlineContext, ctx.isExpired {
+            throw Error.deadlineExceeded(elapsed: ctx.elapsed)
+        }
         let ftsHits: [FullTextHit]
         if hasText {
             ftsHits = try await storage.searchFullText(
@@ -373,6 +402,10 @@ public actor SearchEngine {
         //    scores. Dictionary iteration order is unspecified, but the
         //    final `(score DESC, uuid ASC)` sort below is a total order
         //    so the fused output is deterministic regardless.
+        try Task.checkCancellation()
+        if let ctx = deadlineContext, ctx.isExpired {
+            throw Error.deadlineExceeded(elapsed: ctx.elapsed)
+        }
         struct Provenance {
             var vectorRank: Int?
             var vectorScore: Float?

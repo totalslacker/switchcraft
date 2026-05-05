@@ -26,13 +26,26 @@ public struct SearchConfig: Sendable, Hashable {
     /// it to filter low-confidence hits.
     public var threshold: Float
 
+    /// Maximum wall-time budget for a single `SwitchcraftStore.search()`
+    /// call, measured from the instant `search()` is entered. When
+    /// elapsed time reaches this value the search is aborted with
+    /// `SwitchcraftStoreError.searchTimedOut`. Default is 5 seconds.
+    /// Override per-call via `SwitchcraftStore.search(deadline:)`.
+    public var searchDeadline: Duration
+
     /// Build a `SearchConfig`. All arguments default to upstream
     /// Witchcraft's reference constants.
-    public init(k: Int = 32, tPrime: Int = 40_000, threshold: Float = 0) {
+    public init(
+        k: Int = 32,
+        tPrime: Int = 40_000,
+        threshold: Float = 0,
+        searchDeadline: Duration = .seconds(5)
+    ) {
         precondition(k > 0, "k must be positive")
         precondition(tPrime > 0, "tPrime must be positive")
         self.k = k
         self.tPrime = tPrime
         self.threshold = threshold
+        self.searchDeadline = searchDeadline
     }
 }
