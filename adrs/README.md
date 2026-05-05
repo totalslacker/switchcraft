@@ -25,3 +25,4 @@ ADRs document significant design decisions for Switchcraft. Each file follows th
 - [017 — Per-op precision routing in T5MetalEmbedder](017-per-op-precision-routing.md)
 - [018 — Separate ObjC clang target for the CoreML exception bridge](018-objc-clang-target-for-exception-bridge.md)
 - [019 — SQLiteStorage writer + reader actor split](019-sqlite-writer-reader-split.md)
+- [020 — Search timeout and cancellation design](020-search-timeout-and-cancellation.md)
