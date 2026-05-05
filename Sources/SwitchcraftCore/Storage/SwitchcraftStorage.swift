@@ -105,4 +105,22 @@ public protocol SwitchcraftStorage: Sendable {
         limit: Int,
         filter: StorageFilter
     ) async throws -> [FullTextHit]
+
+    // MARK: - Search deadline (optional, backend-specific)
+
+    /// Configure a per-search-call deadline on the backend.
+    ///
+    /// Called at the top of `SearchEngine.searchHybrid` with the
+    /// `SearchDeadlineContext` for the current call. Backends that support
+    /// in-flight interruption (e.g. `SQLiteStorage` via
+    /// `sqlite3_progress_handler`) override this to arm their interrupt
+    /// mechanism with the remaining budget. Backends that cannot interrupt
+    /// in-flight queries may leave the default no-op implementation.
+    ///
+    /// Pass `nil` to disarm any previously configured deadline.
+    func configureSearchDeadline(_ ctx: SearchDeadlineContext?) async
+}
+
+extension SwitchcraftStorage {
+    public func configureSearchDeadline(_ ctx: SearchDeadlineContext?) async {}
 }
