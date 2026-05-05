@@ -236,6 +236,11 @@ public actor SwitchcraftStore {
             throw SwitchcraftStoreError.searchTimedOut(elapsed: deadlineCtx.elapsed)
         }
 
+        // Arm the progress handler with the remaining budget just before
+        // entering the SQL phase. Disarmed in all branches below so that
+        // write operations after search never see a stale armed handler.
+        await storage.configureSearchDeadline(deadlineCtx)
+
         do {
             let hits = try await searchEngine.searchHybrid(
                 queryEmbeddings: queryEmbeddings,
