@@ -70,3 +70,13 @@ fastlane/test_output
 .fabrik
 
 scripts/__pycache__/
+
+# Locally-regenerated reference fixtures (per ADR 013). Operators
+# regenerate these via scripts/witchcraft-fixture-export.patch against
+# a pinned Witchcraft commit; not committed to keep the repo small.
+Tests/Fixtures/reference_embeddings.bin
+Tests/Fixtures/reference_embeddings.json
+Tests/Fixtures/reference_centroids.bin
+Tests/Fixtures/reference_centroids.json
+Tests/Fixtures/reference_residuals.bin
+Tests/Fixtures/reference_residuals.json

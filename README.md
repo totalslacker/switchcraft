@@ -40,8 +40,10 @@ Add the package to your `Package.swift`:
     dependencies: [
         .product(name: "Switchcraft", package: "switchcraft"),
         .product(name: "SwitchcraftSQLite", package: "switchcraft"),
-        // Optional — only if you want the bundled CoreML embedder:
-        .product(name: "SwitchcraftCoreML", package: "switchcraft"),
+        // Pick whichever embedder backend you want — see "Choosing an embedder"
+        // below. Both can be linked side-by-side; consumers pick at runtime.
+        .product(name: "SwitchcraftCoreML", package: "switchcraft"),  // CoreML / .mlpackage
+        .product(name: "SwitchcraftMetal",  package: "switchcraft"),  // Metal / GGUF
     ]
 )
 ```
@@ -50,8 +52,9 @@ Add the package to your `Package.swift`:
 
 Switchcraft is `Embedder`-agnostic. The snippet below uses a deterministic
 toy embedder so it compiles and runs without any model assets — useful for
-exploring the API surface. Production callers wire in
-[`T5CoreMLEmbedder`](#coreml-setup) (see below).
+exploring the API surface. Production callers wire in either
+[`T5CoreMLEmbedder`](#coreml-setup) or [`T5MetalEmbedder`](#metal-embedder-setup);
+see [Choosing an embedder](#choosing-an-embedder) for the trade-off.
 
 ```swift
 import Switchcraft
@@ -99,8 +102,8 @@ exported as a public type (see ADR 009(j)).
 |---------|---------|
 | `Switchcraft` | Umbrella module: `SwitchcraftStore` + `Embedder` + `StoreConfig`. Most consumers `import Switchcraft`. |
 | `SwitchcraftSQLite` | SQLite + FTS5 storage backend and the `SwitchcraftStore.sqlite(...)` factory. |
-| `SwitchcraftCoreML` | `T5CoreMLEmbedder` — a real `Embedder` backed by the `google/xtr-base-en` CoreML model. |
-| `SwitchcraftMetal` | Phase 2 Metal embedder support — GGUF v3 reader + (forthcoming) Q4_K matmul / RMSNorm / SDPA kernels and `T5MetalEmbedder`. Requires the Q4-quantised GGUF asset gated by `SWITCHCRAFT_XTR_GGUF`. |
+| `SwitchcraftCoreML` | `T5CoreMLEmbedder` — `Embedder` backed by an FP32 CoreML `.mlpackage` of the `google/xtr-base-en` encoder + 768→128 projection. Asset gated by `SWITCHCRAFT_XTR_MLPACKAGE`. |
+| `SwitchcraftMetal` | `T5MetalEmbedder` — `Embedder` backed by a Q4_K-quantised GGUF of the same encoder, run through Switchcraft's own Metal kernels (`Q4KMatMul`, `RMSNorm`, `Softmax`, `FP32MatMul`, `GatedGELU`, `L2Norm`, `ResidualAdd`). Asset gated by `SWITCHCRAFT_XTR_GGUF`. |
 | `SwitchcraftStorageTesting` | A reusable conformance suite for adopters writing custom `SwitchcraftStorage` backends. Test-support only. |
 
 `SwitchcraftCore` is an internal target (re-exported by `Switchcraft`) and is
@@ -108,6 +111,47 @@ intentionally not exposed as a top-level product (per ADR 009(i)). A
 backend lives in its own target so consumers only link the frameworks they
 actually use (no SQLite linkage for in-memory stores; no CoreML linkage for
 callers that bring their own embedder).
+
+## Choosing an embedder
+
+`SwitchcraftCoreML` and `SwitchcraftMetal` ship side-by-side in v0.1.0.
+Both implement the same `Embedder` protocol, both produce 128-dim
+L2-normalised vectors from the same `google/xtr-base-en` checkpoint, and
+both pass their respective parity gates. The differences are operational:
+
+| Property | `T5CoreMLEmbedder` (CoreML) | `T5MetalEmbedder` (Metal) |
+|---|---|---|
+| **Asset format** | `.mlpackage` directory | Q4_K-quantised GGUF |
+| **On-disk size** | ~430 MB (FP32) — ~110 MB (INT8w opt-in variant) | ~62 MB |
+| **Resident memory** | ~430 MB (FP32) — ~110 MB (INT8w) | ~80 MB |
+| **Compute precision** | FP32 throughout (FP16 outputs) | FP32 throughout (Q4_K weights → FP32 dequant) |
+| **Compute backend** | Apple's CoreML runtime (`computeUnits: .all` selects CPU/GPU/ANE) | Switchcraft's own Metal kernels (GPU/CPU; no ANE) |
+| **Parity contract** | Mean cosine ≥ 0.999 vs PyTorch FP32 reference | Per-token min cosine `0.9999996` vs Witchcraft Q4K (`maxAbs = 0.000216`) |
+| **Search quality (NDCG@10 NFCorpus)** | In Witchcraft's published `[0.31, 0.33]` band | `0.336` (Metal-specific `[0.31, 0.34]` band per ADR 014; FP32-throughout lifts ceiling slightly above ggml's mixed-precision 0.33) |
+| **`modelIdentifier`** | `google/xtr-base-en@v1` (FP32) / `google/xtr-base-en@v1-int8w` (INT8w) | `google/xtr-base-en@v1+gguf` |
+| **ANE access** | Yes (CoreML can target the Neural Engine) | No (Metal kernels are GPU/CPU; the `Embedder` seam preserves a future CoreML-FP16 path) |
+| **Asset acquisition** | `scripts/convert-xtr-to-coreml.py` (Python 3.11 + PyTorch + coremltools) — or the [v0.1.0 release](https://github.com/totalslacker/switchcraft/releases/tag/v0.1.0) prebuilt `xtr-base-en.mlpackage.zip` | Witchcraft `quantize-tool` (Rust + Candle) — or the [v0.1.0 release](https://github.com/totalslacker/switchcraft/releases/tag/v0.1.0) prebuilt `xtr-base-en.q4_k.gguf` |
+
+Notes on the trade-off:
+
+- **Disk + RAM**: Metal is ~7× smaller than the FP32 CoreML asset,
+  ~1.8× smaller than the INT8w CoreML variant. If the asset weight on
+  disk or in RAM matters (mobile, edge, OTA bundles), Metal is the
+  clear win.
+- **ANE today**: only CoreML can target the Apple Neural Engine. The
+  `T5MetalEmbedder` orchestration is GPU/CPU only by construction. The
+  `Embedder` protocol seam in ADR 009 is what keeps a future
+  CoreML-FP16-on-ANE path open even with Metal as the dominant backend.
+- **Search quality**: both backends produce results inside Witchcraft's
+  published NDCG band. Metal lands marginally higher because it skips
+  ggml's mixed-precision compute and keeps everything FP32; this is a
+  measurement artefact, not a meaningful retrieval-quality difference.
+- **Mixing**: a single `SwitchcraftStore` is locked to whichever
+  embedder indexed it (different `modelIdentifier` values per row, per
+  ADR 010(f)). Switching backends requires re-embedding the corpus.
+
+Switchcraft does not pick a default. Both backends are first-class at
+v0.1.0; consumers choose based on the trade-off above.
 
 ## CoreML setup
 
@@ -122,14 +166,14 @@ Two variants are supported:
 
 | Variant | Asset | Compute | Use case | Env var | `modelIdentifier` |
 |---|---|---|---|---|---|
-| **FP32 (default)** | `xtr-base-en.mlpackage` (~430 MB) | FP32 GPU/CPU | Maximum precision; production default | `SWITCHCRAFT_XTR_MLPACKAGE` | `google/xtr-base-en@v1` |
+| **FP32 (parity baseline)** | `xtr-base-en.mlpackage` (~430 MB) | FP32 GPU/CPU | Maximum precision; reference for both intra-CoreML and cross-stack parity | `SWITCHCRAFT_XTR_MLPACKAGE` | `google/xtr-base-en@v1` |
 | **INT8 weight-only** | `xtr-base-en-int8w.mlpackage` (~110 MB) | FP32 GPU/CPU | Size-constrained (iOS, edge, OTA); opt-in | `SWITCHCRAFT_XTR_MLPACKAGE_INT8W` | `google/xtr-base-en@v1-int8w` |
 
 The INT8w variant compresses Linear-op weights to INT8 with per-channel
 scales; weights are dequantised back to FP32 just before each matmul,
 so compute precision is unchanged and the within-stack parity contract
 is mean cosine similarity ≥ 0.998 vs the PyTorch FP32 reference. It
-ships **alongside** the FP32 default — neither variant replaces the
+ships **alongside** the FP32 baseline — neither variant replaces the
 other. See [ADR 010(i)](adrs/010-embedder-model-and-asset-distribution.md)
 for the full contract.
 
@@ -149,15 +193,22 @@ the full distribution rationale.
 
 ### 1. Build the CoreML assets
 
-Producing the FP32 default is a one-time step. The INT8w variant is
+Producing the FP32 baseline is a one-time step. The INT8w variant is
 optional and is produced by a second post-processing step against the
 FP32 asset.
+
+> **Easy path:** the [v0.1.0 release](https://github.com/totalslacker/switchcraft/releases/tag/v0.1.0)
+> ships a prebuilt FP32 `xtr-base-en.mlpackage.zip` alongside the
+> matching `xtr-base-en.tokenizer.json`. Unzip the `.mlpackage` and
+> point `SWITCHCRAFT_XTR_MLPACKAGE` at it. The build steps below are
+> only needed if you want to pin a different HuggingFace revision or
+> regenerate from scratch.
 
 ```bash
 # 1. Install the conversion-script dependencies (used by both scripts).
 pip install -r scripts/requirements-coreml.txt
 
-# 2. Build the FP32 default. Use the HuggingFace commit SHA you want
+# 2. Build the FP32 baseline. Use the HuggingFace commit SHA you want
 #    pinned into the asset's metadata (recorded in ADR 010).
 python3 scripts/convert-xtr-to-coreml.py \
     --revision <huggingface-commit-sha> \
@@ -221,7 +272,7 @@ import SwitchcraftCoreML
 
 let tokenizer = try Tokenizer(contentsOf: "/path/to/xtr-base-en.tokenizer.json")
 
-// FP32 default — maximum precision.
+// FP32 baseline — maximum precision.
 let fp32Embedder = try await T5CoreMLEmbedder(
     modelURL: URL(fileURLWithPath: "/path/to/xtr-base-en.mlpackage"),
     tokenizer: tokenizer,
@@ -263,34 +314,39 @@ filter that strips low-signal positions (see
 
 ## Metal embedder setup
 
-The `SwitchcraftMetal` target is the Phase 2 port of ggml's T5
-inference to Swift + Metal (umbrella issue #57). It ships alongside —
-not in place of — the CoreML embedder. Sub-issue #59 landed the GGUF
-reader + Q4_K CPU dequantisation reference; sub-issues #60–#63 added
-the kernels (Q4_K matmul, RMSNorm, softmax, residual add, gated-GELU,
-L2 norm); sub-issue #64 lands the FP32 attention/projection matmul and
-the `T5MetalEmbedder` orchestrator.
+The `SwitchcraftMetal` target ports ggml's T5 inference to Swift +
+Metal (umbrella issue #57, landed at v0.1.0). Switchcraft's own Metal
+kernels — `Q4KMatMul`, `RMSNorm`, `Softmax`, `FP32MatMul`,
+`GatedGELU`, `L2Norm`, `ResidualAdd` — drive the encoder forward pass;
+no ggml or llama.cpp runtime dependency.
 
 ### The asset
 
-The Metal embedder consumes a Q4-quantised GGUF v3 file (~80 MB)
-produced by Witchcraft's `quantize-tool` against the upstream
-`google/xtr-base-en` weights. The asset is **not committed** for the
-same size and Git LFS reasons as the CoreML `.mlpackage`; see
-[ADR 010(j)](adrs/010-embedder-model-and-asset-distribution.md) and
-[ADR 016](adrs/016-gguf-asset-distribution.md) for the distribution
-rationale.
+The Metal embedder consumes a Q4_K-quantised GGUF (~62 MB) of the same
+`google/xtr-base-en` encoder + 768→128 projection. The reader accepts
+GGUF v2 and v3 (per [ADR 016](adrs/016-gguf-asset-distribution.md));
+the prebuilt asset shipped with v0.1.0 is v3.
 
-The asset acquisition pipeline is documented in
-[`docs/porting/ggml-t5.md`](docs/porting/ggml-t5.md) §"Asset
-acquisition". In short: run the Witchcraft `quantize-tool` (Candle-
-backed) against the FP32 weights to produce `xtr-base-en.gguf`, place
-it anywhere convenient.
+> **Easy path:** the [v0.1.0 release](https://github.com/totalslacker/switchcraft/releases/tag/v0.1.0)
+> ships a prebuilt `xtr-base-en.q4_k.gguf` (SHA-256 in the release
+> notes). Download, place it anywhere, and point
+> `SWITCHCRAFT_XTR_GGUF` at it. The same `xtr-base-en.tokenizer.json`
+> is used by both backends.
+
+If you want to rebuild from scratch, the asset acquisition pipeline is
+documented in [`docs/porting/ggml-t5.md`](docs/porting/ggml-t5.md)
+§"GGUF acquisition pipeline" — in short, run the Witchcraft
+`quantize-tool` (Candle-backed) against the FP32 weights, observing
+the `linear.weight` FP32 carve-out per
+[ADR 017](adrs/017-per-op-precision-routing.md). The asset is **not
+committed** to this repository for the same size + Git-LFS reasons as
+the CoreML `.mlpackage`; see [ADR 010(j)](adrs/010-embedder-model-and-asset-distribution.md)
+and [ADR 016](adrs/016-gguf-asset-distribution.md).
 
 ### Running the asset-gated tests
 
 ```bash
-export SWITCHCRAFT_XTR_GGUF=$PWD/Tests/Fixtures/xtr-base-en.gguf
+export SWITCHCRAFT_XTR_GGUF=/path/to/xtr-base-en.q4_k.gguf
 # Optional — enables bit-equal Q4_K decode parity vs an FP32 reference
 # dump (see ADR 016 §"Bit-equal Q4_K decode").
 # export SWITCHCRAFT_XTR_GGUF_FP32_REF=$PWD/Tests/Fixtures/xtr-base-en.fp32-ref.json
@@ -298,10 +354,9 @@ swift test --filter SwitchcraftMetalTests
 ```
 
 When `SWITCHCRAFT_XTR_GGUF` is unset or points at a non-existent path,
-the round-trip parity suite skips cleanly via Swift Testing's
-`.enabled(if:)` trait — fresh checkouts stay green. Header-parsing,
-mixed-dtype, and Q4_K decode unit tests run unconditionally on
-in-memory fixtures.
+the asset-gated suites skip cleanly via Swift Testing's `.enabled(if:)`
+trait — fresh checkouts stay green. Header-parsing, mixed-dtype, and
+Q4_K decode unit tests run unconditionally on in-memory fixtures.
 
 ### Using `T5MetalEmbedder`
 
@@ -310,7 +365,7 @@ import SwitchcraftCore
 import SwitchcraftCoreML
 @_spi(SwitchcraftMetal) import SwitchcraftMetal
 
-let tokenizerURL = URL(fileURLWithPath: "Tests/Fixtures/xtr-base-en.tokenizer.json")
+let tokenizerURL = URL(fileURLWithPath: "/path/to/xtr-base-en.tokenizer.json")
 let tokenizer = try Tokenizer(contentsOf: tokenizerURL.path)
 
 guard let ggufPath = ProcessInfo.processInfo.environment["SWITCHCRAFT_XTR_GGUF"] else {
@@ -341,20 +396,24 @@ do {
 
 The Metal embedder is `@_spi(SwitchcraftMetal) public` rather than full
 public — see [ADR 016 §"`@_spi(SwitchcraftMetal)` import pattern"](adrs/016-gguf-asset-distribution.md).
-Per-op precision routing follows [ADR 017](adrs/017-per-op-precision-routing.md);
-the cross-stack ≥ 0.99999 cosine gate against PyTorch FP32 is the
-correctness contract.
+Per-op precision routing follows [ADR 017](adrs/017-per-op-precision-routing.md).
 
-The default embedder for adopters remains
-[`T5CoreMLEmbedder`](#coreml-setup); `T5MetalEmbedder` ships alongside
-it for callers who want the GGUF-asset path or want to evaluate the
-NDCG/perf gates documented below.
+### Parity numbers (v0.1.0)
+
+- **Cross-stack tolerance** (`T5MetalEmbedder` vs Witchcraft Q4K
+  reference): observed `maxAbs = 0.000216`, `minCosine = 0.9999996`.
+  Calibrated in-tree constant `0.0005`. See ADR 010(h).
+- **NDCG@10** on NFCorpus test split: `0.336`. Metal-specific band
+  `[0.31, 0.34]` per ADR 014 (Metal runs FP32 throughout vs ggml's
+  mixed-precision path; lower bound stays at Witchcraft's published
+  `0.31` minimum-quality gate, upper bound calibrated to `0.34` to
+  accommodate the FP32-throughout lift).
 
 ### Running the NFCorpus parity gate end-to-end
 
-The NDCG@10 ∈ [0.31, 0.33] gate (issue #65) exercises the full pipeline
-through `T5MetalEmbedder` against the NFCorpus test split. It requires
-both the GGUF asset and the NFCorpus dataset:
+The NDCG@10 gate (issue #65, validated in #75) exercises the full
+pipeline through `T5MetalEmbedder` against the NFCorpus test split.
+It requires both the GGUF asset and the NFCorpus dataset:
 
 ```bash
 # 1. Fetch the NFCorpus test split (academic-use license; not committed).
@@ -362,7 +421,7 @@ both the GGUF asset and the NFCorpus dataset:
 export SWITCHCRAFT_NFCORPUS_DIR=/path/to/nfcorpus
 
 # 2. Point at the GGUF asset (see "The asset" above).
-export SWITCHCRAFT_XTR_GGUF=$PWD/Tests/Fixtures/xtr-base-en.gguf
+export SWITCHCRAFT_XTR_GGUF=/path/to/xtr-base-en.q4_k.gguf
 
 # 3. Run the Metal NDCG gate (multi-minute one-time index build).
 swift test --filter NFCorpusMetalBenchmark
@@ -372,8 +431,10 @@ When either env var is unset or Metal is unavailable, the suite skips
 cleanly. The cross-stack parity gate
 (`CrossStackEmbeddingParityMetalTests`) follows the same shape and
 additionally requires `Tests/Fixtures/reference_embeddings.{bin,json}`
-to be present (regenerated locally per
-[ADR 013](adrs/013-reference-fixture-provenance.md); not committed).
+to be present. Those fixtures are regenerable locally via
+[`scripts/witchcraft-fixture-export.patch`](scripts/witchcraft-fixture-export.patch)
+per [ADR 013](adrs/013-reference-fixture-provenance.md); they are
+gitignored to keep the repo small.
 
 ## Running the tests
 
