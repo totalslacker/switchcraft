@@ -321,10 +321,10 @@ public actor T5CoreMLEmbedder: Embedder {
         let firstFrames = callStack.prefix(5)
 
         coreMLLogger.error(
-            "🔴 [COREML-CRASH] name=\(name) reason=\(reason) input_len=\(inputLength)"
+            "🔴 [COREML-CRASH] name=\(name, privacy: .public) reason=\(reason, privacy: .public) input_len=\(inputLength, privacy: .public)"
         )
         for frame in firstFrames {
-            coreMLLogger.error("\(frame)")
+            coreMLLogger.error("\(frame, privacy: .public)")
         }
 
         appendJSONLRow(
@@ -361,18 +361,17 @@ public actor T5CoreMLEmbedder: Embedder {
         line += "\n"
         guard let lineData = line.data(using: .utf8) else { return }
 
-        let path = url.path
-        if !FileManager.default.fileExists(atPath: path) {
-            FileManager.default.createFile(atPath: path, contents: nil)
+        if !FileManager.default.fileExists(atPath: url.path) {
+            FileManager.default.createFile(atPath: url.path, contents: nil)
         }
-        guard let handle = FileHandle(forWritingAtPath: path) else { return }
+        guard let handle = try? FileHandle(forWritingTo: url) else { return }
         defer { try? handle.close() }
-        handle.seekToEndOfFile()
-        handle.write(lineData)
+        _ = try? handle.seekToEnd()
+        try? handle.write(contentsOf: lineData)
     }
 }
 
-// Alphabetical CodingKeys so JSONEncoder.sortedKeys produces deterministic output.
+// JSONL row appended by `appendJSONLRow`; key order is sorted by `JSONEncoder.outputFormatting = .sortedKeys`.
 private struct CoreMLFailureLogEntry: Encodable {
     let callStack: [String]
     let inputLength: Int
