@@ -41,6 +41,12 @@ public actor Indexer {
         /// The expected LSM invariant is that each chunkID appears in at
         /// most one active generation at any given time.
         case rehydrationConflict(chunkID: Int64)
+        /// A bucket in storage is structurally invalid and the ledger
+        /// cannot be safely reconstructed. Possible causes: the center
+        /// blob is empty, residuals length does not equal
+        /// `pairs.count * dims`, or two buckets disagree on the
+        /// embedding dimension (which must be fixed per database).
+        case rehydrationBucketCorrupt(generationID: Int64)
     }
 
     // MARK: - State
@@ -89,6 +95,9 @@ public actor Indexer {
     ///
     /// - Throws: `Indexer.Error.rehydrationConflict` if the same chunkID
     ///   appears in two different active generations (storage corruption);
+    ///   `Indexer.Error.rehydrationBucketCorrupt` if a bucket has an
+    ///   empty center blob, a residuals blob of the wrong length, or a
+    ///   dims value that disagrees with other buckets in the database;
     ///   any error thrown by `storage.generations()` or
     ///   `storage.buckets(forGeneration:)`.
     ///
@@ -121,12 +130,20 @@ public actor Indexer {
             let buckets = try await storage.buckets(forGeneration: gen.id)
             for bucket in buckets {
                 let center = Indexer.decodeFloat32LE(bucket.center)
-                guard !center.isEmpty else { continue }
+                guard !center.isEmpty else {
+                    throw Error.rehydrationBucketCorrupt(generationID: gen.id)
+                }
                 let d = center.count
+                if let existing = inferredDims, existing != d {
+                    throw Error.rehydrationBucketCorrupt(generationID: gen.id)
+                }
                 inferredDims = d
 
                 let pairs = try IndicesCodec.decode(bucket.indices)
                 let residuals = Q4Codec.decodeResiduals(bucket.residuals)
+                guard residuals.count == pairs.count * d else {
+                    throw Error.rehydrationBucketCorrupt(generationID: gen.id)
+                }
 
                 for (i, pair) in pairs.enumerated() {
                     let chunkID = Int64(pair.chunkID)
