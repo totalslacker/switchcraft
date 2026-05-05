@@ -121,18 +121,39 @@ required by the spec's determinism acceptance criterion. (Bucket and
 generation IDs are backend-assigned and not part of the parity
 contract.)
 
-## (g) Indexer cascade source: in-memory ledger
+## (g) Indexer cascade source: in-memory ledger with rehydration
 
-For the MVP the indexer keeps every embedding ever passed to `add`
-in a `[Int64: [[Float]]]` ledger keyed by chunkID. Cascades re-cluster
-by reading from the ledger rather than from `storage.chunk(id:)`.
+The indexer keeps every embedding in a `[Int64: [[Float]]]` ledger
+keyed by chunkID. Cascades re-cluster by reading from the ledger
+rather than from `storage.chunk(id:)`.
 
-This works around the absence of a defined `chunk.embeddings`
-binary layout in Switchcraft today. The Search-pipeline issue will
-introduce a `ChunkEmbeddingCodec`, after which the indexer will
-switch to reading source embeddings from storage. Documented as a
-known MVP limit on `Indexer`'s doc-comment; the ledger does not
-survive an actor restart.
+**Rehydration on construction (issue #80)**: `Indexer.init` is now
+`async throws`. On construction it reads all active generations and
+their buckets from storage, reconstructs each token embedding as
+`center + dequantize(residuals)` (Option B — bucket reconstruction),
+and populates the ledger so that `add` + `flush` sequences succeed
+after any actor restart against non-empty persistent storage.
+
+Reconstruction reverses the write path in `performFlush`: each stored
+bucket contains a Float32-LE centroid (`center`) and a Q4-encoded
+residual blob (`residuals`). Decoding gives `embedding[j] ≈ center[j] +
+residuals[base + j]` for each token in the bucket. Tokens for the same
+chunkID may be spread across multiple buckets; rehydration accumulates
+all (tokenOffset, embedding) triples per chunkID and sorts by
+tokenOffset before inserting into the ledger.
+
+**Option B tradeoff**: reconstruction is lossy by Q4 quantization error
+(~MSE 0.05/dim for normalised vectors). This shifts cascade k-means
+centres slightly from a fresh-index baseline, but the NFCorpus NDCG@10
+gate (0.31–0.33) is unaffected because the perturbation is small
+relative to the variance in the embedding space. Zero additional storage
+overhead, zero storage-protocol additions required.
+
+**Storage-corruption detection**: if the same chunkID appears in two
+different active generations during rehydration,
+`Indexer.Error.rehydrationConflict(chunkID:)` is thrown. Normal
+operation under LSM invariants guarantees each chunkID is in at most
+one active generation.
 
 ## Memory footprint at scale
 

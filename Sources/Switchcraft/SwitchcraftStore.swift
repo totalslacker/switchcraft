@@ -31,7 +31,7 @@ public actor SwitchcraftStore {
 
     private let storage: any SwitchcraftStorage
     private let embedder: any Embedder
-    private let indexer: Indexer
+    private var indexer: Indexer!
     private let searchEngine: SearchEngine
     public let config: StoreConfig
 
@@ -41,11 +41,9 @@ public actor SwitchcraftStore {
 
     /// Build a store over any `SwitchcraftStorage`.
     ///
-    /// Calls `storage.open()`. The storage must not have generations from
-    /// a prior session that aren't represented in the in-memory indexer
-    /// ledger if the caller intends to add new documents — that scenario
-    /// can throw `Indexer.Error.ledgerOutOfSync` on the next flush. A
-    /// reopened store can serve `search` against the existing index.
+    /// Opens storage and rehydrates the indexer's in-memory ledger from any
+    /// existing generations, so a reopened store can immediately serve both
+    /// `search` and `add` without `Indexer.Error.ledgerOutOfSync`.
     ///
     /// - Parameters:
     ///   - storage: backend implementation of `SwitchcraftStorage`.
@@ -55,7 +53,7 @@ public actor SwitchcraftStore {
     ///     fusion stages. Defaults match upstream Witchcraft.
     /// - Throws: `SwitchcraftStoreError.invalidEmbeddingDimensions` if the
     ///   embedder reports a non-positive or odd `dims`; any error thrown
-    ///   by `storage.open()`.
+    ///   by `storage.open()` or `Indexer.init`.
     public init(
         storage: any SwitchcraftStorage,
         embedder: any Embedder,
@@ -67,9 +65,11 @@ public actor SwitchcraftStore {
         self.storage = storage
         self.embedder = embedder
         self.config = config
-        self.indexer = Indexer(storage: storage, config: config.indexer)
         self.searchEngine = SearchEngine(storage: storage, config: config.search)
+        // Open storage before constructing the Indexer so that rehydration
+        // queries (generations, buckets) find an open connection.
         try await storage.open()
+        self.indexer = try await Indexer(storage: storage, config: config.indexer)
     }
 
     // MARK: - Document management

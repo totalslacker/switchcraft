@@ -43,7 +43,7 @@ struct SearchEngineTests {
     ) {
         let storage = InMemoryStorage()
         try await storage.open()
-        let indexer = Indexer(
+        let indexer = try await Indexer(
             storage: storage,
             config: IndexerConfig.testing(l0Capacity: 1024, lsmFanout: 4)
         )
@@ -196,7 +196,7 @@ struct SearchEngineTests {
         let dims = 8
         let storage = InMemoryStorage()
         try await storage.open()
-        let indexer = Indexer(
+        let indexer = try await Indexer(
             storage: storage,
             config: IndexerConfig.testing(l0Capacity: 1024, lsmFanout: 4)
         )

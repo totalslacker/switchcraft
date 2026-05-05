@@ -62,7 +62,7 @@ struct IndexerTests {
     func generationCoversAddedChunks() async throws {
         let storage = InMemoryStorage()
         try await storage.open()
-        let indexer = Indexer(storage: storage, config: .testing(l0Capacity: 4, lsmFanout: 4))
+        let indexer = try await Indexer(storage: storage, config: .testing(l0Capacity: 4, lsmFanout: 4))
         var rng = SplitMix64(seed: 1)
 
         _ = try await Self.populate(
@@ -82,7 +82,7 @@ struct IndexerTests {
     func bucketCountAndCoverage() async throws {
         let storage = InMemoryStorage()
         try await storage.open()
-        let indexer = Indexer(storage: storage, config: .testing(l0Capacity: 4, lsmFanout: 4))
+        let indexer = try await Indexer(storage: storage, config: .testing(l0Capacity: 4, lsmFanout: 4))
         var rng = SplitMix64(seed: 2)
 
         let chunks = try await Self.populate(
@@ -123,7 +123,7 @@ struct IndexerTests {
         let dims = 16
         let storage = InMemoryStorage()
         try await storage.open()
-        let indexer = Indexer(storage: storage, config: .testing(l0Capacity: 4, lsmFanout: 4))
+        let indexer = try await Indexer(storage: storage, config: .testing(l0Capacity: 4, lsmFanout: 4))
         var rng = SplitMix64(seed: 3)
 
         let chunks = try await Self.populate(
@@ -173,7 +173,7 @@ struct IndexerTests {
     func indicesAreAscending() async throws {
         let storage = InMemoryStorage()
         try await storage.open()
-        let indexer = Indexer(storage: storage, config: .testing(l0Capacity: 4, lsmFanout: 4))
+        let indexer = try await Indexer(storage: storage, config: .testing(l0Capacity: 4, lsmFanout: 4))
         var rng = SplitMix64(seed: 4)
 
         _ = try await Self.populate(
@@ -202,7 +202,7 @@ struct IndexerTests {
         let dims = 16
         let storage = InMemoryStorage()
         try await storage.open()
-        let indexer = Indexer(storage: storage, config: .testing(l0Capacity: 4, lsmFanout: 4))
+        let indexer = try await Indexer(storage: storage, config: .testing(l0Capacity: 4, lsmFanout: 4))
         var rng = SplitMix64(seed: 5)
 
         _ = try await Self.populate(
@@ -229,7 +229,7 @@ struct IndexerTests {
         try await storage.open()
         // testing config: l0Cap=4, fanout=2 → cap(0) = 8, cap(1) = 16, cap(2) = 32.
         let config = IndexerConfig.testing(l0Capacity: 4, lsmFanout: 2)
-        let indexer = Indexer(storage: storage, config: config)
+        let indexer = try await Indexer(storage: storage, config: config)
         var rng = SplitMix64(seed: 6)
 
         // Each flush adds 4 single-token chunks. Track expected level
@@ -310,7 +310,7 @@ struct IndexerTests {
         func buildBucketBlobs() async throws -> [(Data, Data, Data)] {
             let storage = InMemoryStorage()
             try await storage.open()
-            let indexer = Indexer(storage: storage, config: config)
+            let indexer = try await Indexer(storage: storage, config: config)
             for (chunkID, flat) in inputs {
                 try await indexer.add(chunkID: chunkID, embeddings: flat, dims: dims)
             }
@@ -338,7 +338,7 @@ struct IndexerTests {
     func clearIndexPreservesDocsAndChunks() async throws {
         let storage = InMemoryStorage()
         try await storage.open()
-        let indexer = Indexer(storage: storage, config: .testing(l0Capacity: 4, lsmFanout: 2))
+        let indexer = try await Indexer(storage: storage, config: .testing(l0Capacity: 4, lsmFanout: 2))
         var rng = SplitMix64(seed: 7)
 
         // Insert some documents & chunks directly so we can verify they
@@ -378,7 +378,7 @@ struct IndexerTests {
     func emptyFlushIsNoop() async throws {
         let storage = InMemoryStorage()
         try await storage.open()
-        let indexer = Indexer(storage: storage, config: .testing())
+        let indexer = try await Indexer(storage: storage, config: .testing())
 
         try await indexer.flush()
         #expect(try await storage.generations().isEmpty)
@@ -396,7 +396,7 @@ struct IndexerTests {
         let dims = 128
         let storage = InMemoryStorage()
         try await storage.open()
-        let indexer = Indexer(storage: storage, config: .production)
+        let indexer = try await Indexer(storage: storage, config: .production)
         var rng = SplitMix64(seed: 8)
 
         // Pre-generate inputs so the timing measures only the indexer.
