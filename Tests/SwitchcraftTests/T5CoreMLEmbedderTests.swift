@@ -159,5 +159,43 @@ struct T5CoreMLEmbedderTests {
             )
         }
     }
+
+    // MARK: - ANE IOSurface leak validation
+
+    /// Drive ≥10,000 encode calls through the real CoreML runtime to confirm
+    /// the ANE IOSurface pool no longer exhausts.
+    ///
+    /// Background: real-world bulk-index runs (SafariUnfucker, 2026-05-05)
+    /// first failed at ~minute 48 / ~1,000 encodes with "Failed to allocate
+    /// E5 buffer object." Every subsequent inference failed — no self-recovery.
+    /// This test exceeds that failure window by 10× with margin, using varied
+    /// input sizes that mirror the broad distribution seen in production logs
+    /// (where size was NOT correlated with failure).
+    ///
+    /// Expected wall time: ~8 minutes on Apple Silicon (10k × ~48ms avg).
+    /// The suite-level `.enabled(if: CoreMLAsset.isAvailable)` trait ensures
+    /// this never runs on a fresh CI checkout without the `.mlpackage` asset.
+    /// Set `SWITCHCRAFT_XTR_MLPACKAGE` to run it locally.
+    @Test("≥10,000 inference loop completes without IOSurface failure")
+    func stressRealAsset10kIterations() async throws {
+        let embedder = try await SharedEmbedder.shared.get()
+
+        // Three representative sizes: short (~20 tokens), medium (~200 tokens),
+        // long (~600 tokens). Cycling through them mimics production diversity.
+        let inputs: [String] = [
+            "neural information retrieval",
+            String(repeating: "token-level semantic search with sub-linear retrieval ", count: 10),
+            String(repeating: "the quick brown fox jumps over the lazy dog with dense embedding ", count: 30),
+        ]
+
+        for i in 0..<10_000 {
+            let text = inputs[i % inputs.count]
+            let result = try await embedder.encode(text)
+            #expect(
+                !result.isEmpty,
+                "encode returned empty at iteration \(i) for input of length \(text.count)"
+            )
+        }
+    }
 }
 #endif
