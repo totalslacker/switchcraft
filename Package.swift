@@ -70,9 +70,18 @@ let package = Package(
             dependencies: ["SwitchcraftCore", "Switchcraft"],
             path: "Sources/SwitchcraftSQLite"
         ),
+        // ObjC @try/@catch bridge for CoreML native exception interception.
+        // Kept as a separate clang-only target (not mixed into SwitchcraftCoreML)
+        // because SwiftPM 6 mixed Swift+ObjC targets have historically produced
+        // subtle module-map failures under strict concurrency. See ADR 018.
+        .target(
+            name: "SwitchcraftCoreMLObjC",
+            path: "Sources/SwitchcraftCoreMLObjC",
+            publicHeadersPath: "include"
+        ),
         .target(
             name: "SwitchcraftCoreML",
-            dependencies: ["SwitchcraftCore"],
+            dependencies: ["SwitchcraftCore", "SwitchcraftCoreMLObjC"],
             path: "Sources/SwitchcraftCoreML",
             linkerSettings: [
                 .linkedFramework(
