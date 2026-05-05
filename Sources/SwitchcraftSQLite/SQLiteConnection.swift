@@ -33,7 +33,7 @@ private func sqliteProgressCallback(_ ctx: UnsafeMutableRawPointer?) -> Int32 {
 }
 
 /// Thin wrapper around a sqlite3 handle. Not thread-safe by itself; only
-/// touched from inside the owning `SQLiteStorage` actor.
+/// touched from inside the owning actor.
 final class SQLiteConnection {
     private var handle: OpaquePointer?
 
@@ -47,7 +47,10 @@ final class SQLiteConnection {
     /// in `deinit` to balance the `passRetained` in `init`.
     private let progressStatePtr: UnsafeMutableRawPointer
 
-    init(path: String) throws {
+    init(
+        path: String,
+        flags: Int32 = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
+    ) throws {
         // Initialise all stored properties before any potential throw so
         // that `deinit` is always called and can release resources.
         let state = ProgressHandlerState()
@@ -56,8 +59,10 @@ final class SQLiteConnection {
         self.handle = nil
 
         var h: OpaquePointer?
-        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
-        let rc = sqlite3_open_v2(path, &h, flags, nil)
+        // SQLITE_OPEN_URI enables "file:" URI parsing (e.g. file::memory:,
+        // file:?mode=memory). Safe for plain paths: SQLite only interprets
+        // "file:" prefix as a URI; other paths are opened as regular files.
+        let rc = sqlite3_open_v2(path, &h, flags | SQLITE_OPEN_URI, nil)
         if rc != SQLITE_OK {
             let message = h.map { String(cString: sqlite3_errmsg($0)) } ?? "open failed"
             sqlite3_close_v2(h)
@@ -66,7 +71,7 @@ final class SQLiteConnection {
         self.handle = h
         // N = 10_000 VM instructions ≈ 5–20 ms at typical SQLite throughput.
         // This granularity is precise enough for a 5-second deadline with
-        // negligible overhead. See ADR 019.
+        // negligible overhead. See ADR 020.
         sqlite3_progress_handler(h, 10_000, sqliteProgressCallback, progressStatePtr)
     }
 

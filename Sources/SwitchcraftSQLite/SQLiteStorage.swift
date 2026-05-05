@@ -10,12 +10,29 @@ private let sqliteInterruptCode: Int32 = 9
 
 /// SQLite-backed implementation of `SwitchcraftStorage`.
 ///
-/// All access is serialised through actor isolation; the underlying sqlite3
-/// handle is single-threaded by construction. Pass `":memory:"` as the path
-/// for an ephemeral store (useful in tests).
+/// For **file-backed** paths, storage is split across two independent actors:
+/// - `SQLiteWriterActor` — owns the WAL-mode writer connection; handles all
+///   mutating operations.
+/// - `SQLiteReaderActor` — owns a read-only connection; handles all queries.
+///
+/// Because WAL allows one writer + N concurrent readers at the SQLite file
+/// level, a long-running search no longer blocks ongoing indexing writes.
+///
+/// For **in-memory** paths (`:memory:`, `file::memory:`, or any URI with
+/// `mode=memory`), a single connection is retained directly by this actor,
+/// matching the original single-actor behaviour. WAL concurrency is a
+/// file-backed-only property and does not apply to in-memory databases.
 public actor SQLiteStorage: SwitchcraftStorage {
     private let path: String
-    private var connection: SQLiteConnection?
+    private var mode: Mode = .closed
+
+    private enum Mode {
+        case closed
+        /// Single-connection path for in-memory SQLite databases.
+        case inMemory(SQLiteConnection)
+        /// Dual-actor path for file-backed WAL databases.
+        case fileBacked(SQLiteWriterActor, SQLiteReaderActor)
+    }
 
     /// Deadline context for the currently running search call. Set by
     /// `configureSearchDeadline` at the top of `SearchEngine.searchHybrid`
@@ -27,281 +44,421 @@ public actor SQLiteStorage: SwitchcraftStorage {
         self.path = path
     }
 
+    // MARK: - In-memory path detection
+
+    static func isInMemoryPath(_ path: String) -> Bool {
+        path == ":memory:"
+            || path.contains(":memory:")
+            || path.contains("mode=memory")
+    }
+
     // MARK: - Lifecycle
 
     public func open() async throws {
-        if connection != nil { return }
-        let conn = try SQLiteConnection(path: path)
-        try conn.execute("PRAGMA foreign_keys = ON")
-        try conn.execute("PRAGMA journal_mode = WAL")
-        for ddl in Schema.statements {
-            try conn.execute(ddl)
+        guard case .closed = mode else { return }
+
+        if Self.isInMemoryPath(path) {
+            let conn = try SQLiteConnection(path: path)
+            try conn.execute("PRAGMA foreign_keys = ON")
+            try conn.execute("PRAGMA journal_mode = WAL")
+            for ddl in Schema.statements {
+                try conn.execute(ddl)
+            }
+            mode = .inMemory(conn)
+        } else {
+            let writer = SQLiteWriterActor(path: path)
+            let reader = SQLiteReaderActor(path: path)
+            // Writer opens first: sets WAL mode and runs schema DDL.
+            do {
+                try await writer.open()
+            } catch {
+                throw error
+            }
+            // Reader opens second. On failure, close the writer and rethrow.
+            do {
+                try await reader.open()
+            } catch {
+                await writer.close()
+                throw error
+            }
+            mode = .fileBacked(writer, reader)
         }
-        connection = conn
     }
 
     public func close() async throws {
-        connection = nil
+        switch mode {
+        case .closed:
+            break
+        case .inMemory:
+            mode = .closed
+        case .fileBacked(let writer, let reader):
+            mode = .closed
+            await writer.close()
+            await reader.close()
+        }
     }
 
     public func clear() async throws {
-        let conn = try requireConnection()
-        try conn.transaction {
-            try conn.execute("DELETE FROM bucket")
-            try conn.execute("DELETE FROM generation")
-            try conn.execute("DELETE FROM chunk")
-            try conn.execute("DELETE FROM document")
-            // Reset AUTOINCREMENT counters so id sequences start at 1 again.
-            try conn.execute("DELETE FROM sqlite_sequence")
+        switch mode {
+        case .closed:
+            throw SQLiteError(code: 1, message: "storage is not open")
+        case .inMemory(let conn):
+            try conn.transaction {
+                try conn.execute("DELETE FROM bucket")
+                try conn.execute("DELETE FROM generation")
+                try conn.execute("DELETE FROM chunk")
+                try conn.execute("DELETE FROM document")
+                try conn.execute("DELETE FROM sqlite_sequence")
+            }
+        case .fileBacked(let writer, _):
+            try await writer.clear()
         }
     }
 
     // MARK: - Documents
 
     public func upsertDocument(_ document: DocumentRecord) async throws {
-        let conn = try requireConnection()
-        let stmt = try conn.prepare("""
-            INSERT INTO document (uuid, date, metadata, hash, body, lens)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(uuid) DO UPDATE SET
-                date = excluded.date,
-                metadata = excluded.metadata,
-                hash = excluded.hash,
-                body = excluded.body,
-                lens = excluded.lens
-            """)
-        try stmt.bind([
-            .text(document.uuid),
-            .real(Codecs.encode(document.date)),
-            .blob(document.metadata),
-            .text(document.hash),
-            .text(document.body),
-            .text(Codecs.encode(document.lens)),
-        ])
-        try stmt.step()
+        switch mode {
+        case .closed:
+            throw SQLiteError(code: 1, message: "storage is not open")
+        case .inMemory(let conn):
+            let stmt = try conn.prepare("""
+                INSERT INTO document (uuid, date, metadata, hash, body, lens)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(uuid) DO UPDATE SET
+                    date = excluded.date,
+                    metadata = excluded.metadata,
+                    hash = excluded.hash,
+                    body = excluded.body,
+                    lens = excluded.lens
+                """)
+            try stmt.bind([
+                .text(document.uuid),
+                .real(Codecs.encode(document.date)),
+                .blob(document.metadata),
+                .text(document.hash),
+                .text(document.body),
+                .text(Codecs.encode(document.lens)),
+            ])
+            try stmt.step()
+        case .fileBacked(let writer, _):
+            try await writer.upsertDocument(document)
+        }
     }
 
     public func deleteDocument(uuid: String) async throws {
-        let conn = try requireConnection()
-        let stmt = try conn.prepare("DELETE FROM document WHERE uuid = ?")
-        try stmt.bind([.text(uuid)])
-        try stmt.step()
+        switch mode {
+        case .closed:
+            throw SQLiteError(code: 1, message: "storage is not open")
+        case .inMemory(let conn):
+            let stmt = try conn.prepare("DELETE FROM document WHERE uuid = ?")
+            try stmt.bind([.text(uuid)])
+            try stmt.step()
+        case .fileBacked(let writer, _):
+            try await writer.deleteDocument(uuid: uuid)
+        }
     }
 
     public func document(uuid: String) async throws -> DocumentRecord? {
-        let conn = try requireConnection()
-        let stmt = try conn.prepare("""
-            SELECT uuid, date, metadata, hash, body, lens
-            FROM document
-            WHERE uuid = ?
-            """)
-        try stmt.bind([.text(uuid)])
-        guard try stmt.step() else { return nil }
-        return decodeDocument(stmt)
+        switch mode {
+        case .closed:
+            throw SQLiteError(code: 1, message: "storage is not open")
+        case .inMemory(let conn):
+            let stmt = try conn.prepare("""
+                SELECT uuid, date, metadata, hash, body, lens
+                FROM document
+                WHERE uuid = ?
+                """)
+            try stmt.bind([.text(uuid)])
+            guard try stmt.step() else { return nil }
+            return decodeDocument(stmt)
+        case .fileBacked(_, let reader):
+            return try await reader.document(uuid: uuid)
+        }
     }
 
     public func documents(matching filter: StorageFilter) async throws -> [DocumentRecord] {
-        let conn = try requireConnection()
-        let clause = filter.lower()
-        let stmt = try conn.prepare("""
-            SELECT uuid, date, metadata, hash, body, lens
-            FROM document
-            WHERE \(clause.sql)
-            """)
-        try stmt.bind(clause.bindings)
-        var results: [DocumentRecord] = []
-        while try stmt.step() {
-            results.append(decodeDocument(stmt))
+        switch mode {
+        case .closed:
+            throw SQLiteError(code: 1, message: "storage is not open")
+        case .inMemory(let conn):
+            let clause = filter.lower()
+            let stmt = try conn.prepare("""
+                SELECT uuid, date, metadata, hash, body, lens
+                FROM document
+                WHERE \(clause.sql)
+                """)
+            try stmt.bind(clause.bindings)
+            var results: [DocumentRecord] = []
+            while try stmt.step() {
+                results.append(decodeDocument(stmt))
+            }
+            return results
+        case .fileBacked(_, let reader):
+            return try await reader.documents(matching: filter)
         }
-        return results
     }
 
     public func documents(forChunkHash hash: String) async throws -> [DocumentRecord] {
         try Task.checkCancellation()
-        let conn = try requireConnection()
-        let stmt = try conn.prepare("""
-            SELECT uuid, date, metadata, hash, body, lens
-            FROM document
-            WHERE hash = ?
-            """)
-        try stmt.bind([.text(hash)])
-        var results: [DocumentRecord] = []
-        do {
-            while try stmt.step() {
-                results.append(decodeDocument(stmt))
+        switch mode {
+        case .closed:
+            throw SQLiteError(code: 1, message: "storage is not open")
+        case .inMemory(let conn):
+            let stmt = try conn.prepare("""
+                SELECT uuid, date, metadata, hash, body, lens
+                FROM document
+                WHERE hash = ?
+                """)
+            try stmt.bind([.text(hash)])
+            var results: [DocumentRecord] = []
+            do {
+                while try stmt.step() {
+                    results.append(decodeDocument(stmt))
+                }
+            } catch {
+                try translateIfInterrupt(error)
             }
-        } catch {
-            try translateIfInterrupt(error)
+            return results
+        case .fileBacked(_, let reader):
+            do {
+                return try await reader.documents(forChunkHash: hash)
+            } catch {
+                try translateIfInterrupt(error)
+            }
         }
-        return results
     }
 
     public func documentCount() async throws -> Int {
-        try scalarInt("SELECT COUNT(*) FROM document")
+        switch mode {
+        case .closed:
+            throw SQLiteError(code: 1, message: "storage is not open")
+        case .inMemory(let conn):
+            let stmt = try conn.prepare("SELECT COUNT(*) FROM document")
+            guard try stmt.step() else { return 0 }
+            return Int(stmt.columnInt64(0))
+        case .fileBacked(_, let reader):
+            return try await reader.documentCount()
+        }
     }
 
     // MARK: - Chunks
 
     public func upsertChunk(_ record: ChunkRecord) async throws -> ChunkRecord {
-        let conn = try requireConnection()
-
-        if let existing = try chunk(hashLookup: record.hash) {
-            return existing
+        switch mode {
+        case .closed:
+            throw SQLiteError(code: 1, message: "storage is not open")
+        case .inMemory(let conn):
+            if let existing = try inMemoryChunkByHash(conn, hash: record.hash) {
+                return existing
+            }
+            let insert = try conn.prepare("""
+                INSERT INTO chunk (hash, model, embeddings, counts)
+                VALUES (?, ?, ?, ?)
+                """)
+            try insert.bind([
+                .text(record.hash),
+                .text(record.model),
+                .blob(record.embeddings),
+                .text(Codecs.encode(record.counts)),
+            ])
+            try insert.step()
+            var inserted = record
+            inserted.id = conn.lastInsertRowID
+            return inserted
+        case .fileBacked(let writer, _):
+            return try await writer.upsertChunk(record)
         }
-
-        let insert = try conn.prepare("""
-            INSERT INTO chunk (hash, model, embeddings, counts)
-            VALUES (?, ?, ?, ?)
-            """)
-        try insert.bind([
-            .text(record.hash),
-            .text(record.model),
-            .blob(record.embeddings),
-            .text(Codecs.encode(record.counts)),
-        ])
-        try insert.step()
-
-        var inserted = record
-        inserted.id = conn.lastInsertRowID
-        return inserted
     }
 
     public func chunk(hash: String) async throws -> ChunkRecord? {
-        try chunk(hashLookup: hash)
+        switch mode {
+        case .closed:
+            throw SQLiteError(code: 1, message: "storage is not open")
+        case .inMemory(let conn):
+            return try inMemoryChunkByHash(conn, hash: hash)
+        case .fileBacked(_, let reader):
+            return try await reader.chunk(hash: hash)
+        }
     }
 
     public func chunk(id: Int64) async throws -> ChunkRecord? {
         try Task.checkCancellation()
-        let conn = try requireConnection()
-        let stmt = try conn.prepare("""
-            SELECT id, hash, model, embeddings, counts
-            FROM chunk
-            WHERE id = ?
-            """)
-        try stmt.bind([.int(id)])
-        do {
-            guard try stmt.step() else { return nil }
-        } catch {
-            try translateIfInterrupt(error)
+        switch mode {
+        case .closed:
+            throw SQLiteError(code: 1, message: "storage is not open")
+        case .inMemory(let conn):
+            let stmt = try conn.prepare("""
+                SELECT id, hash, model, embeddings, counts
+                FROM chunk
+                WHERE id = ?
+                """)
+            try stmt.bind([.int(id)])
+            do {
+                guard try stmt.step() else { return nil }
+            } catch {
+                try translateIfInterrupt(error)
+            }
+            return decodeChunk(stmt)
+        case .fileBacked(_, let reader):
+            do {
+                return try await reader.chunk(id: id)
+            } catch {
+                try translateIfInterrupt(error)
+            }
         }
-        return decodeChunk(stmt)
     }
 
     public func chunkCount() async throws -> Int {
-        try scalarInt("SELECT COUNT(*) FROM chunk")
-    }
-
-    private func chunk(hashLookup hash: String) throws -> ChunkRecord? {
-        let conn = try requireConnection()
-        let stmt = try conn.prepare("""
-            SELECT id, hash, model, embeddings, counts
-            FROM chunk
-            WHERE hash = ?
-            """)
-        try stmt.bind([.text(hash)])
-        guard try stmt.step() else { return nil }
-        return decodeChunk(stmt)
+        switch mode {
+        case .closed:
+            throw SQLiteError(code: 1, message: "storage is not open")
+        case .inMemory(let conn):
+            let stmt = try conn.prepare("SELECT COUNT(*) FROM chunk")
+            guard try stmt.step() else { return 0 }
+            return Int(stmt.columnInt64(0))
+        case .fileBacked(_, let reader):
+            return try await reader.chunkCount()
+        }
     }
 
     // MARK: - Generations
 
     public func insertGeneration(_ generation: GenerationRecord) async throws -> GenerationRecord {
-        let conn = try requireConnection()
-        let stmt = try conn.prepare("""
-            INSERT INTO generation (level, num_embeddings, min_chunk_id, max_chunk_id, created)
-            VALUES (?, ?, ?, ?, ?)
-            """)
-        try stmt.bind([
-            .int(Int64(generation.level)),
-            .int(Int64(generation.numEmbeddings)),
-            .int(generation.minChunkID),
-            .int(generation.maxChunkID),
-            .real(Codecs.encode(generation.created)),
-        ])
-        try stmt.step()
-        var inserted = generation
-        inserted.id = conn.lastInsertRowID
-        return inserted
+        switch mode {
+        case .closed:
+            throw SQLiteError(code: 1, message: "storage is not open")
+        case .inMemory(let conn):
+            let stmt = try conn.prepare("""
+                INSERT INTO generation (level, num_embeddings, min_chunk_id, max_chunk_id, created)
+                VALUES (?, ?, ?, ?, ?)
+                """)
+            try stmt.bind([
+                .int(Int64(generation.level)),
+                .int(Int64(generation.numEmbeddings)),
+                .int(generation.minChunkID),
+                .int(generation.maxChunkID),
+                .real(Codecs.encode(generation.created)),
+            ])
+            try stmt.step()
+            var inserted = generation
+            inserted.id = conn.lastInsertRowID
+            return inserted
+        case .fileBacked(let writer, _):
+            return try await writer.insertGeneration(generation)
+        }
     }
 
     public func generations() async throws -> [GenerationRecord] {
         try Task.checkCancellation()
-        let conn = try requireConnection()
-        let stmt = try conn.prepare("""
-            SELECT id, level, num_embeddings, min_chunk_id, max_chunk_id, created
-            FROM generation
-            ORDER BY id ASC
-            """)
-        var rows: [GenerationRecord] = []
-        do {
-            while try stmt.step() {
-                rows.append(GenerationRecord(
-                    id: stmt.columnInt64(0),
-                    level: Int(stmt.columnInt64(1)),
-                    numEmbeddings: Int(stmt.columnInt64(2)),
-                    minChunkID: stmt.columnInt64(3),
-                    maxChunkID: stmt.columnInt64(4),
-                    created: Codecs.decodeDate(stmt.columnDouble(5))
-                ))
+        switch mode {
+        case .closed:
+            throw SQLiteError(code: 1, message: "storage is not open")
+        case .inMemory(let conn):
+            let stmt = try conn.prepare("""
+                SELECT id, level, num_embeddings, min_chunk_id, max_chunk_id, created
+                FROM generation
+                ORDER BY id ASC
+                """)
+            var rows: [GenerationRecord] = []
+            do {
+                while try stmt.step() {
+                    rows.append(GenerationRecord(
+                        id: stmt.columnInt64(0),
+                        level: Int(stmt.columnInt64(1)),
+                        numEmbeddings: Int(stmt.columnInt64(2)),
+                        minChunkID: stmt.columnInt64(3),
+                        maxChunkID: stmt.columnInt64(4),
+                        created: Codecs.decodeDate(stmt.columnDouble(5))
+                    ))
+                }
+            } catch {
+                try translateIfInterrupt(error)
             }
-        } catch {
-            try translateIfInterrupt(error)
+            return rows
+        case .fileBacked(_, let reader):
+            do {
+                return try await reader.generations()
+            } catch {
+                try translateIfInterrupt(error)
+            }
         }
-        return rows
     }
 
     public func deleteGeneration(id: Int64) async throws {
-        let conn = try requireConnection()
-        let stmt = try conn.prepare("DELETE FROM generation WHERE id = ?")
-        try stmt.bind([.int(id)])
-        try stmt.step()
+        switch mode {
+        case .closed:
+            throw SQLiteError(code: 1, message: "storage is not open")
+        case .inMemory(let conn):
+            let stmt = try conn.prepare("DELETE FROM generation WHERE id = ?")
+            try stmt.bind([.int(id)])
+            try stmt.step()
+        case .fileBacked(let writer, _):
+            try await writer.deleteGeneration(id: id)
+        }
     }
 
     // MARK: - Buckets
 
     public func insertBucket(_ bucket: BucketRecord) async throws -> BucketRecord {
-        let conn = try requireConnection()
-        let stmt = try conn.prepare("""
-            INSERT INTO bucket (generation_id, center, indices, residuals)
-            VALUES (?, ?, ?, ?)
-            """)
-        try stmt.bind([
-            .int(bucket.generationID),
-            .blob(bucket.center),
-            .blob(bucket.indices),
-            .blob(bucket.residuals),
-        ])
-        try stmt.step()
-        var inserted = bucket
-        inserted.id = conn.lastInsertRowID
-        return inserted
+        switch mode {
+        case .closed:
+            throw SQLiteError(code: 1, message: "storage is not open")
+        case .inMemory(let conn):
+            let stmt = try conn.prepare("""
+                INSERT INTO bucket (generation_id, center, indices, residuals)
+                VALUES (?, ?, ?, ?)
+                """)
+            try stmt.bind([
+                .int(bucket.generationID),
+                .blob(bucket.center),
+                .blob(bucket.indices),
+                .blob(bucket.residuals),
+            ])
+            try stmt.step()
+            var inserted = bucket
+            inserted.id = conn.lastInsertRowID
+            return inserted
+        case .fileBacked(let writer, _):
+            return try await writer.insertBucket(bucket)
+        }
     }
 
     public func buckets(forGeneration generationID: Int64) async throws -> [BucketRecord] {
         try Task.checkCancellation()
-        let conn = try requireConnection()
-        let stmt = try conn.prepare("""
-            SELECT id, generation_id, center, indices, residuals
-            FROM bucket
-            WHERE generation_id = ?
-            ORDER BY id ASC
-            """)
-        try stmt.bind([.int(generationID)])
-        var rows: [BucketRecord] = []
-        do {
-            while try stmt.step() {
-                rows.append(BucketRecord(
-                    id: stmt.columnInt64(0),
-                    generationID: stmt.columnInt64(1),
-                    center: stmt.columnBlob(2),
-                    indices: stmt.columnBlob(3),
-                    residuals: stmt.columnBlob(4)
-                ))
+        switch mode {
+        case .closed:
+            throw SQLiteError(code: 1, message: "storage is not open")
+        case .inMemory(let conn):
+            let stmt = try conn.prepare("""
+                SELECT id, generation_id, center, indices, residuals
+                FROM bucket
+                WHERE generation_id = ?
+                ORDER BY id ASC
+                """)
+            try stmt.bind([.int(generationID)])
+            var rows: [BucketRecord] = []
+            do {
+                while try stmt.step() {
+                    rows.append(BucketRecord(
+                        id: stmt.columnInt64(0),
+                        generationID: stmt.columnInt64(1),
+                        center: stmt.columnBlob(2),
+                        indices: stmt.columnBlob(3),
+                        residuals: stmt.columnBlob(4)
+                    ))
+                }
+            } catch {
+                try translateIfInterrupt(error)
             }
-        } catch {
-            try translateIfInterrupt(error)
+            return rows
+        case .fileBacked(_, let reader):
+            do {
+                return try await reader.buckets(forGeneration: generationID)
+            } catch {
+                try translateIfInterrupt(error)
+            }
         }
-        return rows
     }
 
     // MARK: - Full-text Search
@@ -311,93 +468,100 @@ public actor SQLiteStorage: SwitchcraftStorage {
         limit: Int,
         filter: StorageFilter
     ) async throws -> [FullTextHit] {
-        guard limit > 0, !query.trimmingCharacters(in: .whitespaces).isEmpty else {
-            return []
-        }
-        // FTS5's MATCH grammar treats punctuation (".", "(", ":", quotes, etc.)
-        // as syntax. A natural-language query like "I picked some apples." would
-        // raise `SQLITE_ERROR: fts5: syntax error near "."`. Sanitise by
-        // splitting on the same alphanumeric boundary `InMemoryStorage` uses
-        // for its tokeniser, then double-quote each token so FTS5 reserved
-        // keywords (AND/OR/NOT/NEAR) can't be parsed as operators.
-        let ftsTerms = query
-            .split { !$0.isLetter && !$0.isNumber }
-            .map { "\"\(String($0))\"" }
-        guard !ftsTerms.isEmpty else { return [] }
-        let ftsQuery = ftsTerms.joined(separator: " ")
-
-        let conn = try requireConnection()
-        let clause = filter.lower(tableAlias: "d")
-
-        // bm25() returns lower = more relevant; negate so higher = better.
-        // Tie-break on uuid ascending to keep ordering byte-identical with
-        // the in-memory backend and stable across runs (see ADR 008).
-        let sql = """
-            SELECT d.uuid, -bm25(document_fts) AS score
-            FROM document_fts
-            JOIN document d ON d.rowid = document_fts.rowid
-            WHERE document_fts MATCH ? AND \(clause.sql)
-            ORDER BY score DESC, d.uuid ASC
-            LIMIT ?
-            """
-        let stmt = try conn.prepare(sql)
-        var bindings: [SQLValue] = [.text(ftsQuery)]
-        bindings.append(contentsOf: clause.bindings)
-        bindings.append(.int(Int64(limit)))
-        try stmt.bind(bindings)
-
-        var hits: [FullTextHit] = []
-        do {
-            // Check cancellation before each step so that a cancelled task
-            // does not have to wait for an in-progress sqlite3_step to
-            // return before the CancellationError is observed.
-            while true {
-                try Task.checkCancellation()
-                guard try stmt.step() else { break }
-                hits.append(FullTextHit(
-                    uuid: stmt.columnText(0),
-                    score: Float(stmt.columnDouble(1))
-                ))
+        switch mode {
+        case .closed:
+            throw SQLiteError(code: 1, message: "storage is not open")
+        case .inMemory(let conn):
+            guard limit > 0, !query.trimmingCharacters(in: .whitespaces).isEmpty else {
+                return []
             }
-        } catch {
-            try translateIfInterrupt(error)
+            // FTS5's MATCH grammar treats punctuation (".", "(", ":", quotes, etc.)
+            // as syntax. Sanitise by splitting on alphanumeric boundaries, then
+            // double-quoting each token so FTS5 reserved keywords (AND/OR/NOT/NEAR)
+            // can't be parsed as operators.
+            let ftsTerms = query
+                .split { !$0.isLetter && !$0.isNumber }
+                .map { "\"\(String($0))\"" }
+            guard !ftsTerms.isEmpty else { return [] }
+            let ftsQuery = ftsTerms.joined(separator: " ")
+            let clause = filter.lower(tableAlias: "d")
+            // bm25() returns lower = more relevant; negate so higher = better.
+            // Tie-break on uuid ascending for deterministic ordering (see ADR 008).
+            let sql = """
+                SELECT d.uuid, -bm25(document_fts) AS score
+                FROM document_fts
+                JOIN document d ON d.rowid = document_fts.rowid
+                WHERE document_fts MATCH ? AND \(clause.sql)
+                ORDER BY score DESC, d.uuid ASC
+                LIMIT ?
+                """
+            let stmt = try conn.prepare(sql)
+            var bindings: [SQLValue] = [.text(ftsQuery)]
+            bindings.append(contentsOf: clause.bindings)
+            bindings.append(.int(Int64(limit)))
+            try stmt.bind(bindings)
+            var hits: [FullTextHit] = []
+            do {
+                // Check cancellation before each step so that a cancelled task
+                // does not have to wait for an in-progress sqlite3_step to
+                // return before the CancellationError is observed.
+                while true {
+                    try Task.checkCancellation()
+                    guard try stmt.step() else { break }
+                    hits.append(FullTextHit(
+                        uuid: stmt.columnText(0),
+                        score: Float(stmt.columnDouble(1))
+                    ))
+                }
+            } catch {
+                try translateIfInterrupt(error)
+            }
+            return hits
+        case .fileBacked(_, let reader):
+            do {
+                return try await reader.searchFullText(query: query, limit: limit, filter: filter)
+            } catch {
+                try translateIfInterrupt(error)
+            }
         }
-        return hits
     }
 
     // MARK: - Search Deadline
 
     public func configureSearchDeadline(_ ctx: SearchDeadlineContext?) async {
         currentDeadlineContext = ctx
-        guard let conn = connection else { return }
-        if let ctx {
-            let sqlPhaseStart = ContinuousClock.now
-            let elapsed = sqlPhaseStart - ctx.searchStart
-            let remainingBudget = max(.zero, ctx.deadline - elapsed)
-            conn.progressState.sqlPhaseStart = sqlPhaseStart
-            conn.progressState.remainingBudget = remainingBudget
-            conn.progressState.isActive = true
-        } else {
-            // Disarm: the isActive flag prevents the callback from ever
-            // interrupting subsequent non-search SQLite operations.
-            conn.progressState.isActive = false
+        func arm(_ conn: SQLiteConnection) {
+            if let ctx {
+                let sqlPhaseStart = ContinuousClock.now
+                let elapsed = sqlPhaseStart - ctx.searchStart
+                conn.progressState.sqlPhaseStart = sqlPhaseStart
+                conn.progressState.remainingBudget = max(.zero, ctx.deadline - elapsed)
+                conn.progressState.isActive = true
+            } else {
+                conn.progressState.isActive = false
+            }
+        }
+        switch mode {
+        case .closed:
+            break
+        case .inMemory(let conn):
+            arm(conn)
+        case .fileBacked(_, let reader):
+            await reader.configureProgressHandler(ctx)
         }
     }
 
-    // MARK: - Helpers
+    // MARK: - In-memory helpers
 
-    private func requireConnection() throws -> SQLiteConnection {
-        guard let connection else {
-            throw SQLiteError(code: 1, message: "storage is not open")
-        }
-        return connection
-    }
-
-    private func scalarInt(_ sql: String) throws -> Int {
-        let conn = try requireConnection()
-        let stmt = try conn.prepare(sql)
-        guard try stmt.step() else { return 0 }
-        return Int(stmt.columnInt64(0))
+    private func inMemoryChunkByHash(_ conn: SQLiteConnection, hash: String) throws -> ChunkRecord? {
+        let stmt = try conn.prepare("""
+            SELECT id, hash, model, embeddings, counts
+            FROM chunk
+            WHERE hash = ?
+            """)
+        try stmt.bind([.text(hash)])
+        guard try stmt.step() else { return nil }
+        return decodeChunk(stmt)
     }
 
     /// Translate a `SQLiteError` with code `SQLITE_INTERRUPT` into
