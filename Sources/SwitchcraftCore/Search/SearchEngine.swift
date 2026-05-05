@@ -38,7 +38,8 @@ import Accelerate
 /// `adrs/007-search-vs-index-responsibility.md`.
 public actor SearchEngine {
 
-    /// Errors thrown by `SearchEngine` when input shapes are malformed.
+    /// Errors thrown by `SearchEngine` when input shapes are malformed
+    /// or a pre-SQLite deadline check fires.
     public enum Error: Swift.Error, Sendable, Equatable {
         /// `dims` was zero, negative, or odd. Q4 residuals pack two
         /// floats per byte so `dims` must be a positive even number.
@@ -51,6 +52,10 @@ public actor SearchEngine {
         case bucketSizeMismatch(pairs: Int, residualBytes: Int, dims: Int)
         /// A bucket's centre blob was not `dims * 4` bytes.
         case centerSizeMismatch(bytes: Int, expected: Int)
+        /// A pre-SQLite deadline check at the top of `searchHybrid`
+        /// found the budget already exhausted. Translated to
+        /// `SwitchcraftStoreError.searchTimedOut` by the caller.
+        case deadlineExceeded(elapsed: Duration)
     }
 
     private let storage: any SwitchcraftStorage
@@ -335,9 +340,18 @@ public actor SearchEngine {
         queryText: String,
         topK: Int,
         filter: StorageFilter = .all,
-        config: HybridConfig = HybridConfig()
+        config: HybridConfig = HybridConfig(),
+        deadlineContext: SearchDeadlineContext? = nil
     ) async throws -> [HybridHit] {
         guard topK > 0 else { return [] }
+
+        // Pre-phase deadline check. Must run before any storage access.
+        if let ctx = deadlineContext, ctx.isExpired {
+            throw Error.deadlineExceeded(elapsed: ctx.elapsed)
+        }
+
+        // Arm (or disarm) the backend's progress handler for this call.
+        await storage.configureSearchDeadline(deadlineContext)
 
         let trimmedQuery = queryText.trimmingCharacters(in: .whitespacesAndNewlines)
         let hasVector = !queryEmbeddings.isEmpty
@@ -345,6 +359,7 @@ public actor SearchEngine {
         if !hasVector && !hasText { return [] }
 
         // 1. Vector candidates (skipped if no embeddings).
+        try Task.checkCancellation()
         let vectorHits: [SearchHit]
         if hasVector {
             vectorHits = try await search(
@@ -358,6 +373,7 @@ public actor SearchEngine {
         }
 
         // 2. FTS candidates (skipped if no text).
+        try Task.checkCancellation()
         let ftsHits: [FullTextHit]
         if hasText {
             ftsHits = try await storage.searchFullText(
@@ -373,6 +389,7 @@ public actor SearchEngine {
         //    scores. Dictionary iteration order is unspecified, but the
         //    final `(score DESC, uuid ASC)` sort below is a total order
         //    so the fused output is deterministic regardless.
+        try Task.checkCancellation()
         struct Provenance {
             var vectorRank: Int?
             var vectorScore: Float?
