@@ -223,8 +223,10 @@ struct SearchTimeoutTests {
         }
 
         // A subsequent search with a generous deadline must succeed.
-        // This verifies that the progress handler was disarmed (isActive=false)
-        // and that SQLite is in a clean state after the (non-SQL) timeout.
+        // The preceding timeout was a pre-checkpoint (post-flush) timeout —
+        // the SQL phase was never reached and the progress handler was never
+        // armed. This verifies that the store recovers cleanly from a
+        // pre-SQL timeout and remains fully usable for subsequent searches.
         let hits = try await store.search(
             query: "apples",
             topK: 5,
