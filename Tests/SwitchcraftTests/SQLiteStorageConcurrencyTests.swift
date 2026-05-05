@@ -71,8 +71,8 @@ struct SQLiteStorageConcurrencyTests {
     func livenessTest() async throws {
         let (storage, url) = try await Self.makeTemporaryDB()
         defer {
-            Self.cleanupDB(url: url)
-            Task { try? await storage.close() }
+            // Close connections before removing files so SQLite can flush WAL.
+            Task { try? await storage.close(); Self.cleanupDB(url: url) }
         }
 
         // Start the slow FTS scan on the reader actor.
@@ -110,14 +110,11 @@ struct SQLiteStorageConcurrencyTests {
     func performanceAssertionTest() async throws {
         let (storage, url) = try await Self.makeTemporaryDB()
         defer {
-            Self.cleanupDB(url: url)
-            Task { try? await storage.close() }
+            Task { try? await storage.close(); Self.cleanupDB(url: url) }
         }
 
         // Isolated read (3 iterations, median).
-        var readIter = 0
         let tRead = try await Self.measureMedian(iterations: 3) {
-            readIter += 1
             _ = try await storage.searchFullText(query: "the", limit: Self.seedCount, filter: .all)
         }
 
@@ -162,8 +159,7 @@ struct SQLiteStorageConcurrencyTests {
     func safariUnfuckerRegressionTest() async throws {
         let (storage, url) = try await Self.makeTemporaryDB()
         defer {
-            Self.cleanupDB(url: url)
-            Task { try? await storage.close() }
+            Task { try? await storage.close(); Self.cleanupDB(url: url) }
         }
 
         let bulkCount = 50
