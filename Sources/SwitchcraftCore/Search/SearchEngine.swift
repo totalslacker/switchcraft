@@ -350,8 +350,13 @@ public actor SearchEngine {
             throw Error.deadlineExceeded(elapsed: ctx.elapsed)
         }
 
-        // Arm (or disarm) the backend's progress handler for this call.
-        await storage.configureSearchDeadline(deadlineContext)
+        // Note: this method does NOT arm or disarm the backend's progress
+        // handler. Callers that want progress-handler timeout enforcement
+        // must call `await storage.configureSearchDeadline(ctx)` before
+        // calling this method and `await storage.configureSearchDeadline(nil)`
+        // after (on both success and error paths). `SwitchcraftStore.search()`
+        // owns the arm/disarm lifecycle. Direct callers of `searchHybrid`
+        // are responsible for the same contract.
 
         let trimmedQuery = queryText.trimmingCharacters(in: .whitespacesAndNewlines)
         let hasVector = !queryEmbeddings.isEmpty
@@ -359,7 +364,12 @@ public actor SearchEngine {
         if !hasVector && !hasText { return [] }
 
         // 1. Vector candidates (skipped if no embeddings).
+        // Check both task cancellation and wall-time deadline before the
+        // vector search (BLAS matmuls can run long on large indices).
         try Task.checkCancellation()
+        if let ctx = deadlineContext, ctx.isExpired {
+            throw Error.deadlineExceeded(elapsed: ctx.elapsed)
+        }
         let vectorHits: [SearchHit]
         if hasVector {
             vectorHits = try await search(
@@ -374,6 +384,9 @@ public actor SearchEngine {
 
         // 2. FTS candidates (skipped if no text).
         try Task.checkCancellation()
+        if let ctx = deadlineContext, ctx.isExpired {
+            throw Error.deadlineExceeded(elapsed: ctx.elapsed)
+        }
         let ftsHits: [FullTextHit]
         if hasText {
             ftsHits = try await storage.searchFullText(
@@ -390,6 +403,9 @@ public actor SearchEngine {
         //    final `(score DESC, uuid ASC)` sort below is a total order
         //    so the fused output is deterministic regardless.
         try Task.checkCancellation()
+        if let ctx = deadlineContext, ctx.isExpired {
+            throw Error.deadlineExceeded(elapsed: ctx.elapsed)
+        }
         struct Provenance {
             var vectorRank: Int?
             var vectorScore: Float?
