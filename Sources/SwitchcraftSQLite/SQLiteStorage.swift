@@ -502,6 +502,9 @@ public actor SQLiteStorage: SwitchcraftStorage {
             try stmt.bind(bindings)
             var hits: [FullTextHit] = []
             do {
+                // Check cancellation before each step so that a cancelled task
+                // does not have to wait for an in-progress sqlite3_step to
+                // return before the CancellationError is observed.
                 while true {
                     try Task.checkCancellation()
                     guard try stmt.step() else { break }
@@ -564,6 +567,12 @@ public actor SQLiteStorage: SwitchcraftStorage {
     /// Translate a `SQLiteError` with code `SQLITE_INTERRUPT` into
     /// `SwitchcraftStoreError.searchTimedOut` using the stored deadline
     /// context. For all other errors, rethrows unchanged.
+    ///
+    /// Translation only happens when `currentDeadlineContext` is non-nil.
+    /// If an interrupt arrives with no active deadline context (shouldn't
+    /// happen in normal use, but possible if a caller bypasses the search
+    /// pipeline), the original `SQLiteError` is rethrown unchanged rather
+    /// than emitting a misleading `searchTimedOut(elapsed: .zero)`.
     private func translateIfInterrupt(_ error: Error) throws -> Never {
         if let sqliteError = error as? SQLiteError,
            sqliteError.code == sqliteInterruptCode,
