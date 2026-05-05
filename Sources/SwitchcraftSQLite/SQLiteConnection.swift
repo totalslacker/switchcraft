@@ -17,7 +17,10 @@ final class SQLiteConnection {
         flags: Int32 = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
     ) throws {
         var h: OpaquePointer?
-        let rc = sqlite3_open_v2(path, &h, flags, nil)
+        // SQLITE_OPEN_URI enables "file:" URI parsing (e.g. file::memory:,
+        // file:?mode=memory). Safe for plain paths: SQLite only interprets
+        // "file:" prefix as a URI; other paths are opened as regular files.
+        let rc = sqlite3_open_v2(path, &h, flags | SQLITE_OPEN_URI, nil)
         if rc != SQLITE_OK {
             let message = h.map { String(cString: sqlite3_errmsg($0)) } ?? "open failed"
             sqlite3_close_v2(h)
