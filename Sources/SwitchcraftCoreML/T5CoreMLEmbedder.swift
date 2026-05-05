@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import os
 import SwitchcraftCore
 
 #if canImport(CoreML)
 import CoreML
+
+private let coreMLLogger = Logger(subsystem: "com.switchcraft.coreml", category: "CoreML")
 
 /// `Embedder` conformance backed by a CoreML-converted T5 encoder + 768→128
 /// projection layer (`google/xtr-base-en`). Tokenises with the injected
@@ -19,6 +22,18 @@ import CoreML
 /// gives exclusive access automatically and matches the rest of the
 /// codebase's concurrency pattern (`Indexer`, `SearchEngine`,
 /// `SwitchcraftStore`).
+///
+/// ### Crash safety
+///
+/// CoreML internally raises Objective-C exceptions from failure sites such
+/// as `MLE5BindEmptyMemoryObjectToPort`. Swift's do-catch does not intercept
+/// ObjC exceptions — they previously propagated to std::terminate. Each call
+/// to `predictor.predict(input:)` is now wrapped in `catchingNSException`,
+/// which converts ObjC exceptions into `CoreMLNativeError.nativeException`
+/// thrown values so callers can recover. A re-entrancy guard serialises
+/// concurrent encode calls to prevent concurrent access to CoreML-internal
+/// resources. Pass `failureLogURL` at init to receive structured crash
+/// telemetry (JSONL) for each caught exception.
 ///
 /// ### Asset distribution
 ///
@@ -52,7 +67,13 @@ public actor T5CoreMLEmbedder: Embedder {
     public nonisolated let stride: Int
 
     private let tokenizer: Tokenizer
-    private let model: MLModel
+    private let predictor: any MLPredictor
+    private let failureLogURL: URL?
+
+    // Re-entrancy guard: serialises concurrent encode calls so CoreML-internal
+    // resources released at prediction-end are not raced by a second call.
+    private var inFlight: Bool = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
 
     // MARK: - Init
 
@@ -69,6 +90,11 @@ public actor T5CoreMLEmbedder: Embedder {
     ///   - stride: sliding-window stride; must satisfy `0 < stride ≤ windowSize`.
     ///   - minNorm: pre-normalisation L2 norm threshold; positions below
     ///     this are dropped.
+    ///   - failureLogURL: optional file URL for structured crash telemetry.
+    ///     When non-nil and a `CoreMLNativeError.nativeException` is caught
+    ///     during prediction, one JSONL row is appended (fields: timestamp,
+    ///     name, reason, inputLength, callStack). The file is created if
+    ///     absent. Pass `nil` (default) to disable all logging and file I/O.
     /// - Throws: any error from `MLModel.compileModel(at:)` or `MLModel(contentsOf:)`.
     public init(
         modelURL: URL,
@@ -78,7 +104,8 @@ public actor T5CoreMLEmbedder: Embedder {
         dims: Int = 128,
         windowSize: Int = 512,
         stride: Int = 256,
-        minNorm: Float = 1.0
+        minNorm: Float = 1.0,
+        failureLogURL: URL? = nil
     ) async throws {
         precondition(dims > 0 && dims % 2 == 0,
                      "dims must be positive and even (Q4 codec packs two nibbles per byte)")
@@ -100,13 +127,14 @@ public actor T5CoreMLEmbedder: Embedder {
             compiledURL = try await MLModel.compileModel(at: modelURL)
         }
 
-        self.model = try MLModel(contentsOf: compiledURL, configuration: configuration)
+        self.predictor = try MLModel(contentsOf: compiledURL, configuration: configuration)
         self.tokenizer = tokenizer
         self.dims = dims
         self.modelIdentifier = modelIdentifier
         self.minNorm = minNorm
         self.windowSize = windowSize
         self.stride = stride
+        self.failureLogURL = failureLogURL
     }
 
     /// Convenience init that resolves the model URL from a `Bundle`.
@@ -120,7 +148,8 @@ public actor T5CoreMLEmbedder: Embedder {
         dims: Int = 128,
         windowSize: Int = 512,
         stride: Int = 256,
-        minNorm: Float = 1.0
+        minNorm: Float = 1.0,
+        failureLogURL: URL? = nil
     ) async throws {
         guard let url = bundle.url(
             forResource: resourceName,
@@ -140,8 +169,36 @@ public actor T5CoreMLEmbedder: Embedder {
             dims: dims,
             windowSize: windowSize,
             stride: stride,
-            minNorm: minNorm
+            minNorm: minNorm,
+            failureLogURL: failureLogURL
         )
+    }
+
+    /// Test-only init: inject an `MLPredictor` stub without loading a real model.
+    ///
+    /// `internal` — access from test targets via `@testable import SwitchcraftCoreML`.
+    internal init(
+        predictor: any MLPredictor,
+        tokenizer: Tokenizer,
+        dims: Int = 128,
+        windowSize: Int = 512,
+        stride: Int = 256,
+        minNorm: Float = 1.0,
+        modelIdentifier: String = "stub@v0",
+        failureLogURL: URL? = nil
+    ) {
+        precondition(dims > 0 && dims % 2 == 0,
+                     "dims must be positive and even")
+        precondition(windowSize > 0)
+        precondition(stride > 0 && stride <= windowSize)
+        self.predictor = predictor
+        self.tokenizer = tokenizer
+        self.dims = dims
+        self.windowSize = windowSize
+        self.stride = stride
+        self.minNorm = minNorm
+        self.modelIdentifier = modelIdentifier
+        self.failureLogURL = failureLogURL
     }
 
     // MARK: - Embedder
@@ -149,10 +206,31 @@ public actor T5CoreMLEmbedder: Embedder {
     /// Encode `text` to a flat row-major `m × dims` `[Float]`. Returns
     /// an empty array for empty / whitespace-only input.
     ///
+    /// ObjC exceptions from CoreML are converted to `CoreMLNativeError`
+    /// and thrown rather than crashing the host process.
+    ///
     /// - Throws: `T5CoreMLEmbedderError.missingOutput` if the CoreML
-    ///   model does not produce the expected feature dictionary; any
-    ///   tokenizer- or CoreML-originated error.
+    ///   model does not produce the expected feature dictionary;
+    ///   `CoreMLNativeError.nativeException` if CoreML raises an internal
+    ///   ObjC exception; any tokenizer-originated error.
     public func encode(_ text: String) async throws -> [Float] {
+        // Re-entrancy guard: if another encode is in progress, queue and wait.
+        if inFlight {
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                waiters.append(cont)
+            }
+        }
+        inFlight = true
+        defer {
+            if let next = waiters.first {
+                waiters = Array(waiters.dropFirst())
+                inFlight = false
+                next.resume()
+            } else {
+                inFlight = false
+            }
+        }
+
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { return [] }
 
@@ -170,44 +248,53 @@ public actor T5CoreMLEmbedder: Embedder {
         perWindowNormalised.reserveCapacity(starts.count)
         perWindowRawNorms.reserveCapacity(starts.count)
 
-        for start in starts {
-            let lo = start
-            let hi = min(start + windowSize, tokens.count)
-            let slice = tokens[lo..<hi]
-            let inputArray = try CoreMLModelIO.makeInputIDs(
-                tokens: slice,
-                windowSize: windowSize
-            )
-            let provider = try MLDictionaryFeatureProvider(dictionary: [
-                CoreMLInputName.inputIDs: MLFeatureValue(multiArray: inputArray)
-            ])
-            let output = try model.prediction(from: provider)
+        do {
+            for start in starts {
+                let lo = start
+                let hi = min(start + windowSize, tokens.count)
+                let slice = tokens[lo..<hi]
+                let inputArray = try CoreMLModelIO.makeInputIDs(
+                    tokens: slice,
+                    windowSize: windowSize
+                )
+                let provider = try MLDictionaryFeatureProvider(dictionary: [
+                    CoreMLInputName.inputIDs: MLFeatureValue(multiArray: inputArray)
+                ])
+                let output = try catchingNSException {
+                    try self.predictor.predict(input: provider)
+                }
 
-            guard
-                let normalisedFV = output.featureValue(for: CoreMLOutputName.normalised),
-                let normalisedArray = normalisedFV.multiArrayValue
-            else {
-                throw T5CoreMLEmbedderError.missingOutput(name: CoreMLOutputName.normalised)
-            }
-            guard
-                let rawFV = output.featureValue(for: CoreMLOutputName.rawProjected),
-                let rawArray = rawFV.multiArrayValue
-            else {
-                throw T5CoreMLEmbedderError.missingOutput(name: CoreMLOutputName.rawProjected)
-            }
+                guard
+                    let normalisedFV = output.featureValue(for: CoreMLOutputName.normalised),
+                    let normalisedArray = normalisedFV.multiArrayValue
+                else {
+                    throw T5CoreMLEmbedderError.missingOutput(name: CoreMLOutputName.normalised)
+                }
+                guard
+                    let rawFV = output.featureValue(for: CoreMLOutputName.rawProjected),
+                    let rawArray = rawFV.multiArrayValue
+                else {
+                    throw T5CoreMLEmbedderError.missingOutput(name: CoreMLOutputName.rawProjected)
+                }
 
-            let normalised = CoreMLModelIO.readEmbeddingTensor(
-                normalisedArray,
-                windowSize: windowSize,
-                dims: dims
-            )
-            let rawNorms = CoreMLModelIO.readRowL2Norms(
-                rawArray,
-                windowSize: windowSize,
-                dims: dims
-            )
-            perWindowNormalised.append(normalised)
-            perWindowRawNorms.append(rawNorms)
+                let normalised = CoreMLModelIO.readEmbeddingTensor(
+                    normalisedArray,
+                    windowSize: windowSize,
+                    dims: dims
+                )
+                let rawNorms = CoreMLModelIO.readRowL2Norms(
+                    rawArray,
+                    windowSize: windowSize,
+                    dims: dims
+                )
+                perWindowNormalised.append(normalised)
+                perWindowRawNorms.append(rawNorms)
+            }
+        } catch let nativeError as CoreMLNativeError {
+            if let logURL = failureLogURL {
+                logNativeException(nativeError, inputLength: text.count, to: logURL)
+            }
+            throw nativeError
         }
 
         let merged = SlidingWindow.merge(
@@ -221,6 +308,77 @@ public actor T5CoreMLEmbedder: Embedder {
         )
         return merged.embeddings
     }
+
+    // MARK: - Private helpers
+
+    private func logNativeException(
+        _ error: CoreMLNativeError,
+        inputLength: Int,
+        to url: URL
+    ) {
+        guard case .nativeException(let name, let reason, let callStack) = error else { return }
+
+        let firstFrames = callStack.prefix(5)
+
+        coreMLLogger.error(
+            "🔴 [COREML-CRASH] name=\(name) reason=\(reason) input_len=\(inputLength)"
+        )
+        for frame in firstFrames {
+            coreMLLogger.error("\(frame)")
+        }
+
+        appendJSONLRow(
+            name: name,
+            reason: reason,
+            inputLength: inputLength,
+            callStack: Array(firstFrames),
+            to: url
+        )
+    }
+
+    private func appendJSONLRow(
+        name: String,
+        reason: String,
+        inputLength: Int,
+        callStack: [String],
+        to url: URL
+    ) {
+        let formatter = ISO8601DateFormatter()
+        let timestamp = formatter.string(from: Date())
+
+        let entry = CoreMLFailureLogEntry(
+            callStack: callStack,
+            inputLength: inputLength,
+            name: name,
+            reason: reason,
+            timestamp: timestamp
+        )
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        guard let data = try? encoder.encode(entry),
+              var line = String(data: data, encoding: .utf8) else { return }
+        line += "\n"
+        guard let lineData = line.data(using: .utf8) else { return }
+
+        let path = url.path
+        if !FileManager.default.fileExists(atPath: path) {
+            FileManager.default.createFile(atPath: path, contents: nil)
+        }
+        guard let handle = FileHandle(forWritingAtPath: path) else { return }
+        defer { try? handle.close() }
+        handle.seekToEndOfFile()
+        handle.write(lineData)
+    }
+}
+
+// Alphabetical CodingKeys so JSONEncoder.sortedKeys produces deterministic output.
+private struct CoreMLFailureLogEntry: Encodable {
+    let callStack: [String]
+    let inputLength: Int
+    let name: String
+    let reason: String
+    let timestamp: String
 }
 
 /// Errors surfaced by `T5CoreMLEmbedder`.
