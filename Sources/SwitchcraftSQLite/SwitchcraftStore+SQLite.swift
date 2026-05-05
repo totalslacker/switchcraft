@@ -8,9 +8,9 @@ extension SwitchcraftStore {
     /// given path. Pass `":memory:"` for an ephemeral store.
     ///
     /// Reopening an existing database resumes its documents and the
-    /// persisted LSM index. Adding new documents after reopen risks
-    /// `Indexer.Error.ledgerOutOfSync` on the next flush — see the
-    /// `SwitchcraftStore.add` docs.
+    /// persisted LSM index. The indexer ledger is rehydrated from
+    /// storage on construction, so `add` + `search` work correctly
+    /// after any actor restart against non-empty persistent storage.
     public static func sqlite(
         databasePath: String,
         embedder: any Embedder,

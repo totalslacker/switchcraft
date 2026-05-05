@@ -57,7 +57,7 @@ struct HybridSearchTests {
     ) {
         let storage = InMemoryStorage()
         try await storage.open()
-        let indexer = Indexer(
+        let indexer = try await Indexer(
             storage: storage,
             config: IndexerConfig.testing(l0Capacity: 1024, lsmFanout: 4)
         )

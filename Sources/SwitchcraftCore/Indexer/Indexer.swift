@@ -23,26 +23,24 @@ import Foundation
 ///  5. `generation.minChunkID` / `generation.maxChunkID` cover all
 ///     chunk IDs included in the generation.
 ///
-/// **MVP limitation**: the indexer keeps every embedding ever added in
-/// an in-memory ledger so cascades can re-cluster lower-level data
-/// without storage round-trips. The ledger does not survive an actor
-/// restart. The Search-pipeline issue will introduce a
-/// `ChunkEmbeddingCodec`, after which the indexer will switch to
-/// reading source embeddings from `storage.chunk(id:)`.
+/// The indexer keeps every embedding in an in-memory ledger for
+/// cascade re-clustering. On construction the ledger is rehydrated
+/// from any existing generations in storage via bucket reconstruction
+/// (center + dequantized Q4 residuals), so the indexer survives actor
+/// restarts against non-empty persistent storage.
 public actor Indexer {
 
-    /// Errors thrown by `Indexer` when the in-memory ledger cannot
-    /// satisfy a flush — typically because the indexer was created
-    /// over a storage that already contains generations whose source
-    /// embeddings were never `add`-ed in this session.
+    /// Errors thrown by `Indexer`.
     public enum Error: Swift.Error, Sendable, Equatable {
         /// The cascade walk computed a row count that does not match the
         /// number of embeddings the in-memory ledger holds for the chunk
-        /// range being merged. Almost always means the ledger has been
-        /// reset (actor restart) while storage retained generations from
-        /// a prior session. Call `clearIndex()` and rebuild, or recreate
-        /// the indexer over an empty storage.
+        /// range being merged.
         case ledgerOutOfSync(ledgerRows: Int, expected: Int)
+        /// The same chunkID was found in two different active generations
+        /// during ledger rehydration, which indicates storage corruption.
+        /// The expected LSM invariant is that each chunkID appears in at
+        /// most one active generation at any given time.
+        case rehydrationConflict(chunkID: Int64)
     }
 
     // MARK: - State
@@ -80,12 +78,81 @@ public actor Indexer {
 
     // MARK: - Init
 
+    /// Create an indexer over the given storage, rehydrating the in-memory
+    /// ledger from any existing generations.
+    ///
+    /// Rehydration reconstructs per-token embeddings as `center + dequantized
+    /// residuals` from bucket data, then populates `ledger` so that a
+    /// subsequent `add` + `flush` against non-empty storage succeeds without
+    /// `ledgerOutOfSync`. If storage has no committed generations the ledger
+    /// starts empty (same behaviour as a fresh index).
+    ///
+    /// - Throws: `Indexer.Error.rehydrationConflict` if the same chunkID
+    ///   appears in two different active generations (storage corruption);
+    ///   any error thrown by `storage.generations()` or
+    ///   `storage.buckets(forGeneration:)`.
+    ///
+    /// **Breaking change**: this initializer is now `async throws`. The only
+    /// in-package call site is `SwitchcraftStore.init`, which is already
+    /// `async throws`. External consumers of `SwitchcraftCore` that construct
+    /// `Indexer` directly must add `try await`.
     public init(
         storage: any SwitchcraftStorage,
         config: IndexerConfig = .production
-    ) {
+    ) async throws {
         self.storage = storage
         self.config = config
+
+        let gens = try await storage.generations()
+        guard !gens.isEmpty else { return }
+
+        // Accumulate (tokenOffset, embedding) triples per chunkID across all
+        // buckets of all generations before populating the ledger. Tokens for
+        // a single chunkID may be spread across multiple buckets, so the sort
+        // step below is required to restore the original tokenOffset order that
+        // performFlush() assumes (row index == tokenOffset).
+        var accum: [Int64: [(tokenOffset: UInt32, embedding: [Float])]] = [:]
+        // Maps chunkID → the generationID where it was first seen. Used to
+        // detect the storage-corruption case of a chunkID in two active gens.
+        var chunkGenMap: [Int64: Int64] = [:]
+        var inferredDims: Int? = nil
+
+        for gen in gens {
+            let buckets = try await storage.buckets(forGeneration: gen.id)
+            for bucket in buckets {
+                let center = Indexer.decodeFloat32LE(bucket.center)
+                guard !center.isEmpty else { continue }
+                let d = center.count
+                inferredDims = d
+
+                let pairs = try IndicesCodec.decode(bucket.indices)
+                let residuals = Q4Codec.decodeResiduals(bucket.residuals)
+
+                for (i, pair) in pairs.enumerated() {
+                    let chunkID = Int64(pair.chunkID)
+                    if let seenInGen = chunkGenMap[chunkID], seenInGen != gen.id {
+                        throw Error.rehydrationConflict(chunkID: chunkID)
+                    }
+                    chunkGenMap[chunkID] = gen.id
+
+                    var embedding = [Float]()
+                    embedding.reserveCapacity(d)
+                    let base = i * d
+                    for j in 0..<d {
+                        embedding.append(center[j] + residuals[base + j])
+                    }
+                    accum[chunkID, default: []].append(
+                        (tokenOffset: pair.tokenOffset, embedding: embedding)
+                    )
+                }
+            }
+        }
+
+        for (chunkID, entries) in accum {
+            let sorted = entries.sorted { $0.tokenOffset < $1.tokenOffset }
+            ledger[chunkID] = sorted.map { $0.embedding }
+        }
+        self.dims = inferredDims
     }
 
     // MARK: - Public API

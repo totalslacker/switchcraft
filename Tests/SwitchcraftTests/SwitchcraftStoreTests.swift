@@ -282,6 +282,56 @@ struct SwitchcraftStoreTests {
         try await reopened.shutdown()
     }
 
+    // MARK: - ledger rehydration after actor restart
+
+    /// Regression test for issue #80: after reopening a store against a
+    /// database that already has committed generations, `add` + `search`
+    /// must succeed without `Indexer.Error.ledgerOutOfSync`.
+    ///
+    /// Pre-fix: step 6 (`add` after reopen) causes `flush` on the next
+    /// `search` to find only the new doc's rows in the ledger while the
+    /// cascade walk counts prior-session rows too → `ledgerOutOfSync`.
+    /// Post-fix: the Indexer rehydrates its ledger from bucket data at
+    /// construction, so ledger row counts always match storage.
+    @Test("reopen then add succeeds: ledger rehydrated from prior-session generations")
+    func reopenThenAddSucceeds() async throws {
+        let (path, cleanup) = Self.makeTempDatabasePath()
+        defer { cleanup() }
+
+        // Session 1: add documents and force a flush so at least one
+        // generation is committed to the SQLite file.
+        do {
+            let store = try await SwitchcraftStore.sqlite(
+                databasePath: path,
+                embedder: MockEmbedder(dims: 32)
+            )
+            try await store.add(id: "doc-a", body: "apple fruit sweet red")
+            try await store.add(id: "doc-b", body: "banana fruit yellow curved")
+            try await store.add(id: "doc-c", body: "cherry fruit dark small")
+            // Explicit flush — ensures an L0 generation exists in storage
+            // before we close the store.
+            try await store.index()
+            try await store.shutdown()
+        }
+
+        // Session 2: open a *new* store against the same file.
+        let reopened = try await SwitchcraftStore.sqlite(
+            databasePath: path,
+            embedder: MockEmbedder(dims: 32)
+        )
+        defer { Task { try? await reopened.shutdown() } }
+
+        // R6: search-after-restart must return hits from the prior session.
+        let hits1 = try await reopened.search(query: "apple fruit", topK: 5)
+        #expect(hits1.count > 0, "search after restart returned no hits")
+
+        // R7: add-then-search-after-restart must NOT throw ledgerOutOfSync.
+        // Before the fix this throws; after the fix it succeeds.
+        try await reopened.add(id: "doc-d", body: "grape fruit purple cluster")
+        let hits2 = try await reopened.search(query: "fruit", topK: 10)
+        #expect(hits2.count > 0, "search after add-then-restart returned no hits")
+    }
+
     // MARK: - dim validation at init
 
     @Test("invalid embedder dims throws invalidEmbeddingDimensions at init")
