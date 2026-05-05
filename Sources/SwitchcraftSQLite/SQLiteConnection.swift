@@ -8,13 +8,15 @@ import SQLite3
 internal let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
 /// Thin wrapper around a sqlite3 handle. Not thread-safe by itself; only
-/// touched from inside the owning `SQLiteStorage` actor.
+/// touched from inside the owning actor.
 final class SQLiteConnection {
     private var handle: OpaquePointer?
 
-    init(path: String) throws {
+    init(
+        path: String,
+        flags: Int32 = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
+    ) throws {
         var h: OpaquePointer?
-        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
         let rc = sqlite3_open_v2(path, &h, flags, nil)
         if rc != SQLITE_OK {
             let message = h.map { String(cString: sqlite3_errmsg($0)) } ?? "open failed"
