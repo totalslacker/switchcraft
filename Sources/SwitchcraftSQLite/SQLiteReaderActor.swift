@@ -35,19 +35,6 @@ actor SQLiteReaderActor {
         connection = nil
     }
 
-    func configureProgressHandler(_ ctx: SearchDeadlineContext?) {
-        guard let conn = connection else { return }
-        if let ctx {
-            let sqlPhaseStart = ContinuousClock.now
-            let elapsed = sqlPhaseStart - ctx.searchStart
-            conn.progressState.sqlPhaseStart = sqlPhaseStart
-            conn.progressState.remainingBudget = max(.zero, ctx.deadline - elapsed)
-            conn.progressState.isActive = true
-        } else {
-            conn.progressState.isActive = false
-        }
-    }
-
     // MARK: - Documents
 
     func document(uuid: String) throws -> DocumentRecord? {
@@ -215,6 +202,21 @@ actor SQLiteReaderActor {
             ))
         }
         return hits
+    }
+
+    // MARK: - Search Deadline
+
+    func configureProgressHandler(_ ctx: SearchDeadlineContext?) {
+        guard let conn = connection else { return }
+        if let ctx {
+            let sqlPhaseStart = ContinuousClock.now
+            let elapsed = sqlPhaseStart - ctx.searchStart
+            conn.progressState.sqlPhaseStart = sqlPhaseStart
+            conn.progressState.remainingBudget = max(.zero, ctx.deadline - elapsed)
+            conn.progressState.isActive = true
+        } else {
+            conn.progressState.isActive = false
+        }
     }
 
     // MARK: - Helpers
