@@ -316,6 +316,7 @@ Track progress by checking off items as they land. Effort estimates and notes fo
 - [x] **SQLite backend** (1-2 weeks) — reference implementation of the storage protocol; native sqlite3
 - [x] **Unigram (SentencePiece) tokenizer** (1-2 weeks) — Port from HuggingFace tokenizer.json; identical token IDs vs Rust
 - [x] **T5 encoder → CoreML** (1-2 weeks) — Model conversion + Swift wrapper
+- [x] **T5CoreMLEmbedder crash-safety** (#78) — `MLExceptionCatcher` ObjC `@try/@catch` bridge (separate `SwitchcraftCoreMLObjC` clang target per ADR 018); `catchingNSException` Swift facade converts CoreML internal `NSException`s to `CoreMLNativeError.nativeException` typed errors; `MLPredictor` internal protocol DI seam; re-entrancy guard (`inFlight` + `waiters` continuations); optional `failureLogURL` for JSONL crash telemetry + `os.Logger` logging
 - [x] **K-means clustering** (1 week) — Standard algorithm, use Accelerate
 - [x] **4-bit residual codec** (1 week) — ~200 lines, bit-level packing; round-trip property tests
 - [x] **LSM-tree index structure** (1 week) — Cascading merge logic
