@@ -340,6 +340,7 @@ Track progress by checking off items as they land. Effort estimates and notes fo
   - [x] **#65** — NFCorpus NDCG@10 gate confirmed (issue #75, 2026-05-02): observed NDCG@10 = 0.336 with `T5MetalEmbedder` + `xtr-v3.gguf` (Q4K). Metal-specific band `[0.31, 0.34]` (upper bound calibrated above Witchcraft's 0.33 ggml ceiling due to FP32-throughout arithmetic per ADR 014). Cross-stack tolerance calibrated: `maxAbs = 0.000216`, in-tree constant = `0.0005` (`2 × maxAbs`, rounded). ADR 010(h) fully updated.
   - [x] **#74** — Six operator-pipeline defects blocking the NDCG@10 gate: (1) GGUF reader strict v3-only check rejects the v2 asset emitted by Witchcraft's `quantize-tool` at Candle rev `5bd5618` — relaxed to v2 ∪ v3; `GGUFReader.loadedVersion` property exposed for debugging; (2) `GGUFTypes.unsupportedVersion` description updated; (3) `GGUFReaderTests` rejection test corrected to use v1, v2/v3 acceptance tests added; (4) `T5MetalEmbedder.projCandidates` missing `"linear.weight"` (the bare name `quantize-tool` writes) — added; regression test added; (5) `linear.weight` incorrectly Q4_K-quantised by `quantize-tool` (768 % 256 == 0 false positive) — `scripts/witchcraft-fixture-export.patch` adds `name != "linear.weight" &&` carve-out to `quantize-tool/src/main.rs`; (6) `witchcraft-fixture-export.patch` corrupt (truncated hunk header, moved `PackOps` trait methods, `Tensor.iter()` non-existent) — patch reconstructed. ADRs 010/016/017 and `docs/porting/ggml-t5.md` updated coherently.
 - [x] **Metal compute shaders for search hot paths — scaffolding** (#51 / PR #56, ADR 015). Per-kernel sub-issues (#52/#53/#54) closed as wrongly-scoped after #49 established Accelerate beats MPS; future kernel work goes against ggml's targets, not Accelerate — see "Search-side Metal: rescoped" below
+- [x] **Per-search wall-time deadline and cooperative task cancellation** (#83, ADR 020) — `SearchConfig.searchDeadline` (default 5 s), per-call `deadline: Duration?` override on `SwitchcraftStore.search()`, pre-phase deadline checkpoints, `sqlite3_progress_handler` with remaining-budget enforcement, `Task.checkCancellation()` at key storage checkpoints, `SwitchcraftStoreError.searchTimedOut(elapsed:)`
 - [ ] LRU caching for query embeddings
 - [ ] Background indexing pipeline
 - [ ] Parallel bucket search
@@ -796,6 +797,7 @@ Tests that Witchcraft doesn't have but Switchcraft must. Each suite below is a d
 - [x] CoreML Inference suite (parity vs Candle, tokenizer parity, sliding window, low-signal filtering)
 - [x] Edge Cases suite (empty/short queries, very long docs, stopwords, Unicode, dedup, removal)
 - [x] Performance Regression suite (search latency, indexing throughput, memory)
+- [x] Search Timeout and Cancellation suite (pre-checkpoint path, progress-handler interrupt, task cancellation, happy-path regression, post-timeout recovery)
 
 #### GEMM / Matrix Operations
 
