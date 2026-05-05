@@ -97,8 +97,11 @@ fast-path optimisation; the writer's dedup gate is authoritative.
   into N is a localised change inside the façade.
 
 **Neutral**
-- Slight actor-hopping overhead per call (~microseconds) as the façade awaits
-  the sub-actor. Sequential-perf regression measured at ≤5% for 1,000 writes.
+- Actor-hopping overhead per call (~14–15µs per hop on Apple silicon) as the
+  façade awaits the sub-actor. Sequential-perf regression measured at ~18%
+  (~29µs/write) for 1,000 writes — two actor hops per write call. In absolute
+  terms this adds ~190ms to a 6,511-chunk indexing run, which is dominated by
+  the benefit of eliminating search-induced stalls (200ms–several seconds each).
 - WAL checkpoint growth is unchanged from before: the reader snapshot window
   is bounded by the longest in-flight read, same as today. Checkpoint
   management is deferred to V2.
