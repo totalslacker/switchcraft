@@ -16,4 +16,10 @@ public enum SwitchcraftStoreError: Error, Equatable, Sendable {
     /// The embedder returned a buffer whose length is not a multiple of
     /// `dims`. Indicates a buggy `Embedder` implementation.
     case embeddingMismatch(count: Int, dims: Int)
+
+    /// The search exceeded its configured wall-time deadline. `elapsed`
+    /// is total time since `search()` was entered — it is always ≥ the
+    /// configured deadline (within one progress-handler tick for the
+    /// SQLite-interrupt path).
+    case searchTimedOut(elapsed: Duration)
 }

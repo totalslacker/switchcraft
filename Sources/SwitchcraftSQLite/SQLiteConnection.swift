@@ -7,12 +7,54 @@ import SQLite3
 /// recreate it with `unsafeBitCast`.
 internal let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
+/// Mutable state shared between `SQLiteConnection` and the C progress
+/// handler callback. Heap-allocated so a stable pointer can be passed to
+/// `sqlite3_progress_handler`. Mutated only from inside the owning
+/// `SQLiteStorage` actor (which serialises all SQLite access), so there
+/// is no concurrent access even though the C callback fires on the same
+/// thread as `sqlite3_step`.
+final class ProgressHandlerState {
+    /// When `false` the callback returns 0 immediately (no-op). Set to
+    /// `true` only while a search call is in-flight with a deadline.
+    /// Disarming via this flag ensures that write operations issued after
+    /// a timed-out search are not interrupted by a stale budget value.
+    var isActive: Bool = false
+    var sqlPhaseStart: ContinuousClock.Instant = ContinuousClock.now
+    var remainingBudget: Duration = .seconds(86_400)
+}
+
+/// C-compatible progress callback invoked every N SQLite VM instructions.
+/// Returns 0 to continue, 1 to request `SQLITE_INTERRUPT`.
+private func sqliteProgressCallback(_ ctx: UnsafeMutableRawPointer?) -> Int32 {
+    guard let ctx else { return 0 }
+    let state = Unmanaged<ProgressHandlerState>.fromOpaque(ctx).takeUnretainedValue()
+    guard state.isActive else { return 0 }
+    return (ContinuousClock.now - state.sqlPhaseStart) >= state.remainingBudget ? 1 : 0
+}
+
 /// Thin wrapper around a sqlite3 handle. Not thread-safe by itself; only
 /// touched from inside the owning `SQLiteStorage` actor.
 final class SQLiteConnection {
     private var handle: OpaquePointer?
 
+    /// Shared state between the connection and the C progress callback.
+    /// Remains valid for the entire lifetime of the connection. Accessed
+    /// by `SQLiteStorage` to configure per-search deadlines.
+    let progressState: ProgressHandlerState
+
+    /// Retained opaque pointer passed to `sqlite3_progress_handler`. One
+    /// extra retain is held beyond `progressState`'s ARC count; released
+    /// in `deinit` to balance the `passRetained` in `init`.
+    private let progressStatePtr: UnsafeMutableRawPointer
+
     init(path: String) throws {
+        // Initialise all stored properties before any potential throw so
+        // that `deinit` is always called and can release resources.
+        let state = ProgressHandlerState()
+        self.progressState = state
+        self.progressStatePtr = Unmanaged.passRetained(state).toOpaque()
+        self.handle = nil
+
         var h: OpaquePointer?
         let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
         let rc = sqlite3_open_v2(path, &h, flags, nil)
@@ -22,10 +64,16 @@ final class SQLiteConnection {
             throw SQLiteError(code: rc, message: message)
         }
         self.handle = h
+        // N = 10_000 VM instructions ≈ 5–20 ms at typical SQLite throughput.
+        // This granularity is precise enough for a 5-second deadline with
+        // negligible overhead. See ADR 019.
+        sqlite3_progress_handler(h, 10_000, sqliteProgressCallback, progressStatePtr)
     }
 
     deinit {
         sqlite3_close_v2(handle)
+        // Release the extra retain added by `passRetained` in `init`.
+        Unmanaged<ProgressHandlerState>.fromOpaque(progressStatePtr).release()
     }
 
     func execute(_ sql: String) throws {
