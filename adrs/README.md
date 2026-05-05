@@ -23,3 +23,4 @@ ADRs document significant design decisions for Switchcraft. Each file follows th
 - [015 — Metal context and dispatch](015-metal-context-and-dispatch.md)
 - [016 — GGUF asset distribution](016-gguf-asset-distribution.md)
 - [017 — Per-op precision routing in T5MetalEmbedder](017-per-op-precision-routing.md)
+- [018 — Separate ObjC clang target for the CoreML exception bridge](018-objc-clang-target-for-exception-bridge.md)
