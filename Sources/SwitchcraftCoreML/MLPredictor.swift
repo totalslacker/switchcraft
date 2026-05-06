@@ -16,9 +16,10 @@ internal protocol MLPredictor: Sendable {
     func predict(input: any MLFeatureProvider) throws -> any MLFeatureProvider
 }
 
-// @unchecked: retroactive conformance (MLModel is from CoreML); safe because
-// all access is gated through T5CoreMLEmbedder's actor isolation.
+// @unchecked: retroactive conformances (types from CoreML); safe because all
+// access is gated through T5CoreMLEmbedder's actor isolation.
 extension MLModel: @unchecked Sendable {}
+extension MLDictionaryFeatureProvider: @unchecked Sendable {}
 
 extension MLModel: MLPredictor {
     internal func predict(input: any MLFeatureProvider) throws -> any MLFeatureProvider {

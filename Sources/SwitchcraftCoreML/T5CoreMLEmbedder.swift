@@ -496,7 +496,7 @@ public actor T5CoreMLEmbedder: Embedder {
     /// Run one window prediction with autoreleasepool drainage, reactive reload,
     /// ANE retry, and IOSurface CPU fallback.
     private func predictWindow(
-        provider: any MLFeatureProvider,
+        provider: MLDictionaryFeatureProvider,
         inputLength: Int,
         windowTokenCount: Int
     ) throws -> any MLFeatureProvider {
