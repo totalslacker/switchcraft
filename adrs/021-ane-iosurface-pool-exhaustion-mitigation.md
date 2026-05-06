@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Amended (2026-05-06 — see addendum below)
 
 ## Context
 
@@ -149,3 +149,52 @@ returns a succeeding `CountingStubPredictor`.
 - ADR 018 — ObjC `@try/@catch` bridge pattern (`catchingNSException`); the same
   bridge wraps the CPU-fallback retry.
 - Issue #87 — original failure report with `coreml-failures.jsonl` evidence.
+
+## 2026-05-06 Addendum (Issue #90)
+
+### Production evidence invalidated key assumptions
+
+A SafariUnfucker bulk-index run against the post-#88 binary (issue #90 report) showed:
+
+- **388 successful inferences, then 6,157 consecutive failures** — 100% identical IOSurface
+  error, zero `category: "warning"` / `recovered_iosurface_exhaustion` entries.
+- The first failure had `inputLength=593285` tokens (~600k). After this single oversized
+  page the pool was poisoned for all subsequent inputs regardless of size.
+- **The default `reloadInterval: 500` fired after the real-world failure point**, rendering
+  proactive reload ineffective for this corpus.
+- **CPU fallback silently failed** — the code logged `category: "error"` whether recovery
+  was attempted or not, providing no diagnostic signal.
+- **Reactive reload + ANE retry was missing entirely** — Layer 3 jumped directly to CPU
+  fallback without first trying a fresh ANE model.
+
+### Changes shipped in issue #90
+
+**`reloadInterval` default lowered to 150.** 150 is ~2.6× below the observed 388-call
+failure point, providing meaningful margin. The "≥10,000 consecutive encode calls" claim
+in the Consequences section above applies to uniform small-input corpora. High-variance
+corpora (e.g., web pages with a few very long inputs) exhaust the pool faster. The
+default must sit below the observed real-world failure point, not be calibrated to a
+single prior corpus.
+
+**Three-state `category` scheme for JSONL rows.** The original design had two states
+(`"error"`, `"warning"`). A third state is now needed:
+- `"warning"` (`"recovered_iosurface_exhaustion"`): CPU fallback succeeded — unchanged.
+- `"cpu_fallback_failed"`: CPU fallback was attempted but also failed. The row includes
+  `cpuErrorName`, `cpuErrorReason`, `cpuCallStack` fields capturing the CPU-side error.
+- `"error"`: IOSurface was not the cause, or `cpuPredictorFactory` is nil — unchanged.
+
+**Reactive reload + ANE retry added to Layer 3.** On IOSurface failure, `predictWindow`
+now force-reloads the predictor via `predictorFactory()` and retries on ANE before falling
+back to CPU. This prevents a single poisoned inference from making the pool irrecoverable
+for subsequent calls. Note: if the ANE IOSurface pool is process-global, the reload may
+not recover it — but the CPU fallback still fires, and the new logging will confirm this.
+
+**Adaptive byte-pressure reload threshold is a follow-up item.** A more principled
+long-term solution tracks `inputLength × dims × 4 bytes` accumulated per call and reloads
+when it exceeds a threshold (size-dominated exhaustion, not call-count-dominated). This
+is out of scope for issue #90 and should be filed as a separate issue.
+
+### References
+
+- Issue #90 — production failure report and bug fixes.
+- Issue #89 — parallel input-size guard (structural prevention of size-driven trigger).
