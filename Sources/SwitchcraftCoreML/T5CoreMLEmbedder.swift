@@ -149,6 +149,7 @@ public actor T5CoreMLEmbedder: Embedder {
                      "dims must be positive and even (Q4 codec packs two nibbles per byte)")
         precondition(windowSize > 0)
         precondition(stride > 0 && stride <= windowSize)
+        precondition(reloadInterval > 0, "reloadInterval must be positive (used as modulo divisor)")
 
         let configuration = MLModelConfiguration()
         configuration.computeUnits = computeUnits
@@ -288,6 +289,7 @@ public actor T5CoreMLEmbedder: Embedder {
                      "dims must be positive and even")
         precondition(windowSize > 0)
         precondition(stride > 0 && stride <= windowSize)
+        precondition(reloadInterval > 0, "reloadInterval must be positive (used as modulo divisor)")
         self.predictorFactory = predictorFactory
         self.cpuPredictorFactory = cpuPredictorFactory
         self.predictor = try predictorFactory()
@@ -334,8 +336,16 @@ public actor T5CoreMLEmbedder: Embedder {
             }
         }
 
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return [] }
+
+        let tokens = try tokenizer.encode(text, addSpecialTokens: true)
+        if tokens.isEmpty { return [] }
+
         // Proactive model reload: recreate the predictor every reloadInterval
         // encodes to flush accumulated ANE IOSurface resources.
+        // Counter increments only for real inference calls (whitespace-only inputs
+        // are excluded so transient noise doesn't skew the reload cadence).
         callCount += 1
         if callCount % reloadInterval == 0 {
             do {
@@ -350,12 +360,6 @@ public actor T5CoreMLEmbedder: Embedder {
                 // Keep existing predictor; if it also fails, the error surfaces normally.
             }
         }
-
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty { return [] }
-
-        let tokens = try tokenizer.encode(text, addSpecialTokens: true)
-        if tokens.isEmpty { return [] }
 
         let starts = SlidingWindow.plan(
             tokenCount: tokens.count,

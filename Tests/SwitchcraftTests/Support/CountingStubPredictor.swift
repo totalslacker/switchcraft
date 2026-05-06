@@ -5,8 +5,9 @@ import Foundation
 #if canImport(CoreML)
 import CoreML
 
-/// A fast test-only `MLPredictor` stub that returns valid zeroed embeddings
+/// A fast test-only `MLPredictor` stub that returns valid non-zero embeddings
 /// with no artificial delay.
+/// Raw values are 1.0; normalised values are `1/√dims` (a unit-norm row).
 ///
 /// Used by stress tests and reload-verification tests. Configure `failInterval`
 /// to have the stub raise an IOSurface-like `NSException` periodically,
@@ -25,6 +26,8 @@ final class CountingStubPredictor: MLPredictor, @unchecked Sendable {
     private var callCount: Int = 0
 
     init(failInterval: Int? = nil, dims: Int = 128) {
+        precondition(failInterval == nil || failInterval! > 0,
+                     "failInterval must be positive (used as modulo divisor)")
         self.failInterval = failInterval
         self.dims = dims
     }
@@ -70,11 +73,19 @@ final class CountingStubPredictor: MLPredictor, @unchecked Sendable {
 /// closure is invoked. Pass an instance to a `@Sendable` factory closure;
 /// call `increment()` inside the factory; read `count` in the test assertion.
 ///
-/// Safe to use from actor-serialised factory closures without additional locking.
+/// Protected by an `NSLock` so `increment()` and `count` are safe to call
+/// from different executors (e.g. actor-isolated factory vs. test body).
 final class FactoryCallCounter: @unchecked Sendable {
+    private let lock = NSLock()
     private var _count: Int = 0
-    var count: Int { _count }
-    func increment() { _count += 1 }
+    var count: Int {
+        lock.lock(); defer { lock.unlock() }
+        return _count
+    }
+    func increment() {
+        lock.lock(); defer { lock.unlock() }
+        _count += 1
+    }
 }
 
 #endif
