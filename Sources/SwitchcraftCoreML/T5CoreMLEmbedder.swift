@@ -462,7 +462,6 @@ public actor T5CoreMLEmbedder: Embedder {
 
             // Layer 3a — Reactive reload + ANE retry: force-reload the predictor
             // and retry on ANE before falling back to CPU.
-            var aneRetrySucceeded = false
             do {
                 self.predictor = try predictorFactory()
                 let retryResult = try autoreleasepool {
@@ -472,14 +471,12 @@ public actor T5CoreMLEmbedder: Embedder {
                 coreMLLogger.info(
                     "predictWindow (ANE retry): \(windowTokenCount, privacy: .public) tokens, \(elapsed, privacy: .public)ms"
                 )
-                aneRetrySucceeded = true
                 return retryResult
             } catch {
                 coreMLLogger.warning(
                     "T5CoreMLEmbedder: reactive reload/ANE retry failed, falling back to CPU: \(error, privacy: .public)"
                 )
             }
-            _ = aneRetrySucceeded  // suppress unused-variable warning
 
             // Layer 3b — CPU fallback: retry this window on .cpuOnly.
             do {
