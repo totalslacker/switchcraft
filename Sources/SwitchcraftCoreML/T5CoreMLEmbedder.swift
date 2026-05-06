@@ -87,6 +87,20 @@ public actor T5CoreMLEmbedder: Embedder {
     /// `windowSize`. `256` matches Witchcraft's sliding-window stride.
     public nonisolated let stride: Int
 
+    /// Maximum total token count across all sliding windows that the embedder
+    /// will accept in a single `encode` call. Inputs that tokenise to more
+    /// tokens than this value are handled according to `overflowPolicy`.
+    ///
+    /// Default `8 * windowSize` (4,096 for the standard 512-token window),
+    /// yielding ~15 windows at stride 256 — well below the ~577-window burst
+    /// that exhausted the ANE IOSurface pool. Must be ≥ `windowSize`.
+    public nonisolated let maxInputTokens: Int
+
+    /// Controls behaviour when a tokenised input exceeds `maxInputTokens`.
+    /// `.truncate` (default) silently clips to the prefix; `.reject` throws
+    /// `EmbedderError.inputTooLarge(actual:max:)`.
+    public nonisolated let overflowPolicy: EmbedderOverflowPolicy
+
     private let tokenizer: Tokenizer
     private var predictor: any MLPredictor
     /// Recreates the main predictor on demand; used by proactive reload to
@@ -136,6 +150,12 @@ public actor T5CoreMLEmbedder: Embedder {
     ///     accumulated ANE IOSurface resources. Default `150` — see the stored
     ///     property doc-comment for tuning guidance. Existing callers that omit
     ///     this parameter are unaffected.
+    ///   - maxInputTokens: maximum total token count accepted per `encode` call.
+    ///     Inputs exceeding this limit are handled by `overflowPolicy`. Default
+    ///     `8 * windowSize`. Must be ≥ `windowSize`.
+    ///   - overflowPolicy: `.truncate` (default) clips oversized inputs to the
+    ///     first `maxInputTokens` tokens; `.reject` throws
+    ///     `EmbedderError.inputTooLarge(actual:max:)`.
     /// - Throws: any error from `MLModel.compileModel(at:)` or `MLModel(contentsOf:)`.
     public init(
         modelURL: URL,
@@ -147,13 +167,18 @@ public actor T5CoreMLEmbedder: Embedder {
         stride: Int = 256,
         minNorm: Float = 1.0,
         failureLogURL: URL? = nil,
-        reloadInterval: Int = 150
+        reloadInterval: Int = 150,
+        maxInputTokens: Int? = nil,
+        overflowPolicy: EmbedderOverflowPolicy = .truncate
     ) async throws {
         precondition(dims > 0 && dims % 2 == 0,
                      "dims must be positive and even (Q4 codec packs two nibbles per byte)")
         precondition(windowSize > 0)
         precondition(stride > 0 && stride <= windowSize)
         precondition(reloadInterval > 0, "reloadInterval must be positive (used as modulo divisor)")
+        let resolvedMaxInputTokens = maxInputTokens ?? 8 * windowSize
+        precondition(resolvedMaxInputTokens >= windowSize,
+                     "maxInputTokens must be >= windowSize (got \(resolvedMaxInputTokens) < \(windowSize))")
 
         let configuration = MLModelConfiguration()
         configuration.computeUnits = computeUnits
@@ -198,6 +223,8 @@ public actor T5CoreMLEmbedder: Embedder {
         self.stride = stride
         self.failureLogURL = failureLogURL
         self.reloadInterval = reloadInterval
+        self.maxInputTokens = resolvedMaxInputTokens
+        self.overflowPolicy = overflowPolicy
     }
 
     /// Convenience init that resolves the model URL from a `Bundle`.
@@ -213,7 +240,9 @@ public actor T5CoreMLEmbedder: Embedder {
         stride: Int = 256,
         minNorm: Float = 1.0,
         failureLogURL: URL? = nil,
-        reloadInterval: Int = 150
+        reloadInterval: Int = 150,
+        maxInputTokens: Int? = nil,
+        overflowPolicy: EmbedderOverflowPolicy = .truncate
     ) async throws {
         guard let url = bundle.url(
             forResource: resourceName,
@@ -235,7 +264,9 @@ public actor T5CoreMLEmbedder: Embedder {
             stride: stride,
             minNorm: minNorm,
             failureLogURL: failureLogURL,
-            reloadInterval: reloadInterval
+            reloadInterval: reloadInterval,
+            maxInputTokens: maxInputTokens,
+            overflowPolicy: overflowPolicy
         )
     }
 
@@ -250,12 +281,17 @@ public actor T5CoreMLEmbedder: Embedder {
         stride: Int = 256,
         minNorm: Float = 1.0,
         modelIdentifier: String = "stub@v0",
-        failureLogURL: URL? = nil
+        failureLogURL: URL? = nil,
+        maxInputTokens: Int? = nil,
+        overflowPolicy: EmbedderOverflowPolicy = .truncate
     ) {
         precondition(dims > 0 && dims % 2 == 0,
                      "dims must be positive and even")
         precondition(windowSize > 0)
         precondition(stride > 0 && stride <= windowSize)
+        let resolvedMaxInputTokens = maxInputTokens ?? 8 * windowSize
+        precondition(resolvedMaxInputTokens >= windowSize,
+                     "maxInputTokens must be >= windowSize")
         let capturedPredictor = predictor
         self.predictorFactory = { capturedPredictor }
         self.cpuPredictorFactory = nil
@@ -268,6 +304,8 @@ public actor T5CoreMLEmbedder: Embedder {
         self.modelIdentifier = modelIdentifier
         self.failureLogURL = failureLogURL
         self.reloadInterval = 150
+        self.maxInputTokens = resolvedMaxInputTokens
+        self.overflowPolicy = overflowPolicy
     }
 
     /// Test-only init: inject a factory for predictor lifecycle testing.
@@ -287,13 +325,18 @@ public actor T5CoreMLEmbedder: Embedder {
         minNorm: Float = 1.0,
         modelIdentifier: String = "stub@v0",
         failureLogURL: URL? = nil,
-        reloadInterval: Int = 150
+        reloadInterval: Int = 150,
+        maxInputTokens: Int? = nil,
+        overflowPolicy: EmbedderOverflowPolicy = .truncate
     ) throws {
         precondition(dims > 0 && dims % 2 == 0,
                      "dims must be positive and even")
         precondition(windowSize > 0)
         precondition(stride > 0 && stride <= windowSize)
         precondition(reloadInterval > 0, "reloadInterval must be positive (used as modulo divisor)")
+        let resolvedMaxInputTokens = maxInputTokens ?? 8 * windowSize
+        precondition(resolvedMaxInputTokens >= windowSize,
+                     "maxInputTokens must be >= windowSize")
         self.predictorFactory = predictorFactory
         self.cpuPredictorFactory = cpuPredictorFactory
         self.predictor = try predictorFactory()
@@ -305,6 +348,8 @@ public actor T5CoreMLEmbedder: Embedder {
         self.modelIdentifier = modelIdentifier
         self.failureLogURL = failureLogURL
         self.reloadInterval = reloadInterval
+        self.maxInputTokens = resolvedMaxInputTokens
+        self.overflowPolicy = overflowPolicy
     }
 
     // MARK: - Embedder
@@ -317,8 +362,10 @@ public actor T5CoreMLEmbedder: Embedder {
     /// failures are silently retried on CPU (see class doc-comment); callers
     /// only receive an error if the retry also fails.
     ///
-    /// - Throws: `T5CoreMLEmbedderError.missingOutput` if the CoreML
-    ///   model does not produce the expected feature dictionary;
+    /// - Throws: `EmbedderError.inputTooLarge(actual:max:)` when the token
+    ///   count exceeds `maxInputTokens` and `overflowPolicy` is `.reject`;
+    ///   `T5CoreMLEmbedderError.missingOutput` if the CoreML model does not
+    ///   produce the expected feature dictionary;
     ///   `CoreMLNativeError.nativeException` if CoreML raises an internal
     ///   ObjC exception that the embedder cannot recover from; any
     ///   tokenizer-originated error.
@@ -343,8 +390,19 @@ public actor T5CoreMLEmbedder: Embedder {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { return [] }
 
-        let tokens = try tokenizer.encode(text, addSpecialTokens: true)
+        var tokens = try tokenizer.encode(text, addSpecialTokens: true)
         if tokens.isEmpty { return [] }
+
+        // Overflow guard: prevent oversized inputs from generating hundreds of
+        // sliding windows and exhausting the ANE IOSurface buffer pool (ADR 022).
+        if tokens.count > maxInputTokens {
+            switch overflowPolicy {
+            case .truncate:
+                tokens = Array(tokens.prefix(maxInputTokens))
+            case .reject:
+                throw EmbedderError.inputTooLarge(actual: tokens.count, max: maxInputTokens)
+            }
+        }
 
         // Proactive model reload: recreate the predictor every reloadInterval
         // encodes to flush accumulated ANE IOSurface resources.
@@ -438,7 +496,7 @@ public actor T5CoreMLEmbedder: Embedder {
     /// Run one window prediction with autoreleasepool drainage, reactive reload,
     /// ANE retry, and IOSurface CPU fallback.
     private func predictWindow(
-        provider: any MLFeatureProvider,
+        provider: MLDictionaryFeatureProvider,
         inputLength: Int,
         windowTokenCount: Int
     ) throws -> any MLFeatureProvider {

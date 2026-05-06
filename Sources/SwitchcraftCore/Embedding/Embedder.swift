@@ -27,7 +27,18 @@ public protocol Embedder: Sendable {
     /// Stable identifier for the model. Recorded on `ChunkRecord.model`.
     var modelIdentifier: String { get }
 
+    /// Maximum number of tokens the embedder will process in a single `encode`
+    /// call. Inputs that tokenise to more tokens than this limit are handled
+    /// according to the conformer's configured `EmbedderOverflowPolicy`.
+    ///
+    /// Conformers should expose this as a `nonisolated let` stored property so
+    /// callers can read the limit without entering an actor.
+    var maxInputTokens: Int { get }
+
     /// Encode `text` into a flat row-major `n × dims` per-token embedding
     /// matrix. Returns an empty array for empty / whitespace-only text.
+    ///
+    /// - Throws: `EmbedderError.inputTooLarge(actual:max:)` when the token
+    ///   count exceeds `maxInputTokens` and the overflow policy is `.reject`.
     func encode(_ text: String) async throws -> [Float]
 }

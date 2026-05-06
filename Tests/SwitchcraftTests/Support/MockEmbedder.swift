@@ -15,6 +15,7 @@ import SwitchcraftCore
 struct MockEmbedder: Embedder, Sendable {
     let dims: Int
     let modelIdentifier: String
+    let maxInputTokens: Int = Int.max
 
     init(dims: Int = 128, modelIdentifier: String? = nil) {
         precondition(dims > 0 && dims % 2 == 0,

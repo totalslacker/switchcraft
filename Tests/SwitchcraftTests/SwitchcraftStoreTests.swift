@@ -339,6 +339,7 @@ struct SwitchcraftStoreTests {
         struct OddDimsEmbedder: Embedder {
             let dims = 33
             let modelIdentifier = "odd"
+            let maxInputTokens: Int = Int.max
             func encode(_ text: String) async throws -> [Float] { [] }
         }
 
