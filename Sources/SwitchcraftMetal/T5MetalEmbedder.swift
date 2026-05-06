@@ -65,6 +65,8 @@ public actor T5MetalEmbedder: Embedder {
     public nonisolated let minNorm: Float
     public nonisolated let windowSize: Int
     public nonisolated let stride: Int
+    public nonisolated let maxInputTokens: Int
+    public nonisolated let overflowPolicy: EmbedderOverflowPolicy
 
     // MARK: - Architecture constants
     //
@@ -149,12 +151,17 @@ public actor T5MetalEmbedder: Embedder {
         windowSize windowSizeParam: Int = 512,
         stride strideParam: Int = 256,
         minNorm minNormParam: Float = 1.0,
-        modelIdentifier modelIdentifierParam: String = "google/xtr-base-en@v1+gguf"
+        modelIdentifier modelIdentifierParam: String = "google/xtr-base-en@v1+gguf",
+        maxInputTokens maxInputTokensParam: Int? = nil,
+        overflowPolicy overflowPolicyParam: EmbedderOverflowPolicy = .truncate
     ) async throws {
         precondition(dimsParam > 0 && dimsParam % 2 == 0,
                      "dims must be positive and even (Q4 codec packs two nibbles per byte)")
         precondition(windowSizeParam > 0)
         precondition(strideParam > 0 && strideParam <= windowSizeParam)
+        let resolvedMaxInputTokens = maxInputTokensParam ?? 8 * windowSizeParam
+        precondition(resolvedMaxInputTokens >= windowSizeParam,
+                     "maxInputTokens must be >= windowSize")
 
         guard let context = MetalContext.shared else {
             throw T5MetalEmbedderError.metalUnavailable
@@ -414,6 +421,8 @@ public actor T5MetalEmbedder: Embedder {
         self.minNorm = minNormParam
         self.windowSize = windowSizeParam
         self.stride = strideParam
+        self.maxInputTokens = resolvedMaxInputTokens
+        self.overflowPolicy = overflowPolicyParam
         self.tokenizer = tokenizer
         self.context = context
         self.layers = layerWeights
@@ -456,8 +465,19 @@ public actor T5MetalEmbedder: Embedder {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { return [] }
 
-        let tokens = try tokenizer.encode(text, addSpecialTokens: true)
+        var tokens = try tokenizer.encode(text, addSpecialTokens: true)
         if tokens.isEmpty { return [] }
+
+        // Overflow guard: prevent oversized inputs from generating hundreds of
+        // Metal command buffers and exhausting device memory (ADR 022).
+        if tokens.count > maxInputTokens {
+            switch overflowPolicy {
+            case .truncate:
+                tokens = Array(tokens.prefix(maxInputTokens))
+            case .reject:
+                throw EmbedderError.inputTooLarge(actual: tokens.count, max: maxInputTokens)
+            }
+        }
 
         let starts = SlidingWindow.plan(
             tokenCount: tokens.count,

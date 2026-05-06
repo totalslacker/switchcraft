@@ -55,6 +55,7 @@ struct SearchTimeoutTests {
 
         var dims: Int { inner.dims }
         var modelIdentifier: String { inner.modelIdentifier }
+        var maxInputTokens: Int { inner.maxInputTokens }
 
         func encode(_ text: String) async throws -> [Float] {
             // Task.sleep respects task cancellation: it throws
