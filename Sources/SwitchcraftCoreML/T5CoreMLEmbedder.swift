@@ -38,17 +38,21 @@ private let coreMLLogger = Logger(subsystem: "com.switchcraft.coreml", category:
 /// ### ANE IOSurface pool mitigation
 ///
 /// Under sustained bulk-inference load the ANE IOSurface buffer pool exhausts
-/// after ~1,000 encodes, causing every subsequent inference to fail with
-/// "Failed to allocate E5 buffer object." Three defence layers work together:
+/// after ~388+ encodes on high-variance corpora, causing every subsequent
+/// inference to fail with "Failed to allocate E5 buffer object." Three defence
+/// layers work together:
 ///
 /// 1. `autoreleasepool` drains CoreML-internal ObjC buffers after each window.
 /// 2. Proactive model reload every `reloadInterval` encodes flushes accumulated
 ///    ANE resources before the pool is exhausted. Each reload takes 1–3 s on
 ///    ANE-capable hardware (CPU recompile is faster); tune `reloadInterval`
 ///    to balance stall frequency against pool pressure for your workload.
-/// 3. Reactive CPU fallback retries a window on `.cpuOnly` when an IOSurface
-///    allocation exception is caught despite the above; the result is logged
-///    as `"recovered_iosurface_exhaustion"` in `failureLogURL` (when set).
+/// 3. On IOSurface failure: force-reload + ANE retry first; if that also fails,
+///    retry the window on `.cpuOnly`. Logged in `failureLogURL` (when set)
+///    with three distinct `category` values:
+///    - `"warning"` (`"recovered_iosurface_exhaustion"`): CPU fallback succeeded.
+///    - `"cpu_fallback_failed"`: CPU fallback was attempted but also failed.
+///    - `"error"`: IOSurface was not the cause (no recovery attempted).
 ///
 /// See ADR 021 for the full rationale.
 ///
@@ -95,8 +99,8 @@ public actor T5CoreMLEmbedder: Embedder {
     private var callCount: Int = 0
     /// Number of `encode` calls between proactive model reloads.
     ///
-    /// The observed ANE IOSurface pool exhausts at roughly ~1,000 `encode`
-    /// calls in a long-running bulk-index run; 500 provides comfortable margin.
+    /// Real-world evidence shows ANE IOSurface pool exhaustion at ~388 calls on
+    /// high-variance corpora; 150 provides comfortable margin below that point.
     /// Model reload with ANE compilation takes 1–3 s on Apple Silicon — tune
     /// this value upward on workloads where that periodic stall is unacceptable,
     /// or downward on hardware where the pool is smaller.
@@ -129,7 +133,7 @@ public actor T5CoreMLEmbedder: Embedder {
     ///     if absent. Pass `nil` (default) to disable all logging and file I/O.
     ///   - reloadInterval: how many `encode` calls to allow between proactive
     ///     model reloads. Each reload recreates the `MLModel` to flush
-    ///     accumulated ANE IOSurface resources. Default `500` — see the stored
+    ///     accumulated ANE IOSurface resources. Default `150` — see the stored
     ///     property doc-comment for tuning guidance. Existing callers that omit
     ///     this parameter are unaffected.
     /// - Throws: any error from `MLModel.compileModel(at:)` or `MLModel(contentsOf:)`.
@@ -143,7 +147,7 @@ public actor T5CoreMLEmbedder: Embedder {
         stride: Int = 256,
         minNorm: Float = 1.0,
         failureLogURL: URL? = nil,
-        reloadInterval: Int = 500
+        reloadInterval: Int = 150
     ) async throws {
         precondition(dims > 0 && dims % 2 == 0,
                      "dims must be positive and even (Q4 codec packs two nibbles per byte)")
@@ -209,7 +213,7 @@ public actor T5CoreMLEmbedder: Embedder {
         stride: Int = 256,
         minNorm: Float = 1.0,
         failureLogURL: URL? = nil,
-        reloadInterval: Int = 500
+        reloadInterval: Int = 150
     ) async throws {
         guard let url = bundle.url(
             forResource: resourceName,
@@ -263,7 +267,7 @@ public actor T5CoreMLEmbedder: Embedder {
         self.minNorm = minNorm
         self.modelIdentifier = modelIdentifier
         self.failureLogURL = failureLogURL
-        self.reloadInterval = 500
+        self.reloadInterval = 150
     }
 
     /// Test-only init: inject a factory for predictor lifecycle testing.
@@ -283,7 +287,7 @@ public actor T5CoreMLEmbedder: Embedder {
         minNorm: Float = 1.0,
         modelIdentifier: String = "stub@v0",
         failureLogURL: URL? = nil,
-        reloadInterval: Int = 500
+        reloadInterval: Int = 150
     ) throws {
         precondition(dims > 0 && dims % 2 == 0,
                      "dims must be positive and even")
@@ -384,7 +388,11 @@ public actor T5CoreMLEmbedder: Embedder {
                 CoreMLInputName.inputIDs: MLFeatureValue(multiArray: inputArray)
             ])
 
-            let output = try predictWindow(provider: provider, inputLength: text.count)
+            let output = try predictWindow(
+                provider: provider,
+                inputLength: text.count,
+                windowTokenCount: hi - lo
+            )
 
             guard
                 let normalisedFV = output.featureValue(for: CoreMLOutputName.normalised),
@@ -427,15 +435,23 @@ public actor T5CoreMLEmbedder: Embedder {
 
     // MARK: - Private helpers
 
-    /// Run one window prediction with autoreleasepool drainage and IOSurface fallback.
+    /// Run one window prediction with autoreleasepool drainage, reactive reload,
+    /// ANE retry, and IOSurface CPU fallback.
     private func predictWindow(
         provider: any MLFeatureProvider,
-        inputLength: Int
+        inputLength: Int,
+        windowTokenCount: Int
     ) throws -> any MLFeatureProvider {
+        let windowStart = Date()
         do {
-            return try autoreleasepool {
+            let result = try autoreleasepool {
                 try catchingNSException { try self.predictor.predict(input: provider) }
             }
+            let elapsed = Int(Date().timeIntervalSince(windowStart) * 1000)
+            coreMLLogger.info(
+                "predictWindow: \(windowTokenCount, privacy: .public) tokens, \(elapsed, privacy: .public)ms"
+            )
+            return result
         } catch let nativeError as CoreMLNativeError {
             guard isIOSurfaceExhaustion(nativeError), let cpuFactory = cpuPredictorFactory else {
                 if let logURL = failureLogURL {
@@ -443,7 +459,29 @@ public actor T5CoreMLEmbedder: Embedder {
                 }
                 throw nativeError
             }
-            // IOSurface pool exhausted — retry this window on CPU.
+
+            // Layer 3a — Reactive reload + ANE retry: force-reload the predictor
+            // and retry on ANE before falling back to CPU.
+            var aneRetrySucceeded = false
+            do {
+                self.predictor = try predictorFactory()
+                let retryResult = try autoreleasepool {
+                    try catchingNSException { try self.predictor.predict(input: provider) }
+                }
+                let elapsed = Int(Date().timeIntervalSince(windowStart) * 1000)
+                coreMLLogger.info(
+                    "predictWindow (ANE retry): \(windowTokenCount, privacy: .public) tokens, \(elapsed, privacy: .public)ms"
+                )
+                aneRetrySucceeded = true
+                return retryResult
+            } catch {
+                coreMLLogger.warning(
+                    "T5CoreMLEmbedder: reactive reload/ANE retry failed, falling back to CPU: \(error, privacy: .public)"
+                )
+            }
+            _ = aneRetrySucceeded  // suppress unused-variable warning
+
+            // Layer 3b — CPU fallback: retry this window on .cpuOnly.
             do {
                 let cpuPredictor = try cpuFactory()
                 let result = try autoreleasepool {
@@ -453,10 +491,12 @@ public actor T5CoreMLEmbedder: Embedder {
                     logRecoveredIOSurface(nativeError, inputLength: inputLength, to: logURL)
                 }
                 return result
-            } catch {
-                // CPU fallback also failed; log the original IOSurface error and rethrow it.
+            } catch let cpuError {
+                // CPU fallback also failed — log with distinct category so the
+                // two states (no fallback vs. fallback-attempted-and-failed) are
+                // distinguishable in the JSONL log.
                 if let logURL = failureLogURL {
-                    logNativeException(nativeError, inputLength: inputLength, to: logURL)
+                    logCPUFallbackFailed(nativeError, cpuError: cpuError, inputLength: inputLength, to: logURL)
                 }
                 throw nativeError
             }
@@ -515,12 +555,54 @@ public actor T5CoreMLEmbedder: Embedder {
         )
     }
 
+    private func logCPUFallbackFailed(
+        _ aneError: CoreMLNativeError,
+        cpuError: Error,
+        inputLength: Int,
+        to url: URL
+    ) {
+        guard case .nativeException(let aneName, let aneReason, let aneCallStack) = aneError else { return }
+        let (cpuName, cpuReason, cpuCallStack) = extractCPUErrorFields(cpuError)
+
+        coreMLLogger.error(
+            "🔴 [COREML-CPU-FAILED] ane=\(aneName, privacy: .public) cpu=\(cpuName, privacy: .public) cpu_reason=\(cpuReason, privacy: .public) input_len=\(inputLength, privacy: .public)"
+        )
+        for frame in cpuCallStack.prefix(5) {
+            coreMLLogger.error("  cpu: \(frame, privacy: .public)")
+        }
+
+        appendJSONLRow(
+            name: aneName,
+            reason: aneReason,
+            inputLength: inputLength,
+            callStack: Array(aneCallStack.prefix(5)),
+            category: "cpu_fallback_failed",
+            cpuErrorName: cpuName,
+            cpuErrorReason: cpuReason,
+            cpuCallStack: Array(cpuCallStack.prefix(5)),
+            to: url
+        )
+    }
+
+    /// Extract name, reason, and call stack from a CPU-side error regardless of
+    /// its concrete type (`CoreMLNativeError` from predict or `NSError` from model load).
+    private func extractCPUErrorFields(_ error: Error) -> (name: String, reason: String, callStack: [String]) {
+        if case .nativeException(let name, let reason, let frames) = error as? CoreMLNativeError {
+            return (name, reason, frames)
+        }
+        let nsErr = error as NSError
+        return (nsErr.domain, nsErr.localizedDescription, [])
+    }
+
     private func appendJSONLRow(
         name: String,
         reason: String,
         inputLength: Int,
         callStack: [String],
         category: String = "error",
+        cpuErrorName: String? = nil,
+        cpuErrorReason: String? = nil,
+        cpuCallStack: [String]? = nil,
         to url: URL
     ) {
         let formatter = ISO8601DateFormatter()
@@ -529,6 +611,9 @@ public actor T5CoreMLEmbedder: Embedder {
         let entry = CoreMLFailureLogEntry(
             callStack: callStack,
             category: category,
+            cpuCallStack: cpuCallStack,
+            cpuErrorName: cpuErrorName,
+            cpuErrorReason: cpuErrorReason,
             inputLength: inputLength,
             name: name,
             reason: reason,
@@ -556,6 +641,9 @@ public actor T5CoreMLEmbedder: Embedder {
 private struct CoreMLFailureLogEntry: Encodable {
     let callStack: [String]
     let category: String
+    let cpuCallStack: [String]?
+    let cpuErrorName: String?
+    let cpuErrorReason: String?
     let inputLength: Int
     let name: String
     let reason: String
