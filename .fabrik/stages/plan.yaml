@@ -2,7 +2,7 @@ name: Plan
 order: 2
 skill: fabrik-plan
 comment_skill: fabrik-plan-comment
-model: opus
+model: sonnet
 max_turns: 50
 read_only: true
 allowed_tools:
