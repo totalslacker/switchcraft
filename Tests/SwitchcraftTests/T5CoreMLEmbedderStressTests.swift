@@ -167,7 +167,134 @@ struct T5CoreMLEmbedderStressTests {
                     "row \(idx): unexpected name")
             #expect((json["category"] as? String) == "warning",
                     "row \(idx): category must be \"warning\"")
+            // Scenario C regression: CPU-error fields must be absent on successful recovery.
+            #expect((json["cpuErrorName"]   as? String) == nil,
+                    "row \(idx): cpuErrorName must be nil on recovery row")
+            #expect((json["cpuErrorReason"] as? String) == nil,
+                    "row \(idx): cpuErrorReason must be nil on recovery row")
         }
+    }
+
+    // MARK: - R6 Scenario A: CPU factory throws on construction
+
+    /// When the CPU fallback factory itself throws (model load failure), the JSONL
+    /// row must record the CPU-side error with `category: "cpu_fallback_failed"` —
+    /// not silently masquerade as an unrecovered ANE failure (`category: "error"`).
+    @Test("CPU factory throws: JSONL row records cpu_fallback_failed with CPU error fields")
+    func testCPUFactoryThrowsLogsDistinctError() async throws {
+        let tokenizer = try Self.makeTokenizer()
+
+        let logURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("switchcraft-cpu-factory-fail-\(UUID().uuidString).jsonl")
+        defer { try? FileManager.default.removeItem(at: logURL) }
+
+        let dims = 16
+        // Main predictor always raises IOSurface-like exception.
+        // CPU factory always throws a plain NSError (model load failure).
+        let cpuInitError = NSError(
+            domain: "test.cpu",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "cpu init failed"]
+        )
+        let embedder = try T5CoreMLEmbedder(
+            predictorFactory: { CountingStubPredictor(failInterval: 1, dims: dims) },
+            cpuPredictorFactory: { throw cpuInitError },
+            tokenizer: tokenizer,
+            dims: dims,
+            windowSize: 64,
+            stride: 32,
+            minNorm: 1.0,
+            failureLogURL: logURL,
+            reloadInterval: 500
+        )
+
+        let inputText = "test input"
+        // encode must throw because CPU fallback also failed.
+        do {
+            _ = try await embedder.encode(inputText)
+            Issue.record("Expected CoreMLNativeError to be thrown but encode returned normally")
+            return
+        } catch is CoreMLNativeError {
+            // Expected — original IOSurface error is rethrown.
+        }
+
+        // Verify the JSONL row has category "cpu_fallback_failed" with CPU error fields.
+        let logData = try Data(contentsOf: logURL)
+        let rawText = try #require(String(data: logData, encoding: .utf8), "log not UTF-8")
+        let lines = rawText.split(separator: "\n", omittingEmptySubsequences: true)
+        // Exactly 1 row (the cpu_fallback_failed row).
+        #expect(lines.count == 1, "expected 1 JSONL row, got \(lines.count)")
+
+        let rowData = Data(lines[0].utf8)
+        let json = try #require(
+            try JSONSerialization.jsonObject(with: rowData) as? [String: Any],
+            "JSONL row is not a JSON object"
+        )
+        #expect((json["category"] as? String) == "cpu_fallback_failed",
+                "category must be cpu_fallback_failed, got \(json["category"] ?? "nil")")
+        #expect((json["cpuErrorName"]   as? String) != nil,
+                "cpuErrorName must be non-nil when CPU factory threw")
+        #expect((json["cpuErrorReason"] as? String) != nil,
+                "cpuErrorReason must be non-nil when CPU factory threw")
+        // Confirm the row does NOT masquerade as a plain unrecovered error.
+        #expect((json["category"] as? String) != "error",
+                "row must not have category \"error\" — that would be indistinguishable from no-fallback-attempted")
+    }
+
+    // MARK: - R6 Scenario B: CPU predict throws after successful factory construction
+
+    /// When the CPU fallback factory succeeds but `cpuPredictor.predict` throws,
+    /// the JSONL row must record the CPU-side error name and reason distinctly
+    /// from the original ANE error.
+    @Test("CPU predict throws: JSONL row records cpu_fallback_failed with CPU error name and reason")
+    func testCPUPredictThrowsLogsDistinctError() async throws {
+        let tokenizer = try Self.makeTokenizer()
+
+        let logURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("switchcraft-cpu-predict-fail-\(UUID().uuidString).jsonl")
+        defer { try? FileManager.default.removeItem(at: logURL) }
+
+        let dims = 16
+        // Main predictor always raises IOSurface-like exception.
+        // CPU factory returns ThrowingStubPredictor whose predict() always raises "TestCrash".
+        let embedder = try T5CoreMLEmbedder(
+            predictorFactory: { CountingStubPredictor(failInterval: 1, dims: dims) },
+            cpuPredictorFactory: { ThrowingStubPredictor() },
+            tokenizer: tokenizer,
+            dims: dims,
+            windowSize: 64,
+            stride: 32,
+            minNorm: 1.0,
+            failureLogURL: logURL,
+            reloadInterval: 500
+        )
+
+        let inputText = "test input"
+        do {
+            _ = try await embedder.encode(inputText)
+            Issue.record("Expected CoreMLNativeError to be thrown but encode returned normally")
+            return
+        } catch is CoreMLNativeError {
+            // Expected — original IOSurface error is rethrown.
+        }
+
+        let logData = try Data(contentsOf: logURL)
+        let rawText = try #require(String(data: logData, encoding: .utf8), "log not UTF-8")
+        let lines = rawText.split(separator: "\n", omittingEmptySubsequences: true)
+        #expect(lines.count == 1, "expected 1 JSONL row, got \(lines.count)")
+
+        let rowData = Data(lines[0].utf8)
+        let json = try #require(
+            try JSONSerialization.jsonObject(with: rowData) as? [String: Any],
+            "JSONL row is not a JSON object"
+        )
+        #expect((json["category"] as? String) == "cpu_fallback_failed",
+                "category must be cpu_fallback_failed, got \(json["category"] ?? "nil")")
+        // ThrowingStubPredictor raises "TestCrash" / "deliberate test exception".
+        #expect((json["cpuErrorName"]   as? String) == ThrowingStubPredictor.exceptionName,
+                "cpuErrorName must match ThrowingStubPredictor.exceptionName")
+        #expect((json["cpuErrorReason"] as? String) == ThrowingStubPredictor.exceptionReason,
+                "cpuErrorReason must match ThrowingStubPredictor.exceptionReason")
     }
 }
 
