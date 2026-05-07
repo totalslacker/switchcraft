@@ -114,6 +114,17 @@ This is non-negotiable, even for small changes. "It's just a one-line fix" is ex
 
 **Always run the full test suite before merging to main.** Even if CI ran on the branch, re-run locally on the merge result so a bad merge can't sneak in.
 
+### Validate Stage — Hard Rules
+
+These rules apply to every Fabrik Validate run. They are not negotiable and cannot be waived by a stage agent:
+
+1. **Local `swift test` is the source of truth — not CI.** A CI-green PR with any local failure is **NOT READY**. Verdict is "stop and escalate," never "ready to merge."
+2. **CI green is necessary but not sufficient.** If CI is green only because some tests are skipped on CI (`.disabled(if: CI)`, `XCTSkipIf`, `#if !CI`, runtime `ProcessInfo` checks for `CI`, etc.), CI is a **fake gate** for those tests. The Validate stage must read those tests' real local results and judge accordingly.
+3. **"Pre-existing," "flaky," "timing-sensitive," and "unrelated file" are not valid waivers.** A failing test is a failing test. If a pre-existing failure on `main` is discovered during Validate, that is a **P0 incident**: stop the current issue, file a P0 issue against the failing test, surface it in the PR comments, and do not advance the current PR until the P0 is triaged.
+4. **Skipping tests is forbidden as a "fix."** Adding `.disabled(if: CI)`, `XCTSkipIf`, `XCTSkipUnless`, `#if !CI`, runtime `if isCI { return }`, deleting an assertion, weakening it to a tautology, or making the test a no-op are all **policy violations**. Any of these requires explicit human approval recorded on the issue before being merged. Default answer is "no — fix the underlying bug instead."
+5. **A flaky test is a bug to root-cause.** Reproduce 10–20× with timing data, find the actual race / deadline / resource / shared-state cause, and fix it. "It's flaky, give it more retries / more time / a CI skip" is the wrong answer every time.
+6. **Verdict format.** When emitting `FABRIK_STAGE_COMPLETE` from Validate, the report must explicitly state: (a) `swift test` (debug) full result counts, (b) `swift test -c release` full result counts, (c) any tests currently skipped on CI and what their local result is, (d) any tests failing locally — and if (d) is non-empty, the verdict is **NOT READY** regardless of (a)/(b) totals.
+
 ## Storage Layer
 
 The storage layer is a Swift protocol (`SwitchcraftStorage` or similar) that abstracts:
