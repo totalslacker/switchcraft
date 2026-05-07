@@ -241,7 +241,7 @@ categories:
 
 | Category | Meaning |
 |----------|---------|
-| `"error"` | Inference failed. Includes both non-IOSurface failures and IOSurface failures where the Layer 3a ANE retry also failed. |
+| `"error"` | Inference failed. Includes both non-IOSurface failures and IOSurface failures where the Layer 3 ANE retry also failed. |
 | `"warning"` | (Reserved; not currently produced.) |
 
 The `"cpu_fallback_failed"` category is retired. It will no longer appear in
