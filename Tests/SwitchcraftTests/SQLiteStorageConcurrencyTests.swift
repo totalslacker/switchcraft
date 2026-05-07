@@ -6,7 +6,7 @@ import SwitchcraftSQLite
 
 // MARK: - Test Suite
 
-@Suite("SQLiteStorage WAL Concurrency")
+@Suite("SQLiteStorage WAL Concurrency", .serialized)
 struct SQLiteStorageConcurrencyTests {
 
     // Corpus size for slow reads. Target: ≥100ms FTS scan on Apple silicon.
