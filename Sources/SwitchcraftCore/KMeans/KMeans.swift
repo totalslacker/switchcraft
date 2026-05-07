@@ -159,6 +159,7 @@ public enum KMeans {
     ) {
         let m = data.count / dims
         guard m > 0 else { return }
+        guard k > 0 else { return }
         precondition(
             m <= Int(Int32.max) && k <= Int(Int32.max) && dims <= Int(Int32.max),
             "k-means dimensions (m=\(m), k=\(k), dims=\(dims)) must fit in Int32 for cblas_sgemm"
