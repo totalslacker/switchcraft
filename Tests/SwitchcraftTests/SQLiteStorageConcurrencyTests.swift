@@ -115,7 +115,7 @@ struct SQLiteStorageConcurrencyTests {
         #expect(writeEnd < readEnd, "Write should finish before slow read — may have queued behind the reader")
     }
 
-    // MARK: - Test [4]: SafariUnfucker stall regression
+    // MARK: - Test [2]: SafariUnfucker stall regression
 
     /// Reproduces the original stall in miniature: a bulk-write loop of 50
     /// upserts must not be blocked by a concurrent slow FTS scan.

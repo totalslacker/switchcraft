@@ -14,7 +14,7 @@ tBoth < tRead + tWrite × 0.7
 
 where `tBoth` is the wall-clock time for an `async let`-launched FTS read run concurrently with 100 sequential writes (median of 3 iterations), and `tRead`/`tWrite` are isolated medians of the same operations.
 
-The test was disabled on CI via `@Test(.disabled(if: CI))` because it regularly failed at 4–7× the threshold on GitHub Actions `macos-15` runners (commit `20c55c25`, 2026-05-06). That skip annotation was a policy violation; this ADR documents the decision to delete the test instead.
+The test was disabled on CI via `@Test(.disabled(if: ProcessInfo.processInfo.environment["CI"] != nil, "…"))` — the Swift Testing `.disabled(if:)` trait gated on whether the `CI` environment variable is set (which GitHub Actions sets automatically). That skip annotation was a policy violation; this ADR documents the decision to delete the test instead.
 
 ### Root Cause Analysis
 
