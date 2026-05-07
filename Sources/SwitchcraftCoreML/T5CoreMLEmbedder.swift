@@ -298,7 +298,7 @@ public actor T5CoreMLEmbedder: Embedder {
     /// Test-only init: inject a factory for predictor lifecycle testing.
     ///
     /// Use this variant when the test must verify model reload behaviour or
-    /// the Layer 3a reactive reload + ANE retry path. The factory is called
+    /// the Layer 3 reactive reload + ANE retry path. The factory is called
     /// once during init and again on each proactive or reactive reload.
     ///
     /// `internal` — access from test targets via `@testable import SwitchcraftCoreML`.
@@ -502,7 +502,7 @@ public actor T5CoreMLEmbedder: Embedder {
                 throw nativeError
             }
 
-            // Layer 3a — Reactive reload + ANE retry: force-reload the predictor
+            // Layer 3 — Reactive reload + ANE retry: force-reload the predictor
             // and retry on ANE.
             do {
                 self.predictor = try predictorFactory()

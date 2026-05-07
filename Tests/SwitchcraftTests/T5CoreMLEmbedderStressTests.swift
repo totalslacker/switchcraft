@@ -9,7 +9,7 @@ import CoreML
 
 /// Stress and lifecycle tests for `T5CoreMLEmbedder`'s ANE IOSurface pool
 /// exhaustion mitigation: autoreleasepool discipline, proactive model reload,
-/// and reactive reload + ANE retry (Layer 3a).
+/// and reactive reload + ANE retry (Layer 3).
 ///
 /// No CoreML model asset is required — `CountingStubPredictor` is injected
 /// via the factory-based internal init.
@@ -112,13 +112,13 @@ struct T5CoreMLEmbedderStressTests {
         #expect(counter.count >= 4, "expected ≥4 factory calls (1 init + 3 reloads), got \(counter.count)")
     }
 
-    // MARK: - Layer 3a tests
+    // MARK: - Layer 3 tests
 
-    /// When the initial predictor raises an IOSurface-like exception, Layer 3a
+    /// When the initial predictor raises an IOSurface-like exception, Layer 3
     /// must force-reload the predictor via the factory and retry on ANE. When
     /// the reloaded predictor succeeds, encode must not throw and no JSONL row
     /// must be written.
-    @Test("Layer 3a ANE retry succeeds after reactive reload, no JSONL row written")
+    @Test("Layer 3 ANE retry succeeds after reactive reload, no JSONL row written")
     func testANERetrySucceedsAfterReload() async throws {
         let tokenizer = try Self.makeTokenizer()
 
@@ -129,7 +129,7 @@ struct T5CoreMLEmbedderStressTests {
         let dims = 16
         let counter = FactoryCallCounter()
         // Factory call 1 (at init): returns a predictor that fails every predict.
-        // Factory call 2 (Layer 3a reactive reload): returns a succeeding predictor.
+        // Factory call 2 (Layer 3 reactive reload): returns a succeeding predictor.
         let embedder = try T5CoreMLEmbedder(
             predictorFactory: {
                 counter.increment()
@@ -146,19 +146,19 @@ struct T5CoreMLEmbedderStressTests {
             reloadInterval: 500
         )
 
-        // encode must not throw — Layer 3a reactive reload + ANE retry should recover.
+        // encode must not throw — Layer 3 reactive reload + ANE retry should recover.
         let result = try await embedder.encode("test input")
-        #expect(!result.isEmpty, "Layer 3a ANE retry should return non-empty embeddings")
+        #expect(!result.isEmpty, "Layer 3 ANE retry should return non-empty embeddings")
         // No JSONL row when the retry succeeds.
         #expect(!FileManager.default.fileExists(atPath: logURL.path),
                 "No JSONL row expected when ANE retry succeeds")
     }
 
-    /// When both the initial predictor and the Layer 3a ANE retry raise an
+    /// When both the initial predictor and the Layer 3 ANE retry raise an
     /// IOSurface-like exception, encode must throw `CoreMLNativeError` and
     /// write exactly one JSONL row with `category: "error"`. The retired
     /// `cpu_fallback_failed` category must not appear.
-    @Test("Layer 3a ANE retry failure logs error row and rethrows")
+    @Test("Layer 3 ANE retry failure logs error row and rethrows")
     func testANERetryFailsLogsErrorRow() async throws {
         let tokenizer = try Self.makeTokenizer()
 
@@ -179,7 +179,7 @@ struct T5CoreMLEmbedderStressTests {
             reloadInterval: 500
         )
 
-        // encode must throw — both the initial ANE call and the Layer 3a retry fail.
+        // encode must throw — both the initial ANE call and the Layer 3 retry fail.
         do {
             _ = try await embedder.encode("test input")
             Issue.record("Expected CoreMLNativeError to be thrown but encode returned normally")
