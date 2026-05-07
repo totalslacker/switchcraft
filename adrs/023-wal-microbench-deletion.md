@@ -56,11 +56,11 @@ The actor-serialization regression that `performanceAssertionTest` was meant to 
 
 **Caveat:** `safariUnfuckerRegressionTest` itself uses a timing-ratio assertion (`tConcurrentWrites < tIsolated * 1.5`) and has observed failures at approximately 13% rate in isolation under local scheduler jitter. This is a pre-existing reliability limitation of the test design (not introduced by this PR). A dedicated issue should evaluate whether to redesign this test's assertion to avoid timing ratios entirely (e.g., verify correct result counts and write completion order rather than wall-clock ratios). Until then, `safariUnfuckerRegressionTest` is the best available CI gate for the actor-serialization regression.
 
-`livenessTest` is also disabled on CI under a separate issue. It provides local-only supplemental validation.
+`livenessTest` was also CI-disabled at the time of this deletion (under a separate issue), but was subsequently fixed (commit `814f8e3`) to use `ContinuousClock` instead of `Date()`, which resolved its timing-precision failure mode. `livenessTest` now runs on CI and provides a complementary assertion: it verifies that a single write completes while a slow FTS scan is in flight (liveness), whereas `safariUnfuckerRegressionTest` verifies that bulk writes are not stalled (throughput). Together they provide the coverage pair originally described in the issue spec.
 
 ## Consequences
 
 - One fewer test in the WAL concurrency suite.
 - The `.disabled(if: CI)` annotation on `performanceAssertionTest` is gone (the function is deleted).
-- The speedup metric (`tBoth < tRead + tWrite × 0.7`) is no longer actively measured anywhere. This is acceptable: the split architecture is validated structurally by ADR 019, the stall regression is what matters to users, and `safariUnfuckerRegressionTest` catches regressions in that behavior.
-- A pre-existing CI coverage gap (both the speedup metric and the liveness comparison are now either deleted or locally-only) is acknowledged. Proper CI-stable coverage of the WAL writer/reader split behavior requires a test redesign outside the scope of issue #96.
+- The speedup metric (`tBoth < tRead + tWrite × 0.7`) is no longer actively measured anywhere. This is acceptable: the split architecture is validated structurally by ADR 019, the stall regression is what matters to users, and `safariUnfuckerRegressionTest` + `livenessTest` together catch regressions in that behavior.
+- The WAL writer/reader split now has two active CI gates: `livenessTest` (liveness, ContinuousClock-based, robust) and `safariUnfuckerRegressionTest` (throughput, timing-ratio-based, known ~13% local flakiness from `iterations: 1` baseline). A follow-on issue should evaluate redesigning `safariUnfuckerRegressionTest`'s assertion to avoid timing ratios.
