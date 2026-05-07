@@ -9,7 +9,7 @@ import CoreML
 
 /// Stress and lifecycle tests for `T5CoreMLEmbedder`'s ANE IOSurface pool
 /// exhaustion mitigation: autoreleasepool discipline, proactive model reload,
-/// and reactive CPU fallback.
+/// and reactive reload + ANE retry (Layer 3a).
 ///
 /// No CoreML model asset is required — `CountingStubPredictor` is injected
 /// via the factory-based internal init.
@@ -112,25 +112,31 @@ struct T5CoreMLEmbedderStressTests {
         #expect(counter.count >= 4, "expected ≥4 factory calls (1 init + 3 reloads), got \(counter.count)")
     }
 
-    // MARK: - IOSurface fallback test
+    // MARK: - Layer 3a tests
 
-    /// When every prediction raises an IOSurface-like exception, the CPU fallback
-    /// must succeed and log a `"recovered_iosurface_exhaustion"` JSONL row with
-    /// `"category": "warning"` for each encode call.
-    @Test("IOSurface exhaustion triggers CPU fallback and logs recovery row")
-    func testIOSurfaceFallbackLogsRecovery() async throws {
+    /// When the initial predictor raises an IOSurface-like exception, Layer 3a
+    /// must force-reload the predictor via the factory and retry on ANE. When
+    /// the reloaded predictor succeeds, encode must not throw and no JSONL row
+    /// must be written.
+    @Test("Layer 3a ANE retry succeeds after reactive reload, no JSONL row written")
+    func testANERetrySucceedsAfterReload() async throws {
         let tokenizer = try Self.makeTokenizer()
 
         let logURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("switchcraft-stress-recovery-\(UUID().uuidString).jsonl")
+            .appendingPathComponent("switchcraft-ane-retry-success-\(UUID().uuidString).jsonl")
         defer { try? FileManager.default.removeItem(at: logURL) }
 
-        // Main predictor: always raises IOSurface-like exception.
-        // CPU fallback predictor: always succeeds.
         let dims = 16
+        let counter = FactoryCallCounter()
+        // Factory call 1 (at init): returns a predictor that fails every predict.
+        // Factory call 2 (Layer 3a reactive reload): returns a succeeding predictor.
         let embedder = try T5CoreMLEmbedder(
-            predictorFactory: { CountingStubPredictor(failInterval: 1, dims: dims) },
-            cpuPredictorFactory: { CountingStubPredictor(failInterval: nil, dims: dims) },
+            predictorFactory: {
+                counter.increment()
+                return counter.count == 1
+                    ? CountingStubPredictor(failInterval: 1, dims: dims)
+                    : CountingStubPredictor(failInterval: nil, dims: dims)
+            },
             tokenizer: tokenizer,
             dims: dims,
             windowSize: 64,
@@ -140,65 +146,30 @@ struct T5CoreMLEmbedderStressTests {
             reloadInterval: 500
         )
 
-        // "test input" (10 chars, 1 window) → each encode = 1 IOSurface hit → 1 recovery row.
-        let inputText = "test input"
-        let encodeCount = 10
-
-        for _ in 0..<encodeCount {
-            // Must NOT throw — the CPU fallback should recover.
-            let result = try await embedder.encode(inputText)
-            #expect(!result.isEmpty, "CPU-fallback encode should return non-empty embeddings")
-        }
-
-        // Verify recovery rows were written.
-        let logData = try Data(contentsOf: logURL)
-        let rawText = try #require(String(data: logData, encoding: .utf8), "log not UTF-8")
-        let lines = rawText.split(separator: "\n", omittingEmptySubsequences: true)
-        #expect(lines.count == encodeCount,
-                "expected \(encodeCount) recovery rows, got \(lines.count)")
-
-        for (idx, line) in lines.enumerated() {
-            let rowData = Data(line.utf8)
-            let json = try #require(
-                try JSONSerialization.jsonObject(with: rowData) as? [String: Any],
-                "row \(idx) is not a JSON object"
-            )
-            #expect((json["name"]     as? String) == "recovered_iosurface_exhaustion",
-                    "row \(idx): unexpected name")
-            #expect((json["category"] as? String) == "warning",
-                    "row \(idx): category must be \"warning\"")
-            // Scenario C regression: CPU-error fields must be absent on successful recovery.
-            #expect((json["cpuErrorName"]   as? String) == nil,
-                    "row \(idx): cpuErrorName must be nil on recovery row")
-            #expect((json["cpuErrorReason"] as? String) == nil,
-                    "row \(idx): cpuErrorReason must be nil on recovery row")
-        }
+        // encode must not throw — Layer 3a reactive reload + ANE retry should recover.
+        let result = try await embedder.encode("test input")
+        #expect(!result.isEmpty, "Layer 3a ANE retry should return non-empty embeddings")
+        // No JSONL row when the retry succeeds.
+        #expect(!FileManager.default.fileExists(atPath: logURL.path),
+                "No JSONL row expected when ANE retry succeeds")
     }
 
-    // MARK: - R6 Scenario A: CPU factory throws on construction
-
-    /// When the CPU fallback factory itself throws (model load failure), the JSONL
-    /// row must record the CPU-side error with `category: "cpu_fallback_failed"` —
-    /// not silently masquerade as an unrecovered ANE failure (`category: "error"`).
-    @Test("CPU factory throws: JSONL row records cpu_fallback_failed with CPU error fields")
-    func testCPUFactoryThrowsLogsDistinctError() async throws {
+    /// When both the initial predictor and the Layer 3a ANE retry raise an
+    /// IOSurface-like exception, encode must throw `CoreMLNativeError` and
+    /// write exactly one JSONL row with `category: "error"`. The retired
+    /// `cpu_fallback_failed` category must not appear.
+    @Test("Layer 3a ANE retry failure logs error row and rethrows")
+    func testANERetryFailsLogsErrorRow() async throws {
         let tokenizer = try Self.makeTokenizer()
 
         let logURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("switchcraft-cpu-factory-fail-\(UUID().uuidString).jsonl")
+            .appendingPathComponent("switchcraft-ane-retry-fail-\(UUID().uuidString).jsonl")
         defer { try? FileManager.default.removeItem(at: logURL) }
 
         let dims = 16
-        // Main predictor always raises IOSurface-like exception.
-        // CPU factory always throws a plain NSError (model load failure).
-        let cpuInitError = NSError(
-            domain: "test.cpu",
-            code: 1,
-            userInfo: [NSLocalizedDescriptionKey: "cpu init failed"]
-        )
+        // Always-failing predictor: every predict raises an IOSurface-like exception.
         let embedder = try T5CoreMLEmbedder(
             predictorFactory: { CountingStubPredictor(failInterval: 1, dims: dims) },
-            cpuPredictorFactory: { throw cpuInitError },
             tokenizer: tokenizer,
             dims: dims,
             windowSize: 64,
@@ -208,76 +179,16 @@ struct T5CoreMLEmbedderStressTests {
             reloadInterval: 500
         )
 
-        let inputText = "test input"
-        // encode must throw because CPU fallback also failed.
+        // encode must throw — both the initial ANE call and the Layer 3a retry fail.
         do {
-            _ = try await embedder.encode(inputText)
+            _ = try await embedder.encode("test input")
             Issue.record("Expected CoreMLNativeError to be thrown but encode returned normally")
             return
         } catch is CoreMLNativeError {
             // Expected — original IOSurface error is rethrown.
         }
 
-        // Verify the JSONL row has category "cpu_fallback_failed" with CPU error fields.
-        let logData = try Data(contentsOf: logURL)
-        let rawText = try #require(String(data: logData, encoding: .utf8), "log not UTF-8")
-        let lines = rawText.split(separator: "\n", omittingEmptySubsequences: true)
-        // Exactly 1 row (the cpu_fallback_failed row).
-        #expect(lines.count == 1, "expected 1 JSONL row, got \(lines.count)")
-
-        let rowData = Data(lines[0].utf8)
-        let json = try #require(
-            try JSONSerialization.jsonObject(with: rowData) as? [String: Any],
-            "JSONL row is not a JSON object"
-        )
-        #expect((json["category"] as? String) == "cpu_fallback_failed",
-                "category must be cpu_fallback_failed, got \(json["category"] ?? "nil")")
-        #expect((json["cpuErrorName"]   as? String) != nil,
-                "cpuErrorName must be non-nil when CPU factory threw")
-        #expect((json["cpuErrorReason"] as? String) != nil,
-                "cpuErrorReason must be non-nil when CPU factory threw")
-        // Confirm the row does NOT masquerade as a plain unrecovered error.
-        #expect((json["category"] as? String) != "error",
-                "row must not have category \"error\" — that would be indistinguishable from no-fallback-attempted")
-    }
-
-    // MARK: - R6 Scenario B: CPU predict throws after successful factory construction
-
-    /// When the CPU fallback factory succeeds but `cpuPredictor.predict` throws,
-    /// the JSONL row must record the CPU-side error name and reason distinctly
-    /// from the original ANE error.
-    @Test("CPU predict throws: JSONL row records cpu_fallback_failed with CPU error name and reason")
-    func testCPUPredictThrowsLogsDistinctError() async throws {
-        let tokenizer = try Self.makeTokenizer()
-
-        let logURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("switchcraft-cpu-predict-fail-\(UUID().uuidString).jsonl")
-        defer { try? FileManager.default.removeItem(at: logURL) }
-
-        let dims = 16
-        // Main predictor always raises IOSurface-like exception.
-        // CPU factory returns ThrowingStubPredictor whose predict() always raises "TestCrash".
-        let embedder = try T5CoreMLEmbedder(
-            predictorFactory: { CountingStubPredictor(failInterval: 1, dims: dims) },
-            cpuPredictorFactory: { ThrowingStubPredictor() },
-            tokenizer: tokenizer,
-            dims: dims,
-            windowSize: 64,
-            stride: 32,
-            minNorm: 1.0,
-            failureLogURL: logURL,
-            reloadInterval: 500
-        )
-
-        let inputText = "test input"
-        do {
-            _ = try await embedder.encode(inputText)
-            Issue.record("Expected CoreMLNativeError to be thrown but encode returned normally")
-            return
-        } catch is CoreMLNativeError {
-            // Expected — original IOSurface error is rethrown.
-        }
-
+        // Verify a single error row was written.
         let logData = try Data(contentsOf: logURL)
         let rawText = try #require(String(data: logData, encoding: .utf8), "log not UTF-8")
         let lines = rawText.split(separator: "\n", omittingEmptySubsequences: true)
@@ -288,13 +199,13 @@ struct T5CoreMLEmbedderStressTests {
             try JSONSerialization.jsonObject(with: rowData) as? [String: Any],
             "JSONL row is not a JSON object"
         )
-        #expect((json["category"] as? String) == "cpu_fallback_failed",
-                "category must be cpu_fallback_failed, got \(json["category"] ?? "nil")")
-        // ThrowingStubPredictor raises "TestCrash" / "deliberate test exception".
-        #expect((json["cpuErrorName"]   as? String) == ThrowingStubPredictor.exceptionName,
-                "cpuErrorName must match ThrowingStubPredictor.exceptionName")
-        #expect((json["cpuErrorReason"] as? String) == ThrowingStubPredictor.exceptionReason,
-                "cpuErrorReason must match ThrowingStubPredictor.exceptionReason")
+        #expect((json["category"] as? String) == "error",
+                "category must be \"error\", got \(json["category"] ?? "nil")")
+        // The retired cpu_fallback_failed category must not appear.
+        #expect((json["category"] as? String) != "cpu_fallback_failed",
+                "retired cpu_fallback_failed category must not appear")
+        #expect((json["cpuErrorName"] as? String) == nil,
+                "cpuErrorName field must be absent after Layer 3b removal")
     }
 }
 

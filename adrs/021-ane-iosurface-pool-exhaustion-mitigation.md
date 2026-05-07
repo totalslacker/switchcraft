@@ -198,3 +198,63 @@ is out of scope for issue #90 and should be filed as a separate issue.
 
 - Issue #90 — production failure report and bug fixes.
 - Issue #89 — parallel input-size guard (structural prevention of size-driven trigger).
+
+## 2026-05-07 Addendum (Issue #93)
+
+### Production evidence: Layer 3b CPU fallback has 0% recovery rate
+
+A SafariUnfucker bulk-index run (2026-05-07) processed 5,570 successful inferences
+and 1,038 failures:
+
+```
+1038  cpu_fallback_failed  (every single failure)
+1038  "Failed to allocate E5 buffer object. E5RT: Failed to allocate memory IOSurface object. (3)"
+0     recovered_iosurface_exhaustion  (none)
+```
+
+Every IOSurface exception that reached Layer 3b resulted in `cpu_fallback_failed`
+— zero recoveries. The ANE pool DID self-recover three times during the run, with
+recovery periods of 5–25 minutes between failure bursts. Recovery timing is
+consistent with the proactive reload (Layer 2) firing at 500-call boundaries, not
+with the CPU fallback.
+
+### Decision: Remove Layer 3b CPU fallback
+
+Layer 3b is removed. The production evidence is determinative: 0/1,038 recovery
+rate across three distinct failure bursts, with per-failure overhead of one extra
+`MLModel` load and `predict` call that contributed nothing.
+
+After this change, the three-layer model becomes a two-layer model:
+
+1. **Layer 1** — `autoreleasepool` per window (unchanged).
+2. **Layer 2** — Proactive model reload every `reloadInterval` encodes (unchanged).
+3. **Layer 3a** — Reactive reload + ANE retry on IOSurface failure. If the ANE
+   retry also fails, the original error is logged with `category: "error"` and
+   rethrown. No CPU fallback is attempted.
+
+### Simplified JSONL category scheme
+
+The three-state scheme from the 2026-05-06 addendum is reduced to two active
+categories:
+
+| Category | Meaning |
+|----------|---------|
+| `"error"` | Inference failed. Includes both non-IOSurface failures and IOSurface failures where the Layer 3a ANE retry also failed. |
+| `"warning"` | (Reserved; not currently produced.) |
+
+The `"cpu_fallback_failed"` category is retired. It will no longer appear in
+`failureLogURL` JSONL output. The `cpuErrorName`, `cpuErrorReason`, and
+`cpuCallStack` fields remain in `CoreMLFailureLogEntry` (out of scope to remove)
+but will always be absent (`nil`) from JSON output going forward.
+
+### ADR 010 §(g) no longer applies to the Layer 3 path
+
+ADR 010 §(g) sanctions `.cpuOnly` compute-unit override for constrained
+environments. This sanction was cited in the original ADR 021 to justify the CPU
+fallback's use of `.cpuOnly`. With Layer 3b removed, ADR 010 §(g) no longer
+applies to the Layer 3 path. The citation is noted here so future readers know
+it was intentionally vacated, not overlooked.
+
+### References
+
+- Issue #93 — production evidence (0/1,038 CPU recovery rate) and Layer 3b removal.
