@@ -66,24 +66,9 @@ struct SQLiteStorageConcurrencyTests {
     /// Under the old single-actor design the write queues behind the read and
     /// finishes only after the read completes, so `writeEnd ≥ readEnd`.
     /// With the writer/reader split, the write completes concurrently so
-    /// `writeEnd < readEnd`.
-    ///
-    /// **Disabled on CI runners.** The assertion is `writeEnd < readEnd`
-    /// based on `Date()` resolution. In release mode on GitHub Actions
-    /// runners the seeded FTS scan completes fast enough that the read and
-    /// write timestamps land within the same `Date` tick, making the
-    /// strict-less-than comparison fail by a tie even when the underlying
-    /// concurrency is correct. `safariUnfuckerRegressionTest()` continues
-    /// to gate the same regression with a stronger assertion (~50 sequential
-    /// writes must not stall against a slow scan), so CI coverage of the
-    /// writer/reader split is preserved.
-    @Test(
-        "Write completes while slow FTS read is in flight (WAL liveness)",
-        .disabled(
-            if: ProcessInfo.processInfo.environment["CI"] != nil,
-            "Date()-resolution comparison too tight for release-mode CI; run locally to validate"
-        )
-    )
+    /// `writeEnd < readEnd`. Uses `ContinuousClock` (nanosecond resolution)
+    /// so the assertion is reliable even when the FTS scan is fast.
+    @Test("Write completes while slow FTS read is in flight (WAL liveness)")
     func livenessTest() async throws {
         let (storage, url) = try await Self.makeTemporaryDB()
         defer {
@@ -103,11 +88,11 @@ struct SQLiteStorageConcurrencyTests {
 
         // Issue a write on the writer actor and record when it finishes.
         try await storage.upsertDocument(Self.makeWriteDoc(uuid: "liveness-write"))
-        let writeEnd = Date()
+        let writeEnd = ContinuousClock.now
 
         // Wait for the read to finish and record its completion time.
         _ = try await slowRead
-        let readEnd = Date()
+        let readEnd = ContinuousClock.now
 
         // The write must finish before the read completes: writer and reader
         // run on separate actors/connections. Under the old single-actor design

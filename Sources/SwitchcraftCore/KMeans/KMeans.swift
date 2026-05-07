@@ -159,6 +159,7 @@ public enum KMeans {
     ) {
         let m = data.count / dims
         guard m > 0 else { return }
+        guard k > 0 else { return }
         precondition(
             m <= Int(Int32.max) && k <= Int(Int32.max) && dims <= Int(Int32.max),
             "k-means dimensions (m=\(m), k=\(k), dims=\(dims)) must fit in Int32 for cblas_sgemm"
@@ -179,18 +180,19 @@ public enum KMeans {
                 }
             }
         }
-        for row in 0..<m {
-            var bestCluster = 0
-            var bestScore: Float = -.infinity
-            let off = row * k
-            for c in 0..<k {
-                let s = scores[off + c]
-                if s > bestScore {
-                    bestScore = s
-                    bestCluster = c
-                }
+        // Use vDSP_maxvi for per-row argmax: Accelerate's implementation is
+        // always SIMD-compiled (pre-built dylib), so debug mode pays the same
+        // cost as release. The naive Swift loop above was ~5s in debug mode
+        // for m=5000, k=1131 — leaving essentially no headroom against the
+        // 10s budget. vDSP_maxvi reduces this to ~15ms in debug mode.
+        scores.withUnsafeBufferPointer { scoresPtr in
+            let base = scoresPtr.baseAddress!
+            for row in 0..<m {
+                var maxVal: Float = 0
+                var maxIdx: vDSP_Length = 0
+                vDSP_maxvi(base + row * k, 1, &maxVal, &maxIdx, vDSP_Length(k))
+                assignments[row] = Int(maxIdx)
             }
-            assignments[row] = bestCluster
         }
     }
 
