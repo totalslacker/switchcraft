@@ -26,3 +26,6 @@ ADRs document significant design decisions for Switchcraft. Each file follows th
 - [018 — Separate ObjC clang target for the CoreML exception bridge](018-objc-clang-target-for-exception-bridge.md)
 - [019 — SQLiteStorage writer + reader actor split](019-sqlite-writer-reader-split.md)
 - [020 — Search timeout and cancellation design](020-search-timeout-and-cancellation.md)
+- [021 — ANE IOSurface pool exhaustion mitigation](021-ane-iosurface-pool-exhaustion-mitigation.md)
+- [022 — Embedder overflow guard (`maxInputTokens` and `EmbedderOverflowPolicy`)](022-embedder-overflow-guard.md)
+- [023 — Delete WAL concurrency microbench (`performanceAssertionTest`)](023-wal-microbench-deletion.md)
