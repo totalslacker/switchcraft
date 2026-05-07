@@ -167,6 +167,27 @@ struct KMeansTests {
         #expect(assignments == [2, 0, 1])
     }
 
+    /// Verifies vDSP_maxvi tie-break semantics: when two centroids produce
+    /// equal dot products, the lower-index centroid wins (first-occurrence).
+    /// This locks in deterministic behavior across Accelerate/OS versions and
+    /// matches the prior plain-Swift left-to-right argmax loop.
+    @Test("assign() picks the first maximum-score centroid on a tie (vDSP_maxvi tie-break)")
+    func assignTieBreakPicksFirst() {
+        // dims=2, m=1 row, k=3 centroids.
+        // data=[1,0]; centroids c0=[1,0], c1=[0,1], c2=[1,0].
+        // dot products: c0→1.0, c1→0.0, c2→1.0.
+        // Tie between c0 and c2 — first occurrence (index 0) must win.
+        let dims = 2
+        let data: [Float] = [1.0, 0.0]
+        let centroids: [Float] = [
+            1.0, 0.0, // centroid 0 — tied for max
+            0.0, 1.0, // centroid 1 — lower score
+            1.0, 0.0, // centroid 2 — tied for max (but higher index)
+        ]
+        let assignments = KMeans.assign(data: data, dims: dims, centroids: centroids)
+        #expect(assignments == [0], "tie should resolve to the first maximum (index 0), got \(assignments)")
+    }
+
     @Test("respects maxIterations = 1")
     func minimalIterations() {
         var rng = SplitMix64(seed: 17)
