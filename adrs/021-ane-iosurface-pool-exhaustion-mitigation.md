@@ -2,7 +2,7 @@
 
 ## Status
 
-Amended (2026-05-06 — see addendum below)
+Amended (2026-05-06, 2026-05-07 — see addenda below)
 
 ## Context
 
@@ -224,11 +224,13 @@ Layer 3b is removed. The production evidence is determinative: 0/1,038 recovery
 rate across three distinct failure bursts, with per-failure overhead of one extra
 `MLModel` load and `predict` call that contributed nothing.
 
-After this change, the three-layer model becomes a two-layer model:
+After this change, the three-layer model is retained but Layer 3 is simplified:
+Layer 3b (CPU fallback) is removed; Layer 3a (reactive reload + ANE retry) is the
+sole Layer 3 path and is no longer referred to with the "3a" sub-label:
 
 1. **Layer 1** — `autoreleasepool` per window (unchanged).
 2. **Layer 2** — Proactive model reload every `reloadInterval` encodes (unchanged).
-3. **Layer 3a** — Reactive reload + ANE retry on IOSurface failure. If the ANE
+3. **Layer 3** — Reactive reload + ANE retry on IOSurface failure. If the ANE
    retry also fails, the original error is logged with `category: "error"` and
    rethrown. No CPU fallback is attempted.
 
