@@ -143,6 +143,30 @@ struct KMeansTests {
         #expect(Set(result.assignments).count == 3)
     }
 
+    /// Regression test for the vDSP_maxvi argmax path (issue #97).
+    /// Uses a manually-verifiable 3-row × 3-centroid score matrix where
+    /// each row's maximum is unambiguous: the expected assignments are
+    /// [2, 0, 1] by inspection.
+    @Test("assign() picks the maximum-score centroid per row (vDSP_maxvi regression)")
+    func assignAllPicksMaximum() {
+        // dims=3, m=3 rows, k=3 centroids
+        // data rows are standard basis vectors; centroids are also standard
+        // basis vectors (permuted), so dot products are identity-matrix-like.
+        let dims = 3
+        let data: [Float] = [
+            0.0, 0.0, 1.0, // row 0: nearest to centroid 2 (dot=1 with c2)
+            1.0, 0.0, 0.0, // row 1: nearest to centroid 0 (dot=1 with c0)
+            0.0, 1.0, 0.0, // row 2: nearest to centroid 1 (dot=1 with c1)
+        ]
+        let centroids: [Float] = [
+            1.0, 0.0, 0.0, // centroid 0: x-axis
+            0.0, 1.0, 0.0, // centroid 1: y-axis
+            0.0, 0.0, 1.0, // centroid 2: z-axis
+        ]
+        let assignments = KMeans.assign(data: data, dims: dims, centroids: centroids)
+        #expect(assignments == [2, 0, 1])
+    }
+
     @Test("respects maxIterations = 1")
     func minimalIterations() {
         var rng = SplitMix64(seed: 17)
