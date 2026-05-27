@@ -121,6 +121,34 @@ public actor InMemoryStorage: SwitchcraftStorage {
         bucketsByGeneration.removeValue(forKey: id)
     }
 
+    public func replaceGeneration(
+        losingGenerationID: Int64,
+        survivingRecord: GenerationRecord,
+        survivingBuckets: [BucketRecord]
+    ) async throws -> GenerationRecord? {
+        // Delete the losing generation and all its buckets first.
+        generations.removeValue(forKey: losingGenerationID)
+        bucketsByGeneration.removeValue(forKey: losingGenerationID)
+
+        // If no survivors, fully pruned — nothing to insert.
+        guard !survivingBuckets.isEmpty else { return nil }
+
+        // Insert the surviving generation with a fresh id.
+        var newGen = survivingRecord
+        newGen.id = nextGenerationID
+        nextGenerationID += 1
+        generations[newGen.id] = newGen
+
+        // Insert each surviving bucket, assigning fresh ids and the new genID.
+        for var bucket in survivingBuckets {
+            bucket.id = nextBucketID
+            nextBucketID += 1
+            bucket.generationID = newGen.id
+            bucketsByGeneration[newGen.id, default: []].append(bucket)
+        }
+        return newGen
+    }
+
     // MARK: - Buckets
 
     public func insertBucket(_ bucket: BucketRecord) async throws -> BucketRecord {

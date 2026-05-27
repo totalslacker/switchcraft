@@ -92,6 +92,29 @@ public protocol SwitchcraftStorage: Sendable {
     /// reference it. No-op if absent.
     func deleteGeneration(id: Int64) async throws
 
+    /// Atomically delete `losingGenerationID` (and all its buckets) and,
+    /// if `survivingBuckets` is non-empty, insert a new generation record
+    /// (assigned a fresh monotonically-increasing id by the backend) with
+    /// each surviving bucket. Surviving buckets may arrive with any
+    /// `generationID`; the backend overwrites it with the newly-assigned
+    /// generation id before persisting.
+    ///
+    /// The entire operation — delete + optional insert — must execute in a
+    /// single atomic transaction. On any error the transaction is rolled
+    /// back, the storage state is unchanged, and the error is re-thrown.
+    ///
+    /// Used by `Indexer.init` when `rehydrationConflictBehavior == .autoRecover`
+    /// to prune conflicting (losing) generation data and optionally replace it
+    /// with a filtered survivor set, all without losing any data on failure.
+    ///
+    /// - Returns: The newly-inserted `GenerationRecord` (with assigned id),
+    ///   or `nil` if `survivingBuckets` is empty (generation fully pruned).
+    func replaceGeneration(
+        losingGenerationID: Int64,
+        survivingRecord: GenerationRecord,
+        survivingBuckets: [BucketRecord]
+    ) async throws -> GenerationRecord?
+
     // MARK: - Buckets
 
     /// Insert a bucket record. The provided `id` is ignored; the backend
