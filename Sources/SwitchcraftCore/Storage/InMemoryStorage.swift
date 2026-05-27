@@ -72,6 +72,10 @@ public actor InMemoryStorage: SwitchcraftStorage {
         documents.count
     }
 
+    public func indexedURLs() async throws -> Set<String> {
+        Set(documents.keys)
+    }
+
     // MARK: - Chunks
 
     public func upsertChunk(_ chunk: ChunkRecord) async throws -> ChunkRecord {

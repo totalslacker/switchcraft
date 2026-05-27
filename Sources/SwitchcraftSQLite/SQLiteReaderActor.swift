@@ -84,6 +84,16 @@ actor SQLiteReaderActor {
         try scalarInt("SELECT COUNT(*) FROM document")
     }
 
+    func indexedURLs() throws -> Set<String> {
+        let conn = try requireConnection()
+        let stmt = try conn.prepare("SELECT uuid FROM document")
+        var result = Set<String>()
+        while try stmt.step() {
+            result.insert(stmt.columnText(0))
+        }
+        return result
+    }
+
     // MARK: - Chunks
 
     func chunk(hash: String) throws -> ChunkRecord? {

@@ -184,6 +184,39 @@ public actor SwitchcraftStore {
         try await storage.clear()
     }
 
+    /// Return the total number of documents in the store.
+    ///
+    /// - Throws: `SwitchcraftStoreError.alreadyShutDown`; storage errors.
+    public func documentCount() async throws -> Int {
+        try ensureRunning()
+        return try await storage.documentCount()
+    }
+
+    /// Return the set of all document UUIDs present in the store.
+    ///
+    /// Used by external backfill machinery to identify which pages have
+    /// already been indexed so they can be skipped during catch-up runs.
+    ///
+    /// - Throws: `SwitchcraftStoreError.alreadyShutDown`; storage errors.
+    public func indexedURLs() async throws -> Set<String> {
+        try ensureRunning()
+        return try await storage.indexedURLs()
+    }
+
+    /// Flush any pending WAL writes to the main database file and truncate
+    /// the WAL. No-op for in-memory stores.
+    ///
+    /// Call this during graceful shutdown to ensure the database is in a
+    /// clean state before process exit. If the WAL is not checkpointed and
+    /// the process is killed, the next launch may encounter a rehydration
+    /// conflict during index reconstruction.
+    ///
+    /// - Throws: `SwitchcraftStoreError.alreadyShutDown`; storage errors.
+    public func walCheckpoint() async throws {
+        try ensureRunning()
+        try await storage.walCheckpoint()
+    }
+
     // MARK: - Search
 
     /// Hybrid vector + BM25 search via Reciprocal Rank Fusion. Calls
@@ -317,6 +350,11 @@ public actor SwitchcraftStore {
         // throw `alreadyShutDown` instead of racing through gates.
         isShutDown = true
         try await indexer.flush()
+        // Checkpoint the WAL before closing so that the next launch finds
+        // a clean database file. Skipped on error — a partial WAL is still
+        // better than a half-checkpointed file, and `close()` handles final
+        // cleanup regardless.
+        try? await storage.walCheckpoint()
         try await storage.close()
     }
 
