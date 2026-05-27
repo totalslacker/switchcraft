@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import os
+
+private let indexerLogger = Logger(subsystem: "com.switchcraft.core", category: "Indexer")
 
 /// LSM-tree token-embedding index over any `SwitchcraftStorage`.
 ///
@@ -61,6 +64,11 @@ public actor Indexer {
     /// Vector dimensionality, locked in by the first `add`.
     private var dims: Int?
 
+    /// Number of distinct chunkID conflicts auto-recovered during `init`.
+    /// Zero when no conflicts were found or when
+    /// `config.rehydrationConflictBehavior == .throwError`.
+    public private(set) var recoveredConflictCount: Int = 0
+
     /// Tracks pending (post-last-flush) state used by the cascade walk.
     private var pendingMinChunkID: Int64?
     private var pendingMaxChunkID: Int64?
@@ -115,6 +123,17 @@ public actor Indexer {
         let gens = try await storage.generations()
         guard !gens.isEmpty else { return }
 
+        switch config.rehydrationConflictBehavior {
+        case .throwError:
+            try await rehydrateThrowError(gens: gens)
+        case .autoRecover:
+            try await rehydrateAutoRecover(gens: gens)
+        }
+    }
+
+    /// `.throwError` rehydration path — unchanged from the original implementation.
+    /// Throws `rehydrationConflict` on the first detected chunkID overlap.
+    private func rehydrateThrowError(gens: [GenerationRecord]) async throws {
         // Accumulate (tokenOffset, embedding) triples per chunkID across all
         // buckets of all generations before populating the ledger. Tokens for
         // a single chunkID may be spread across multiple buckets, so the sort
@@ -170,6 +189,213 @@ public actor Indexer {
             ledger[chunkID] = sorted.map { $0.embedding }
         }
         self.dims = inferredDims
+    }
+
+    /// `.autoRecover` rehydration path.
+    ///
+    /// Four-pass algorithm:
+    ///   1. Accumulate all data (with genID tagging), tracking which
+    ///      generation(s) each chunkID appears in.
+    ///   2. Resolve winner for each conflicting chunkID via pairwise
+    ///      `(level DESC, created DESC, id DESC)` comparison.
+    ///   3. Prune loser generation data from storage (atomically per gen).
+    ///   4. Populate the ledger, filtering conflicted chunkIDs to their winner.
+    private func rehydrateAutoRecover(gens: [GenerationRecord]) async throws {
+        // Local decoded bucket — stashed during the accumulation pass so the
+        // prune pass can re-encode surviving entries without extra storage I/O.
+        struct DecodedBucket {
+            let genID: Int64
+            let record: BucketRecord
+            let center: [Float]
+            let pairs: [IndexPair]
+            let residuals: [Float]
+        }
+
+        // Step 1 — Accumulation pass.
+        // genID-tagged accum: chunkID → [(genID, tokenOffset, embedding)]
+        var accum: [Int64: [(genID: Int64, tokenOffset: UInt32, embedding: [Float])]] = [:]
+        // chunkID → set of all generationIDs that claim it.
+        var chunkGenSets: [Int64: Set<Int64>] = [:]
+        var decodedBuckets: [DecodedBucket] = []
+        var inferredDims: Int? = nil
+
+        for gen in gens {
+            let buckets = try await storage.buckets(forGeneration: gen.id)
+            for bucket in buckets {
+                let center = Indexer.decodeFloat32LE(bucket.center)
+                guard !center.isEmpty else {
+                    throw Error.rehydrationBucketCorrupt(generationID: gen.id)
+                }
+                let d = center.count
+                if let existing = inferredDims, existing != d {
+                    throw Error.rehydrationBucketCorrupt(generationID: gen.id)
+                }
+                inferredDims = d
+
+                let pairs = try IndicesCodec.decode(bucket.indices)
+                let residuals = Q4Codec.decodeResiduals(bucket.residuals)
+                guard residuals.count == pairs.count * d else {
+                    throw Error.rehydrationBucketCorrupt(generationID: gen.id)
+                }
+
+                decodedBuckets.append(DecodedBucket(
+                    genID: gen.id,
+                    record: bucket,
+                    center: center,
+                    pairs: pairs,
+                    residuals: residuals
+                ))
+
+                for (i, pair) in pairs.enumerated() {
+                    let chunkID = Int64(pair.chunkID)
+                    chunkGenSets[chunkID, default: []].insert(gen.id)
+
+                    var embedding = [Float]()
+                    embedding.reserveCapacity(d)
+                    let base = i * d
+                    for j in 0..<d {
+                        embedding.append(center[j] + residuals[base + j])
+                    }
+                    accum[chunkID, default: []].append(
+                        (genID: gen.id, tokenOffset: pair.tokenOffset, embedding: embedding)
+                    )
+                }
+            }
+        }
+
+        guard let d = inferredDims else {
+            // No buckets at all — nothing to do.
+            return
+        }
+
+        // Step 2 — Winner resolution.
+        // For each chunkID claimed by >1 generation, pick the winner via
+        // pairwise (level DESC, created DESC, id DESC).
+        let genLookup: [Int64: GenerationRecord] = Dictionary(uniqueKeysWithValues: gens.map { ($0.id, $0) })
+
+        // winnerGenID[chunkID] = genID that wins for that chunkID.
+        // Only populated for conflicting chunkIDs.
+        var winnerGenID: [Int64: Int64] = [:]
+        for (chunkID, genIDSet) in chunkGenSets where genIDSet.count > 1 {
+            var winner: GenerationRecord? = nil
+            for genID in genIDSet {
+                guard let candidate = genLookup[genID] else { continue }
+                guard let current = winner else {
+                    winner = candidate
+                    continue
+                }
+                // (level DESC, created DESC, id DESC)
+                if candidate.level > current.level {
+                    winner = candidate
+                } else if candidate.level == current.level && candidate.created > current.created {
+                    winner = candidate
+                } else if candidate.level == current.level && candidate.created == current.created && candidate.id > current.id {
+                    winner = candidate
+                }
+            }
+            if let w = winner {
+                winnerGenID[chunkID] = w.id
+            }
+        }
+
+        // Step 3 — Storage prune.
+        // Group conflicting chunkIDs by their loser generation(s).
+        // loserChunkIDsByGen[loserGenID] = set of chunkIDs lost by that generation.
+        var loserChunkIDsByGen: [Int64: Set<Int64>] = [:]
+        for (chunkID, winnerID) in winnerGenID {
+            guard let genIDSet = chunkGenSets[chunkID] else { continue }
+            for loserGenID in genIDSet where loserGenID != winnerID {
+                loserChunkIDsByGen[loserGenID, default: []].insert(chunkID)
+            }
+        }
+
+        // For each loser generation, compute surviving buckets and replace atomically.
+        for (loserGenID, losingChunkIDs) in loserChunkIDsByGen {
+            guard let loserGen = genLookup[loserGenID] else { continue }
+
+            // Emit per-(chunkID, loser) warning log lines.
+            let winnerForLog: [Int64: GenerationRecord] = Dictionary(
+                uniqueKeysWithValues: losingChunkIDs.compactMap { chunkID -> (Int64, GenerationRecord)? in
+                    guard let wid = winnerGenID[chunkID], let wgen = genLookup[wid] else { return nil }
+                    return (chunkID, wgen)
+                }
+            )
+            for chunkID in losingChunkIDs.sorted() {
+                let winner = winnerForLog[chunkID]
+                indexerLogger.warning("""
+                    Recovered rehydrationConflict: chunkID=\(chunkID) \
+                    winner=gen\(winner?.id ?? -1)(level:\(winner?.level ?? -1), created:\(winner?.created ?? Date.distantPast)) \
+                    loser=gen\(loserGen.id)(level:\(loserGen.level), created:\(loserGen.created))
+                    """)
+            }
+
+            // Build surviving buckets: filter out pairs whose chunkID is a loser.
+            var survivingBuckets: [BucketRecord] = []
+            var totalSurvivingEmbeddings = 0
+            var survivingMinChunkID: Int64? = nil
+            var survivingMaxChunkID: Int64? = nil
+
+            for decoded in decodedBuckets where decoded.genID == loserGenID {
+                // Filter pairs to those not in the losing set.
+                var survivingPairs: [IndexPair] = []
+                var survivingResidualValues: [Float] = []
+                for (i, pair) in decoded.pairs.enumerated() {
+                    let chunkID = Int64(pair.chunkID)
+                    if losingChunkIDs.contains(chunkID) { continue }
+                    survivingPairs.append(pair)
+                    let base = i * d
+                    for j in 0..<d {
+                        survivingResidualValues.append(decoded.residuals[base + j])
+                    }
+                    survivingMinChunkID = survivingMinChunkID.map { min($0, chunkID) } ?? chunkID
+                    survivingMaxChunkID = survivingMaxChunkID.map { max($0, chunkID) } ?? chunkID
+                }
+                if survivingPairs.isEmpty { continue }
+
+                totalSurvivingEmbeddings += survivingPairs.count
+                survivingBuckets.append(BucketRecord(
+                    generationID: BucketRecord.unassigned,
+                    center: decoded.record.center,
+                    indices: IndicesCodec.encode(survivingPairs),
+                    residuals: Q4Codec.encodeResiduals(survivingResidualValues)
+                ))
+            }
+
+            // Build the surviving GenerationRecord with updated stats.
+            let survivingRecord = GenerationRecord(
+                level: loserGen.level,
+                numEmbeddings: totalSurvivingEmbeddings,
+                minChunkID: survivingMinChunkID ?? 0,
+                maxChunkID: survivingMaxChunkID ?? 0,
+                created: loserGen.created
+            )
+
+            // Atomically replace the loser in storage. May throw — propagates.
+            _ = try await storage.replaceGeneration(
+                losingGenerationID: loserGenID,
+                survivingRecord: survivingRecord,
+                survivingBuckets: survivingBuckets
+            )
+        }
+
+        // Step 4 — Record recoveredConflictCount.
+        recoveredConflictCount = winnerGenID.count
+
+        // Step 5 — Ledger population. For conflicting chunkIDs, only use
+        // entries from the winning generation.
+        for (chunkID, entries) in accum {
+            let filteredEntries: [(tokenOffset: UInt32, embedding: [Float])]
+            if let winnerID = winnerGenID[chunkID] {
+                filteredEntries = entries.compactMap { e in
+                    e.genID == winnerID ? (tokenOffset: e.tokenOffset, embedding: e.embedding) : nil
+                }
+            } else {
+                filteredEntries = entries.map { (tokenOffset: $0.tokenOffset, embedding: $0.embedding) }
+            }
+            let sorted = filteredEntries.sorted { $0.tokenOffset < $1.tokenOffset }
+            ledger[chunkID] = sorted.map { $0.embedding }
+        }
+        self.dims = d
     }
 
     // MARK: - Public API

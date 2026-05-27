@@ -41,6 +41,7 @@ public enum StorageConformance {
         try await runGenerationLifecycle(storage)
         try await runBucketLifecycle(storage)
         try await runDeleteGenerationCascadesToBuckets(storage)
+        try await runReplaceGeneration(storage)
 
         try await runClearEmptiesEverything(storage)
 
@@ -250,6 +251,77 @@ public enum StorageConformance {
 
         let buckets = try await storage.buckets(forGeneration: gen.id)
         #expect(buckets.isEmpty)
+    }
+
+    static func runReplaceGeneration(_ storage: any SwitchcraftStorage) async throws {
+        // Scenario 1: Partial prune — keep one of two buckets in the loser gen.
+        try await storage.clear()
+        let loser = try await storage.insertGeneration(
+            GenerationRecord(level: 0, numEmbeddings: 10, minChunkID: 1, maxChunkID: 5, created: Date())
+        )
+        let bucketA = try await storage.insertBucket(
+            BucketRecord(generationID: loser.id, center: Data([0xAA]), indices: Data([0x01]), residuals: Data([0x02]))
+        )
+        _ = try await storage.insertBucket(
+            BucketRecord(generationID: loser.id, center: Data([0xBB]), indices: Data([0x03]), residuals: Data([0x04]))
+        )
+
+        // Surviving record: same level/created as loser, but updated stats.
+        let survivingRecord = GenerationRecord(
+            level: loser.level,
+            numEmbeddings: 5,
+            minChunkID: 1,
+            maxChunkID: 3,
+            created: loser.created
+        )
+        // Keep only bucketA's data as a surviving bucket.
+        let survivingBucket = BucketRecord(
+            generationID: BucketRecord.unassigned,
+            center: bucketA.center,
+            indices: bucketA.indices,
+            residuals: bucketA.residuals
+        )
+        let newGen = try await storage.replaceGeneration(
+            losingGenerationID: loser.id,
+            survivingRecord: survivingRecord,
+            survivingBuckets: [survivingBucket]
+        )
+        #expect(newGen != nil)
+        #expect(newGen!.id != loser.id)
+        #expect(newGen!.id != GenerationRecord.unassigned)
+        #expect(newGen!.numEmbeddings == 5)
+
+        // Old generation must be gone.
+        let allGens = try await storage.generations()
+        #expect(!allGens.map(\.id).contains(loser.id))
+
+        // New generation must have exactly 1 bucket with bucketA's data.
+        let newBuckets = try await storage.buckets(forGeneration: newGen!.id)
+        #expect(newBuckets.count == 1)
+        #expect(newBuckets[0].center == bucketA.center)
+        #expect(newBuckets[0].indices == bucketA.indices)
+        #expect(newBuckets[0].residuals == bucketA.residuals)
+
+        // Scenario 2: Full prune — no survivors.
+        try await storage.clear()
+        let loser2 = try await storage.insertGeneration(
+            GenerationRecord(level: 0, numEmbeddings: 5, minChunkID: 1, maxChunkID: 2, created: Date())
+        )
+        _ = try await storage.insertBucket(
+            BucketRecord(generationID: loser2.id, center: Data([0xCC]), indices: Data([0x05]), residuals: Data([0x06]))
+        )
+        let nilResult = try await storage.replaceGeneration(
+            losingGenerationID: loser2.id,
+            survivingRecord: GenerationRecord(level: 0, numEmbeddings: 0, minChunkID: 0, maxChunkID: 0, created: Date()),
+            survivingBuckets: []
+        )
+        #expect(nilResult == nil)
+
+        let allGens2 = try await storage.generations()
+        #expect(!allGens2.map(\.id).contains(loser2.id))
+
+        let leftoverBuckets = try await storage.buckets(forGeneration: loser2.id)
+        #expect(leftoverBuckets.isEmpty)
     }
 
     // MARK: - Clear

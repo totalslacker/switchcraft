@@ -36,6 +36,16 @@ public struct IndexerConfig: Sendable, Hashable {
     /// Seed for the indexer's deterministic `SplitMix64`.
     public var seed: UInt64
 
+    /// Controls how `Indexer.init` responds when it detects a
+    /// `rehydrationConflict` (the same chunkID in two different active
+    /// generations, indicating storage corruption from an interrupted write).
+    ///
+    /// Default is `.autoRecover`, which applies LSM winner/loser semantics
+    /// and repairs the storage state atomically rather than surfacing the
+    /// error to every caller. Use `.throwError` as a backwards-compatible
+    /// opt-out for tests or safety-critical callers.
+    public var rehydrationConflictBehavior: RehydrationConflictBehavior
+
     /// Build an `IndexerConfig`. `l0Capacity` and `lsmFanout` are
     /// required; the rest default to upstream Witchcraft values.
     public init(
@@ -43,7 +53,8 @@ public struct IndexerConfig: Sendable, Hashable {
         lsmFanout: Int,
         kmeansIterations: Int = 5,
         kCoefficient: Double = 16.0,
-        seed: UInt64 = 42
+        seed: UInt64 = 42,
+        rehydrationConflictBehavior: RehydrationConflictBehavior = .autoRecover
     ) {
         precondition(l0Capacity > 0, "l0Capacity must be positive")
         precondition(lsmFanout > 1, "lsmFanout must be >= 2 to make cascade meaningful")
@@ -54,6 +65,7 @@ public struct IndexerConfig: Sendable, Hashable {
         self.kmeansIterations = kmeansIterations
         self.kCoefficient = kCoefficient
         self.seed = seed
+        self.rehydrationConflictBehavior = rehydrationConflictBehavior
     }
 
     /// Production defaults matching upstream Witchcraft.
@@ -68,12 +80,14 @@ public struct IndexerConfig: Sendable, Hashable {
     public static func testing(
         l0Capacity: Int = 4,
         lsmFanout: Int = 2,
-        seed: UInt64 = 42
+        seed: UInt64 = 42,
+        rehydrationConflictBehavior: RehydrationConflictBehavior = .autoRecover
     ) -> IndexerConfig {
         IndexerConfig(
             l0Capacity: l0Capacity,
             lsmFanout: lsmFanout,
-            seed: seed
+            seed: seed,
+            rehydrationConflictBehavior: rehydrationConflictBehavior
         )
     }
 
@@ -87,4 +101,20 @@ public struct IndexerConfig: Sendable, Hashable {
         }
         return cap
     }
+}
+
+/// Controls how `Indexer.init` handles a detected `rehydrationConflict`.
+///
+/// - `autoRecover`: (default) Apply LSM winner/loser semantics to pick the
+///   authoritative generation for each conflicting chunkID, prune the loser's
+///   entries from storage atomically, log a structured warning, and continue.
+///   Consumers no longer need to ship their own "wipe and rebuild" recovery UI
+///   for this class of LSM inconsistency caused by interrupted writes.
+///
+/// - `throwError`: Throw `Indexer.Error.rehydrationConflict` on the first
+///   conflict detected. Backwards-compatible opt-out for tests and
+///   safety-critical callers that need explicit notification.
+public enum RehydrationConflictBehavior: Sendable, Hashable {
+    case autoRecover
+    case throwError
 }

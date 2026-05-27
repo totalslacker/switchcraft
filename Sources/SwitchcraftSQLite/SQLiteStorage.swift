@@ -425,6 +425,66 @@ public actor SQLiteStorage: SwitchcraftStorage {
         }
     }
 
+    public func replaceGeneration(
+        losingGenerationID: Int64,
+        survivingRecord: GenerationRecord,
+        survivingBuckets: [BucketRecord]
+    ) async throws -> GenerationRecord? {
+        switch mode {
+        case .closed:
+            throw SQLiteError(code: 1, message: "storage is not open")
+        case .inMemory(let conn):
+            return try conn.transaction {
+                // Delete the loser (FK cascade removes its buckets).
+                let delStmt = try conn.prepare("DELETE FROM generation WHERE id = ?")
+                try delStmt.bind([.int(losingGenerationID)])
+                try delStmt.step()
+
+                guard !survivingBuckets.isEmpty else { return nil }
+
+                // Insert the surviving generation record.
+                let genStmt = try conn.prepare("""
+                    INSERT INTO generation (level, num_embeddings, min_chunk_id, max_chunk_id, created)
+                    VALUES (?, ?, ?, ?, ?)
+                    """)
+                try genStmt.bind([
+                    .int(Int64(survivingRecord.level)),
+                    .int(Int64(survivingRecord.numEmbeddings)),
+                    .int(survivingRecord.minChunkID),
+                    .int(survivingRecord.maxChunkID),
+                    .real(Codecs.encode(survivingRecord.created)),
+                ])
+                try genStmt.step()
+                let newGenID = conn.lastInsertRowID
+
+                // Insert each surviving bucket with the new generationID.
+                for bucket in survivingBuckets {
+                    let bucketStmt = try conn.prepare("""
+                        INSERT INTO bucket (generation_id, center, indices, residuals)
+                        VALUES (?, ?, ?, ?)
+                        """)
+                    try bucketStmt.bind([
+                        .int(newGenID),
+                        .blob(bucket.center),
+                        .blob(bucket.indices),
+                        .blob(bucket.residuals),
+                    ])
+                    try bucketStmt.step()
+                }
+
+                var newGen = survivingRecord
+                newGen.id = newGenID
+                return newGen
+            }
+        case .fileBacked(let writer, _):
+            return try await writer.replaceGeneration(
+                losingGenerationID: losingGenerationID,
+                survivingRecord: survivingRecord,
+                survivingBuckets: survivingBuckets
+            )
+        }
+    }
+
     // MARK: - Buckets
 
     public func insertBucket(_ bucket: BucketRecord) async throws -> BucketRecord {
