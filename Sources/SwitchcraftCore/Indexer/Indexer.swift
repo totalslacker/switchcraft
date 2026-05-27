@@ -719,6 +719,12 @@ public actor Indexer {
         pendingCount = 0
     }
 
+    // MARK: - Testing helpers
+
+    /// Returns a snapshot of the current ledger (chunkID → per-token embeddings).
+    /// Internal, not part of the public API. Accessible from `@testable import SwitchcraftCore`.
+    var ledgerSnapshot: [Int64: [[Float]]] { ledger }
+
     // MARK: - Helpers
 
     /// Pack `[Float]` (Float32) as little-endian bytes. Encoding by hand
