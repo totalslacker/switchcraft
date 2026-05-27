@@ -32,6 +32,14 @@ actor SQLiteWriterActor {
         connection = nil
     }
 
+    /// Run `PRAGMA wal_checkpoint(TRUNCATE)` on the writer connection,
+    /// flushing all pending WAL pages to the main database file and resetting
+    /// the WAL header. No-op if the connection is not open.
+    func walCheckpoint() throws {
+        guard let conn = connection else { return }
+        try conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    }
+
     // MARK: - Documents
 
     func upsertDocument(_ document: DocumentRecord) throws {

@@ -98,6 +98,17 @@ public actor SQLiteStorage: SwitchcraftStorage {
         }
     }
 
+    /// Flush pending WAL pages to the main database file and reset the WAL.
+    /// No-op for in-memory or closed stores.
+    public func walCheckpoint() async throws {
+        switch mode {
+        case .closed, .inMemory:
+            break
+        case .fileBacked(let writer, _):
+            try await writer.walCheckpoint()
+        }
+    }
+
     public func clear() async throws {
         switch mode {
         case .closed:
@@ -239,6 +250,22 @@ public actor SQLiteStorage: SwitchcraftStorage {
             return Int(stmt.columnInt64(0))
         case .fileBacked(_, let reader):
             return try await reader.documentCount()
+        }
+    }
+
+    public func indexedURLs() async throws -> Set<String> {
+        switch mode {
+        case .closed:
+            throw SQLiteError(code: 1, message: "storage is not open")
+        case .inMemory(let conn):
+            let stmt = try conn.prepare("SELECT uuid FROM document")
+            var result = Set<String>()
+            while try stmt.step() {
+                result.insert(stmt.columnText(0))
+            }
+            return result
+        case .fileBacked(_, let reader):
+            return try await reader.indexedURLs()
         }
     }
 

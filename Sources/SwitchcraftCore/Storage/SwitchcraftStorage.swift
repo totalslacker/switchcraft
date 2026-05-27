@@ -55,6 +55,13 @@ public protocol SwitchcraftStorage: Sendable {
     /// Return the total number of documents.
     func documentCount() async throws -> Int
 
+    /// Return the set of all document UUIDs present in the store.
+    ///
+    /// Used by the backfill machinery to skip pages that are already indexed
+    /// without re-processing them. Returns an empty set if the store has no
+    /// documents or if the backend does not support enumeration.
+    func indexedURLs() async throws -> Set<String>
+
     // MARK: - Chunks
 
     /// Insert a chunk if no chunk with the same `hash` exists. Returns the
@@ -119,8 +126,22 @@ public protocol SwitchcraftStorage: Sendable {
     ///
     /// Pass `nil` to disarm any previously configured deadline.
     func configureSearchDeadline(_ ctx: SearchDeadlineContext?) async
+
+    // MARK: - WAL checkpoint (optional, backend-specific)
+
+    /// Flush any pending WAL writes to the main database file and truncate
+    /// the WAL.
+    ///
+    /// Backends that use SQLite in WAL mode override this to run
+    /// `PRAGMA wal_checkpoint(TRUNCATE)`. Non-WAL backends (in-memory,
+    /// non-SQLite) may leave the default no-op.
+    ///
+    /// Called during graceful shutdown to ensure the database file is in a
+    /// clean state before process exit.
+    func walCheckpoint() async throws
 }
 
 extension SwitchcraftStorage {
     public func configureSearchDeadline(_ ctx: SearchDeadlineContext?) async {}
+    public func walCheckpoint() async throws {}
 }
