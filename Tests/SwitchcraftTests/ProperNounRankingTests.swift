@@ -42,20 +42,21 @@ struct ProperNounRankingTests {
     /// Title for the Alfred document (used in the fix test only).
     private static let alfredTitle = "Alfred - Productivity App for macOS"
 
-    /// Body for the Alfred document — dense with "Alfred" so BM25 also
-    /// ranks it highly and the vector-pipeline behaviour is the discriminator.
+    /// Body for the Alfred document — intentionally avoids using the word
+    /// "alfred" so that without title prepend the document scores near-baseline
+    /// for the query "alfred", but with the title prepended (ADR 025) the title
+    /// token "Alfred" drives the score up. This is exactly the H3 failure mode.
     private static let alfredBody = """
-        Alfred is a productivity application for macOS that boosts your \
-        efficiency with hotkeys, keywords, and text expansion. Alfred's \
-        powerpack unlocks powerful workflows that let you automate repetitive \
-        tasks. Alfred integrates with macOS Spotlight and adds Alfred-specific \
-        features like a clipboard manager, snippets, and 1Password integration. \
-        Alfred has been the go-to productivity tool for Mac power users for over \
-        a decade. Download Alfred free from alfredapp.com and discover why \
-        Alfred is loved by millions of Mac users worldwide. Alfred workflows let \
-        you control Alfred with custom triggers and actions. Alfred Remote brings \
-        Alfred to your iPhone and iPad so you can trigger Alfred workflows from \
-        anywhere. Alfred is built natively for macOS and runs entirely on-device.
+        This productivity application for macOS boosts your efficiency through \
+        hotkeys, keywords, and text expansion. The powerpack unlocks powerful \
+        workflows that automate repetitive tasks. It integrates with macOS \
+        Spotlight and adds features like a clipboard manager, snippets, and \
+        password manager integration. This tool has been the go-to choice for \
+        Mac power users for over a decade. Download it free and discover why \
+        millions of Mac users rely on it daily. Custom workflows let you \
+        control the launcher with triggers and actions. The companion mobile app \
+        brings the experience to your phone so you can trigger workflows from \
+        anywhere. The application runs natively on macOS entirely on-device.
         """
 
     /// Title for the Bartleby document (used in the fix test only).
