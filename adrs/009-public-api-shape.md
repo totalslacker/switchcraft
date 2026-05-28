@@ -23,7 +23,7 @@ public actor SwitchcraftStore {
     public init(storage: any SwitchcraftStorage,
                 embedder: any Embedder,
                 config: StoreConfig = .default) async throws
-    public func add(id:date:metadata:body:) async throws
+    public func add(id:date:metadata:title:body:) async throws  // title defaults to nil; see ADR 025
     public func remove(id:) async throws
     public func index() async throws
     public func clear() async throws
@@ -101,6 +101,14 @@ reuses the existing chunk's id and skips `indexer.add` — calling
 `indexer.add` again would double-buffer the same embeddings under the
 same chunkID and break the indexer's row-count invariants on the next
 flush.
+
+**Hash computation (amended by ADR 025)**: The chunk key is
+`SHA-256(embeddingText)` where `embeddingText` is `"\(title)\n\(body)"`
+when `title` is non-nil, and `body` otherwise. This means two documents
+with identical bodies but different titles produce distinct chunks with
+their own correctly-keyed embeddings. When `title == nil`, the hash is
+byte-identical to the pre-ADR-025 formula. See ADR 025 for the full
+policy, store-version compatibility notes, and re-indexing guidance.
 
 ## (f) Auto-flush on `search` and `score`; no count threshold for v1
 
