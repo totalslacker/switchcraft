@@ -425,6 +425,19 @@ public actor SQLiteStorage: SwitchcraftStorage {
         }
     }
 
+    public func updateGenerationEmbeddingCount(id: Int64, count: Int) async throws {
+        switch mode {
+        case .closed:
+            throw SQLiteError(code: 1, message: "storage is not open")
+        case .inMemory(let conn):
+            let stmt = try conn.prepare("UPDATE generation SET num_embeddings = ? WHERE id = ?")
+            try stmt.bind([.int(Int64(count)), .int(id)])
+            try stmt.step()
+        case .fileBacked(let writer, _):
+            try await writer.updateGenerationEmbeddingCount(id: id, count: count)
+        }
+    }
+
     public func replaceGeneration(
         losingGenerationID: Int64,
         survivingRecord: GenerationRecord,

@@ -1,8 +1,8 @@
 # ADR 024 — `rehydrationConflict` Auto-Recovery
 
-**Status**: Accepted  
+**Status**: Accepted (amended 2026-05-27 for issue #103)  
 **Date**: 2026-05-27  
-**Issue**: #101
+**Issues**: #101, #103
 
 ---
 
@@ -99,6 +99,23 @@ test stub) fires before any mutation.
 
 ---
 
+## `updateGenerationEmbeddingCount` Atomicity Contract (issue #103)
+
+A new required protocol method added for step 3.5:
+
+```swift
+func updateGenerationEmbeddingCount(id: Int64, count: Int) async throws
+```
+
+Contract:
+- Updates the `numEmbeddings` field for the generation with the given id. No-op if absent.
+- **InMemoryStorage**: Direct mutation of `generations[id]?.numEmbeddings`; actor-isolated, no transaction needed.
+- **SQLiteWriterActor / SQLiteStorage inMemory path**: `UPDATE generation SET num_embeddings = ? WHERE id = ?` — a single-row UPDATE, atomic at the SQLite level. No explicit transaction needed.
+- Does **not** change the generation's `id`, `level`, `minChunkID`, `maxChunkID`, or `created`. The `id` is preserved, which is required because the cascade walk references generation IDs and existing test assertions verify winner ID continuity.
+- A targeted UPDATE is preferred over `replaceGeneration` here: `replaceGeneration` assigns a new id (required for its transactional delete+insert semantics), which would break the id-preservation invariant.
+
+---
+
 ## Logging
 
 One `os.warning` line is emitted per **(chunkID, loser-gen) pair** via:
@@ -119,9 +136,29 @@ A 2-way conflict for chunkID 5 emits 1 line. A 3-way conflict (chunkID 5 in gens
 
 ---
 
+## `numEmbeddings` Staleness (issue #103)
+
+`performFlush()` writes the generation row in **step 9** (before bucket inserts) and
+writes bucket rows in **step 10**. A process killed between steps 9 and 10 leaves the
+generation row with a `numEmbeddings` value that exceeds the number of pairs actually
+present in the (incomplete) bucket set.
+
+The original auto-recovery path correctly recomputes `numEmbeddings` for **loser**
+generations (via `survivingRecord` passed to `replaceGeneration`). But it left **winner**
+generations untouched. If the winner's `performFlush()` was the interrupted write, its
+`numEmbeddings` is stale. The cascade walk in `performFlush()` accumulates `total` from
+`gen.numEmbeddings`; the ledger's `m = allRows.count` is derived from decoded bucket
+pairs. When `total != m`, `ledgerOutOfSync` fires — the index appears to initialise
+successfully but fails on the first flush.
+
+**Fix**: Step 3.5 (below) corrects stale `numEmbeddings` on all surviving (non-loser)
+generations using already-decoded bucket data from step 1 (zero extra I/O).
+
+---
+
 ## Rehydration Algorithm (`.autoRecover` mode)
 
-Four-pass, separate from the `.throwError` single-pass path (the existing path is
+Five-pass, separate from the `.throwError` single-pass path (the existing path is
 byte-for-byte unchanged):
 
 1. **Accumulation**: Decode all buckets; accumulate genID-tagged `(genID, tokenOffset,
@@ -136,9 +173,19 @@ byte-for-byte unchanged):
      `IndicesCodec.encode` and `Q4Codec.encodeResiduals` (same codec path as flush).
    - Recompute `numEmbeddings`, `minChunkID`, `maxChunkID` from surviving pairs.
    - Call `storage.replaceGeneration(...)` atomically. Throws propagate immediately.
-   - `recoveredConflictCount` is set to `winnerGenID.count`.
 
-4. **Ledger population**: For conflicted chunkIDs, filter accum entries to the winning
+3.5. **`numEmbeddings` correction** (issue #103): For each surviving (non-loser)
+   generation whose stored `numEmbeddings` does not equal its actual decoded pair count,
+   call `storage.updateGenerationEmbeddingCount(id:count:)`. Uses already-decoded
+   `decodedBuckets` from step 1 — no additional I/O. A targeted UPDATE (not delete +
+   re-insert) preserves the generation's id, which the cascade walk depends on and which
+   existing test assertions verify. If correction fails mid-loop, the next
+   `rehydrateAutoRecover` call will retry idempotently (the count mismatch guard fires
+   again).
+
+4. **Record `recoveredConflictCount`**: Set to `winnerGenID.count`.
+
+5. **Ledger population**: For conflicted chunkIDs, filter accum entries to the winning
    generation; for uncontested chunkIDs, use all entries. Sort by `tokenOffset`.
 
 ---
@@ -172,6 +219,13 @@ as violating requirement #6 (storage state must be no worse than input on any er
   (`runReplaceGeneration` in `StorageConformance`) verifies the atomicity and correctness
   requirements.
 
+- **Protocol conformers** (issue #103 amendment) must also implement
+  `updateGenerationEmbeddingCount(id:count:)`. No default implementation is provided
+  (same policy as `replaceGeneration`). A silent no-op default would leave custom backends
+  with stale `numEmbeddings` and mask the bug rather than surfacing it. The conformance
+  suite (`runUpdateGenerationEmbeddingCount` in `StorageConformance`) verifies the
+  semantics.
+
 - **`rehydrationBucketCorrupt` recovery** is out of scope for this ADR — the
   `rehydrationBucketCorrupt` error still propagates as-is. A separate issue will address
   it if needed.
@@ -185,5 +239,6 @@ as violating requirement #6 (storage state must be no worse than input on any er
 
 - ADR 004 §(g) — Original `rehydrationConflict` throw policy (unchanged for `.throwError` callers).
 - ADR 005 — Bucket indices encoding (`IndicesCodec`, `Q4Codec`); re-used in the prune re-encoding step.
-- ADR 019 — SQLite writer/reader split; `replaceGeneration` implemented in `SQLiteWriterActor`.
-- Issue #101 — Specification, real-world reproducing incident, and acceptance criteria.
+- ADR 019 — SQLite writer/reader split; `replaceGeneration` and `updateGenerationEmbeddingCount` implemented in `SQLiteWriterActor`.
+- Issue #101 — Specification, real-world reproducing incident, and acceptance criteria for the original auto-recovery.
+- Issue #103 — Follow-up: `numEmbeddings` staleness causing `ledgerOutOfSync` after a successful `rehydrationConflict` recovery; step 3.5 and `updateGenerationEmbeddingCount`.

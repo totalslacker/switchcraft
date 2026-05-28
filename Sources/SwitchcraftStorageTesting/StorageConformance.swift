@@ -42,6 +42,7 @@ public enum StorageConformance {
         try await runBucketLifecycle(storage)
         try await runDeleteGenerationCascadesToBuckets(storage)
         try await runReplaceGeneration(storage)
+        try await runUpdateGenerationEmbeddingCount(storage)
 
         try await runClearEmptiesEverything(storage)
 
@@ -322,6 +323,26 @@ public enum StorageConformance {
 
         let leftoverBuckets = try await storage.buckets(forGeneration: loser2.id)
         #expect(leftoverBuckets.isEmpty)
+    }
+
+    static func runUpdateGenerationEmbeddingCount(_ storage: any SwitchcraftStorage) async throws {
+        try await storage.clear()
+
+        let gen = try await storage.insertGeneration(
+            GenerationRecord(level: 0, numEmbeddings: 10, minChunkID: 1, maxChunkID: 5, created: Date())
+        )
+        #expect(gen.numEmbeddings == 10)
+
+        try await storage.updateGenerationEmbeddingCount(id: gen.id, count: 5)
+
+        let updated = try await storage.generations()
+        let found = updated.first { $0.id == gen.id }
+        #expect(found != nil)
+        #expect(found?.numEmbeddings == 5)
+        #expect(found?.id == gen.id)
+
+        // No-op for an absent id — must not throw.
+        try await storage.updateGenerationEmbeddingCount(id: 9999, count: 0)
     }
 
     // MARK: - Clear

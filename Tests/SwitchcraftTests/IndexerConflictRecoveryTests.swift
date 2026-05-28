@@ -291,6 +291,87 @@ struct IndexerConflictRecoveryTests {
         #expect(!ids.contains(gen2.id), "gen2 (loser, level=0) should be pruned")
         #expect(ids.contains(gen3.id), "gen3 (winner, level=1) should remain")
     }
+    // MARK: - Test 6 (req 103): inflated numEmbeddings on winner is corrected, flush succeeds
+
+    /// Regression test for issue #103. Simulates a crash between step 9 (generation row
+    /// insert) and step 10 (bucket inserts) in `performFlush()`, leaving the winner gen's
+    /// `numEmbeddings` higher than the actual decoded pair count. Verifies that:
+    ///   (a) `Indexer.init` with `.autoRecover` corrects the stale count in storage, and
+    ///   (b) a subsequent `add()` + `flush()` does not throw `ledgerOutOfSync`.
+    @Test("autoRecover: inflated numEmbeddings on winner is corrected, subsequent flush succeeds")
+    func autoRecover_inflatedNumEmbeddings_correctedAndFlushSucceeds() async throws {
+        let storage = InMemoryStorage()
+        try await storage.open()
+
+        let now = Date()
+        let d = Self.dims  // 4
+        let zeroResiduals = [Float](repeating: 0.0, count: d)
+
+        // Loser gen (inserted first → lower id): level=0, one pair at chunkID=100.
+        // This creates a rehydrationConflict on chunkID=100 with the winner.
+        let loserCenter: [Float] = [0.0, 0.0, 1.0, 0.0]
+        let loserGen = try await storage.insertGeneration(GenerationRecord(
+            level: 0,
+            numEmbeddings: 1,
+            minChunkID: 100,
+            maxChunkID: 100,
+            created: now
+        ))
+        _ = try await storage.insertBucket(BucketRecord(
+            generationID: loserGen.id,
+            center: Indexer.encodeFloat32LE(loserCenter),
+            indices: IndicesCodec.encode([IndexPair(chunkID: 100, tokenOffset: 0)]),
+            residuals: Q4Codec.encodeResiduals(zeroResiduals)
+        ))
+
+        // Winner gen (inserted second → higher id, wins tie-break): level=0, two pairs at
+        // chunkID=100 and chunkID=200. numEmbeddings is intentionally inflated to 9,
+        // simulating a crash between the generation row insert (step 9 of performFlush)
+        // and bucket completion (step 10). Actual decoded pair count is 2.
+        let winnerCenter: [Float] = [0.5, 0.5, 0.0, 0.0]
+        let winnerGen = try await storage.insertGeneration(GenerationRecord(
+            level: 0,
+            numEmbeddings: 9,
+            minChunkID: 100,
+            maxChunkID: 200,
+            created: now
+        ))
+        _ = try await storage.insertBucket(BucketRecord(
+            generationID: winnerGen.id,
+            center: Indexer.encodeFloat32LE(winnerCenter),
+            indices: IndicesCodec.encode([
+                IndexPair(chunkID: 100, tokenOffset: 0),
+                IndexPair(chunkID: 200, tokenOffset: 0),
+            ]),
+            residuals: Q4Codec.encodeResiduals(zeroResiduals + zeroResiduals)
+        ))
+
+        // Init with autoRecover: conflict on chunkID=100 is resolved, winner (higher id) wins.
+        let indexer = try await Indexer(
+            storage: storage,
+            config: .testing(rehydrationConflictBehavior: .autoRecover)
+        )
+        #expect(await indexer.recoveredConflictCount == 1)
+
+        // Step 3.5 must have corrected the winner's numEmbeddings from 9 to 2.
+        let gensAfterRecovery = try await storage.generations()
+        let survivingGen = gensAfterRecovery.first { $0.id == winnerGen.id }
+        #expect(survivingGen != nil, "winner gen must survive recovery")
+        #expect(survivingGen?.numEmbeddings == 2,
+                "numEmbeddings must be corrected from 9 to 2; got \(survivingGen?.numEmbeddings ?? -1)")
+
+        // add() + flush() must not throw ledgerOutOfSync.
+        // With the inflated count (9), the cascade walk computes total=2+9=11>8, cascades
+        // to level 1, then finds m=4 != total=11 and throws. With the fix, total=2+2=4≤8
+        // stays at level 0, m=4=total → success.
+        let newEmbeddings = [Float](repeating: 0.1, count: 2 * d)  // 2 token embeddings
+        try await indexer.add(chunkID: 300, embeddings: newEmbeddings, dims: d)
+        try await indexer.flush()
+
+        // Flush must have created at least one generation.
+        let gensAfterFlush = try await storage.generations()
+        #expect(!gensAfterFlush.isEmpty, "flush must produce at least one generation")
+    }
 }
 
 // MARK: - FailingReplaceStorage actor mutation helper

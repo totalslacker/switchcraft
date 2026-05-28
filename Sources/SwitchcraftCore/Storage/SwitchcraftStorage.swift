@@ -115,6 +115,18 @@ public protocol SwitchcraftStorage: Sendable {
         survivingBuckets: [BucketRecord]
     ) async throws -> GenerationRecord?
 
+    /// Update the `numEmbeddings` field for the generation with the given id.
+    /// No-op if the id is absent.
+    ///
+    /// Used by `Indexer.init` auto-recovery (step 3.5) to correct stale
+    /// `numEmbeddings` values left on surviving (winner) generations when a
+    /// crash occurred between the generation-row insert (step 9 of
+    /// `performFlush`) and the completion of bucket inserts (step 10). A
+    /// targeted UPDATE is used rather than `replaceGeneration` so that the
+    /// generation's id is preserved — which is required by the cascade walk
+    /// and by existing test assertions.
+    func updateGenerationEmbeddingCount(id: Int64, count: Int) async throws
+
     // MARK: - Buckets
 
     /// Insert a bucket record. The provided `id` is ignored; the backend

@@ -378,6 +378,23 @@ public actor Indexer {
             )
         }
 
+        // Step 3.5 — Correct stale numEmbeddings on all surviving (non-loser) generations.
+        // A crash between step 9 (generation row insert) and step 10 (bucket inserts) in
+        // performFlush() leaves the winner gen's numEmbeddings larger than the number of
+        // pairs actually present in its buckets. The cascade walk in performFlush() uses
+        // gen.numEmbeddings for `total` while allRows.count is derived from decoded bucket
+        // pairs — if they diverge, ledgerOutOfSync fires. Correct here using
+        // already-decoded bucket data (zero extra I/O).
+        let loserGenIDs = Set(loserChunkIDsByGen.keys)
+        for gen in gens where !loserGenIDs.contains(gen.id) {
+            let actualCount = decodedBuckets
+                .filter { $0.genID == gen.id }
+                .reduce(0) { $0 + $1.pairs.count }
+            if actualCount != gen.numEmbeddings {
+                try await storage.updateGenerationEmbeddingCount(id: gen.id, count: actualCount)
+            }
+        }
+
         // Step 4 — Record recoveredConflictCount.
         recoveredConflictCount = winnerGenID.count
 
