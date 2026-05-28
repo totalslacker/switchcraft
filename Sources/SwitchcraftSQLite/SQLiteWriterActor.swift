@@ -128,6 +128,13 @@ actor SQLiteWriterActor {
         try stmt.step()
     }
 
+    func updateGenerationEmbeddingCount(id: Int64, count: Int) throws {
+        let conn = try requireConnection()
+        let stmt = try conn.prepare("UPDATE generation SET num_embeddings = ? WHERE id = ?")
+        try stmt.bind([.int(Int64(count)), .int(id)])
+        try stmt.step()
+    }
+
     /// Atomically delete `losingGenerationID` (FK-cascades its buckets) and,
     /// if `survivingBuckets` is non-empty, insert a new generation + buckets.
     /// All operations run inside a single `BEGIN`/`COMMIT`/`ROLLBACK` block.

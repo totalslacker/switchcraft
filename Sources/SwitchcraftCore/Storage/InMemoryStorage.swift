@@ -121,6 +121,10 @@ public actor InMemoryStorage: SwitchcraftStorage {
         bucketsByGeneration.removeValue(forKey: id)
     }
 
+    public func updateGenerationEmbeddingCount(id: Int64, count: Int) async throws {
+        generations[id]?.numEmbeddings = count
+    }
+
     public func replaceGeneration(
         losingGenerationID: Int64,
         survivingRecord: GenerationRecord,

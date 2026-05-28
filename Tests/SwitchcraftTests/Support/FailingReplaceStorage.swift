@@ -105,6 +105,10 @@ public actor FailingReplaceStorage: SwitchcraftStorage {
         try await inner.deleteGeneration(id: id)
     }
 
+    public func updateGenerationEmbeddingCount(id: Int64, count: Int) async throws {
+        try await inner.updateGenerationEmbeddingCount(id: id, count: count)
+    }
+
     /// Injects `ReplaceError.injected` **before** any mutation when
     /// `shouldFailOnReplace == true`. Otherwise delegates transparently.
     public func replaceGeneration(
