@@ -82,10 +82,28 @@ public actor SwitchcraftStore {
     /// `metadata` is JSON-encoded with sorted keys so byte-identical input
     /// produces byte-identical `DocumentRecord.metadata`.
     ///
+    /// When `title` is supplied, the embedder sees `"<title>\n<body>"` rather
+    /// than `body` alone. This improves retrieval quality for short proper-noun
+    /// queries by ensuring title tokens appear at the start of the T5 context
+    /// window, where their embeddings are closest to the same token in a
+    /// standalone query. See ADR 025 for the full rationale and hash-semantics.
+    ///
+    /// The chunk dedup key is `SHA-256(embeddingText)` — so two documents
+    /// with identical bodies but different titles produce distinct chunks with
+    /// correct per-title embeddings. When `title` is nil, `embeddingText ==
+    /// body` and the hash is identical to the pre-025 formula; existing callers
+    /// are unaffected.
+    ///
+    /// `DocumentRecord.body` always stores the caller-supplied `body` (never
+    /// the title-prefixed embedding text). Callers who need the title indexed
+    /// for BM25 should include it in `body` or `metadata`.
+    ///
     /// - Parameters:
     ///   - id: caller-supplied document identifier (UUID, slug, etc.).
     ///   - date: date associated with the document. Defaults to `now`.
     ///   - metadata: opaque key/value pairs filterable via `StorageFilter`.
+    ///   - title: optional document title. Prepended to `body` at embedding
+    ///     time only; not stored in `DocumentRecord.body`.
     ///   - body: searchable text. Embedded by the configured `Embedder`.
     /// - Throws: `SwitchcraftStoreError.alreadyShutDown` if the store has
     ///   been shut down; `SwitchcraftStoreError.embeddingMismatch` if the
@@ -95,12 +113,15 @@ public actor SwitchcraftStore {
         id: String,
         date: Date = Date(),
         metadata: [String: String] = [:],
+        title: String? = nil,
         body: String
     ) async throws {
         try ensureRunning()
 
+        let embeddingText = title.map { "\($0)\n\(body)" } ?? body
+
         // TODO: paragraph splitter — single chunk per body for v1.
-        let embeddings = try await embedder.encode(body)
+        let embeddings = try await embedder.encode(embeddingText)
         let dims = embedder.dims
         guard embeddings.count % dims == 0 else {
             throw SwitchcraftStoreError.embeddingMismatch(
@@ -109,7 +130,7 @@ public actor SwitchcraftStore {
         }
         let tokenCount = embeddings.count / dims
 
-        let hash = Self.contentHash(body)
+        let hash = Self.contentHash(embeddingText)
         let metadataData = try Self.encodeMetadata(metadata)
 
         // Pre-check chunk existence so we only buffer embeddings into the
