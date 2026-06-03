@@ -23,7 +23,11 @@ public actor InMemoryStorage: SwitchcraftStorage {
     private var nextGenerationID: Int64 = 1
     private var nextBucketID: Int64 = 1
 
-    public init() {}
+    private let ftsTitleWeight: Float
+
+    public init(ftsTitleWeight: Float = 3.0) {
+        self.ftsTitleWeight = ftsTitleWeight
+    }
 
     // MARK: - Lifecycle
 
@@ -180,14 +184,22 @@ public actor InMemoryStorage: SwitchcraftStorage {
         var hits: [FullTextHit] = []
         for document in documents.values where filter.matches(document) {
             let bodyTerms = Self.tokenize(document.body)
-            guard !bodyTerms.isEmpty else { continue }
-
             let bodySet = Set(bodyTerms)
-            let overlap = queryTerms.reduce(into: 0) { count, term in
+            let bodyOverlap = queryTerms.reduce(into: 0) { count, term in
                 if bodySet.contains(term) { count += 1 }
             }
-            if overlap > 0 {
-                let score = Float(overlap) / Float(queryTerms.count)
+
+            var titleOverlap = 0
+            if let title = document.title {
+                let titleSet = Set(Self.tokenize(title))
+                titleOverlap = queryTerms.reduce(into: 0) { count, term in
+                    if titleSet.contains(term) { count += 1 }
+                }
+            }
+
+            let rawScore = Float(bodyOverlap) + Float(titleOverlap) * ftsTitleWeight
+            if rawScore > 0 {
+                let score = rawScore / Float(queryTerms.count)
                 hits.append(FullTextHit(uuid: document.uuid, score: score))
             }
         }
