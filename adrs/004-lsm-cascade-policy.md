@@ -160,3 +160,64 @@ one active generation.
 In-memory ledger size for 1M tokens at 128-dim Float32 ≈ 520 MB
 (plus per-token Array overhead). Tractable for the spec's perf
 gate and the 33-fact corpus; revisit before NFCorpus (~3.6M docs).
+
+## (h) Compaction observability — `[Compact]` os.Logger events
+
+Every `performFlush()` invocation emits structured info-level log lines
+to the existing `indexerLogger` (`Logger(subsystem: "com.switchcraft.core",
+category: "Indexer")`). No new subsystem or category is introduced.
+
+### Log line formats
+
+```
+[Compact] started:    input_segments=<N> input_bytes=<X> trigger=<T>
+[Compact] finished:   input_segments=<N> output_segments=<M> input_bytes=<X> output_bytes=<Y> elapsed_ms=<ms>
+[Compact] cancelled:  processed_segments=<P>/<N> elapsed_ms=<ms>
+[Compact] failed:     input_segments=<N> elapsed_ms=<ms> error=<description>
+```
+
+### Field semantics
+
+| Field | Value |
+|-------|-------|
+| `input_segments` | `mergedGens.count + 1` — stored generations at level ≤ targetLevel plus the pending L0 buffer |
+| `input_bytes` | `total × dims × 4` — cascade walk's total embedding count times Float32 byte size |
+| `trigger` | `cascade` when `targetLevel > 0` (embeddings promoted into higher levels); `forced` when `targetLevel == 0` (confined L0 write). `recovery` and `other` are forward-compatibility labels with no current call site. |
+| `output_segments` | Always `1` — the current implementation produces exactly one output generation per flush |
+| `output_bytes` | `m × dims × 4` — ledger row count (verified equal to `total`) times Float32 byte size |
+| `elapsed_ms` | Wall-clock milliseconds from `[Compact] started` to the terminal event, using `Date()` |
+| `processed_segments` | Segments written before cancellation; always `0/N` because the single cancellation checkpoint is at the pre-write boundary (step 9, before `storage.insertGeneration`) |
+| `error` | `error.localizedDescription` from the catch arm |
+
+### Privacy levels
+
+All numeric values and the `trigger` enum string use `privacy: .public`
+(safe to emit in production logs without redaction). The `error` field
+uses `privacy: .auto` (redacted in release builds by default, visible in
+debug and with explicit entitlement).
+
+### Cancellation checkpoint
+
+A single `Task.checkCancellation()` is inserted immediately before
+`storage.insertGeneration` (step 9). This is the last safe cancellation
+boundary: the cascade walk and k-means are pure computation, no storage
+state has been mutated, and cancellation here leaves the database
+consistent. No checkpoints are added inside the step-10 bucket-write
+loop to avoid partial-write/ledger-corruption risk.
+
+### `[Compact] progress` — omitted
+
+The optional progress line is not implemented. `performFlush()` completes
+in seconds on representative corpora; per-bucket progress tracking would
+require non-trivial loop instrumentation for marginal benefit. File a
+follow-up issue if long-running compactions become observable in
+production workloads.
+
+### Observer command
+
+```
+log show --info --debug --predicate 'eventMessage CONTAINS "[Compact]"'
+```
+
+This command shows all four event types. Combine with `--start` /
+`--end` to scope to a workload window.
