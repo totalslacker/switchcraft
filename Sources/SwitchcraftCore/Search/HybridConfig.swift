@@ -37,12 +37,23 @@ public struct HybridConfig: Sendable, Hashable {
     /// might be lifted by the other.
     public var perSourceBudget: Int
 
+    /// BM25 per-column weight applied to the FTS `title` column relative
+    /// to the `body` column (which always has weight 1.0). A value of 3.0
+    /// means a title match contributes 3× the BM25 signal of an equivalent
+    /// body match. Set to 1.0 to treat title and body equally; set to 0.0
+    /// to disable title boosting entirely.
+    ///
+    /// See ADR 026 for the FTS column ordering constraint.
+    public var ftsTitleWeight: Float
+
     /// Build a `HybridConfig`. Defaults match the canonical RRF
     /// constant (60) and a per-source budget large enough for `topK ≤ 10`.
-    public init(rrfK: Int = 60, perSourceBudget: Int = 50) {
+    public init(rrfK: Int = 60, perSourceBudget: Int = 50, ftsTitleWeight: Float = 3.0) {
         precondition(rrfK > 0, "rrfK must be positive")
         precondition(perSourceBudget > 0, "perSourceBudget must be positive")
+        precondition(ftsTitleWeight >= 0, "ftsTitleWeight must be non-negative")
         self.rrfK = rrfK
         self.perSourceBudget = perSourceBudget
+        self.ftsTitleWeight = ftsTitleWeight
     }
 }

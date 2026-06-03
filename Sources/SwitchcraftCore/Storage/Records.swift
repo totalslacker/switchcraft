@@ -3,16 +3,19 @@ import Foundation
 
 /// A document stored in the index.
 ///
-/// The `body` is the searchable text. `metadata` is opaque JSON-encoded data
-/// that callers can attach for filtering or display. `hash` is a content hash
-/// used for chunk deduplication. `lens` records the chunk lengths produced
-/// when the body was split for embedding.
+/// The `body` is the searchable text. `title` is the optional document title,
+/// stored separately and indexed for BM25 matching with configurable weight
+/// (see `HybridConfig.ftsTitleWeight` and ADR 026). `metadata` is opaque
+/// JSON-encoded data that callers can attach for filtering or display. `hash`
+/// is a content hash used for chunk deduplication. `lens` records the chunk
+/// lengths produced when the body was split for embedding.
 public struct DocumentRecord: Sendable, Hashable {
     public var uuid: String
     public var date: Date
     public var metadata: Data
     public var hash: String
     public var body: String
+    public var title: String?
     public var lens: [Int]
 
     public init(
@@ -21,6 +24,7 @@ public struct DocumentRecord: Sendable, Hashable {
         metadata: Data = Data(),
         hash: String,
         body: String,
+        title: String? = nil,
         lens: [Int] = []
     ) {
         self.uuid = uuid
@@ -28,6 +32,7 @@ public struct DocumentRecord: Sendable, Hashable {
         self.metadata = metadata
         self.hash = hash
         self.body = body
+        self.title = title
         self.lens = lens
     }
 }

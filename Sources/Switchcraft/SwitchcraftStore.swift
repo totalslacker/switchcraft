@@ -95,15 +95,18 @@ public actor SwitchcraftStore {
     /// are unaffected.
     ///
     /// `DocumentRecord.body` always stores the caller-supplied `body` (never
-    /// the title-prefixed embedding text). Callers who need the title indexed
-    /// for BM25 should include it in `body` or `metadata`.
+    /// the title-prefixed embedding text). The title is stored in
+    /// `DocumentRecord.title` and indexed in the FTS pipeline with a
+    /// configurable BM25 column weight (`HybridConfig.ftsTitleWeight`). See
+    /// ADR 026 for the schema and migration details.
     ///
     /// - Parameters:
     ///   - id: caller-supplied document identifier (UUID, slug, etc.).
     ///   - date: date associated with the document. Defaults to `now`.
     ///   - metadata: opaque key/value pairs filterable via `StorageFilter`.
     ///   - title: optional document title. Prepended to `body` at embedding
-    ///     time only; not stored in `DocumentRecord.body`.
+    ///     time and stored in `DocumentRecord.title` for FTS title-weight
+    ///     boosting. See ADR 025 and ADR 026.
     ///   - body: searchable text. Embedded by the configured `Embedder`.
     /// - Throws: `SwitchcraftStoreError.alreadyShutDown` if the store has
     ///   been shut down; `SwitchcraftStoreError.embeddingMismatch` if the
@@ -168,6 +171,7 @@ public actor SwitchcraftStore {
                 metadata: metadataData,
                 hash: hash,
                 body: body,
+                title: title,
                 lens: [tokenCount]
             )
         )
