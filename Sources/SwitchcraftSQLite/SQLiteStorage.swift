@@ -40,8 +40,11 @@ public actor SQLiteStorage: SwitchcraftStorage {
     /// computing total elapsed time when translating `SQLITE_INTERRUPT`.
     private var currentDeadlineContext: SearchDeadlineContext?
 
-    public init(path: String) {
+    private let ftsTitleWeight: Float
+
+    public init(path: String, ftsTitleWeight: Float = 3.0) {
         self.path = path
+        self.ftsTitleWeight = ftsTitleWeight
     }
 
     // MARK: - In-memory path detection
@@ -67,7 +70,7 @@ public actor SQLiteStorage: SwitchcraftStorage {
             mode = .inMemory(conn)
         } else {
             let writer = SQLiteWriterActor(path: path)
-            let reader = SQLiteReaderActor(path: path)
+            let reader = SQLiteReaderActor(path: path, ftsTitleWeight: ftsTitleWeight)
             // Writer opens first: sets WAL mode and runs schema DDL.
             do {
                 try await writer.open()
@@ -134,15 +137,17 @@ public actor SQLiteStorage: SwitchcraftStorage {
             throw SQLiteError(code: 1, message: "storage is not open")
         case .inMemory(let conn):
             let stmt = try conn.prepare("""
-                INSERT INTO document (uuid, date, metadata, hash, body, lens)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO document (uuid, date, metadata, hash, body, lens, title)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(uuid) DO UPDATE SET
                     date = excluded.date,
                     metadata = excluded.metadata,
                     hash = excluded.hash,
                     body = excluded.body,
-                    lens = excluded.lens
+                    lens = excluded.lens,
+                    title = excluded.title
                 """)
+            let titleBinding: SQLValue = document.title.map { .text($0) } ?? .null
             try stmt.bind([
                 .text(document.uuid),
                 .real(Codecs.encode(document.date)),
@@ -150,6 +155,7 @@ public actor SQLiteStorage: SwitchcraftStorage {
                 .text(document.hash),
                 .text(document.body),
                 .text(Codecs.encode(document.lens)),
+                titleBinding,
             ])
             try stmt.step()
         case .fileBacked(let writer, _):
@@ -176,7 +182,7 @@ public actor SQLiteStorage: SwitchcraftStorage {
             throw SQLiteError(code: 1, message: "storage is not open")
         case .inMemory(let conn):
             let stmt = try conn.prepare("""
-                SELECT uuid, date, metadata, hash, body, lens
+                SELECT uuid, date, metadata, hash, body, lens, title
                 FROM document
                 WHERE uuid = ?
                 """)
@@ -195,7 +201,7 @@ public actor SQLiteStorage: SwitchcraftStorage {
         case .inMemory(let conn):
             let clause = filter.lower()
             let stmt = try conn.prepare("""
-                SELECT uuid, date, metadata, hash, body, lens
+                SELECT uuid, date, metadata, hash, body, lens, title
                 FROM document
                 WHERE \(clause.sql)
                 """)
@@ -217,7 +223,7 @@ public actor SQLiteStorage: SwitchcraftStorage {
             throw SQLiteError(code: 1, message: "storage is not open")
         case .inMemory(let conn):
             let stmt = try conn.prepare("""
-                SELECT uuid, date, metadata, hash, body, lens
+                SELECT uuid, date, metadata, hash, body, lens, title
                 FROM document
                 WHERE hash = ?
                 """)
@@ -585,10 +591,12 @@ public actor SQLiteStorage: SwitchcraftStorage {
             guard !ftsTerms.isEmpty else { return [] }
             let ftsQuery = ftsTerms.joined(separator: " ")
             let clause = filter.lower(tableAlias: "d")
+            // bm25 column weights: title first (ADR 026 column-order constraint), body second.
             // bm25() returns lower = more relevant; negate so higher = better.
             // Tie-break on uuid ascending for deterministic ordering (see ADR 008).
+            let titleW = String(format: "%.6g", ftsTitleWeight)
             let sql = """
-                SELECT d.uuid, -bm25(document_fts) AS score
+                SELECT d.uuid, -bm25(document_fts, \(titleW), 1.0) AS score
                 FROM document_fts
                 JOIN document d ON d.rowid = document_fts.rowid
                 WHERE document_fts MATCH ? AND \(clause.sql)
@@ -689,6 +697,7 @@ public actor SQLiteStorage: SwitchcraftStorage {
             metadata: stmt.columnBlob(2),
             hash: stmt.columnText(3),
             body: stmt.columnText(4),
+            title: stmt.columnTextOptional(6),
             lens: Codecs.decodeInts(stmt.columnText(5))
         )
     }
