@@ -22,10 +22,84 @@ actor SQLiteWriterActor {
         let conn = try SQLiteConnection(path: path)
         try conn.execute("PRAGMA foreign_keys = ON")
         try conn.execute("PRAGMA journal_mode = WAL")
+
+        // Detect existing database before applying schema DDL.
+        let isExistingDB = try Self.tableExists(conn, name: "document")
+
         for ddl in Schema.statements {
             try conn.execute(ddl)
         }
+
+        // V0→V1 migration: add `title` column to `document` and rebuild FTS.
+        // This is the first schema migration; subsequent migrations should
+        // bump the version gate and add their own branch.
+        // FTS rebuild on large corpora may be slow (seconds); acceptable for v1.
+        if isExistingDB {
+            let hasTitleColumn = try Self.columnExists(conn, table: "document", column: "title")
+            if !hasTitleColumn {
+                try Self.migrateV0toV1(conn)
+            }
+        }
+        // Stamp version 1 on both new installs and migrated databases.
+        try conn.execute("PRAGMA user_version = 1")
+
         connection = conn
+    }
+
+    // MARK: - Schema migration helpers
+
+    private static func tableExists(_ conn: SQLiteConnection, name: String) throws -> Bool {
+        let stmt = try conn.prepare(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?"
+        )
+        try stmt.bind([.text(name)])
+        return try stmt.step()
+    }
+
+    private static func columnExists(_ conn: SQLiteConnection, table: String, column: String) throws -> Bool {
+        let stmt = try conn.prepare("PRAGMA table_info(\(table))")
+        while try stmt.step() {
+            if stmt.columnText(1) == column { return true }
+        }
+        return false
+    }
+
+    private static func migrateV0toV1(_ conn: SQLiteConnection) throws {
+        try conn.transaction {
+            // Add title column to base table.
+            try conn.execute("ALTER TABLE document ADD COLUMN title TEXT")
+
+            // Drop old triggers and FTS virtual table (FTS5 doesn't support ADD COLUMN).
+            try conn.execute("DROP TRIGGER IF EXISTS document_au")
+            try conn.execute("DROP TRIGGER IF EXISTS document_ad")
+            try conn.execute("DROP TRIGGER IF EXISTS document_ai")
+            try conn.execute("DROP TABLE IF EXISTS document_fts")
+
+            // Recreate FTS and triggers with V1 DDL (title first — ADR 026).
+            try conn.execute("""
+                CREATE VIRTUAL TABLE document_fts
+                    USING fts5(title, body, content='document', content_rowid='rowid')
+                """)
+            try conn.execute("""
+                CREATE TRIGGER document_ai AFTER INSERT ON document BEGIN
+                    INSERT INTO document_fts(rowid, title, body) VALUES (new.rowid, new.title, new.body);
+                END
+                """)
+            try conn.execute("""
+                CREATE TRIGGER document_ad AFTER DELETE ON document BEGIN
+                    INSERT INTO document_fts(document_fts, rowid, title, body) VALUES ('delete', old.rowid, old.title, old.body);
+                END
+                """)
+            try conn.execute("""
+                CREATE TRIGGER document_au AFTER UPDATE ON document BEGIN
+                    INSERT INTO document_fts(document_fts, rowid, title, body) VALUES ('delete', old.rowid, old.title, old.body);
+                    INSERT INTO document_fts(rowid, title, body) VALUES (new.rowid, new.title, new.body);
+                END
+                """)
+
+            // Rebuild FTS content from the base table.
+            try conn.execute("INSERT INTO document_fts(rowid, title, body) SELECT rowid, title, body FROM document")
+        }
     }
 
     func close() {
@@ -45,15 +119,17 @@ actor SQLiteWriterActor {
     func upsertDocument(_ document: DocumentRecord) throws {
         let conn = try requireConnection()
         let stmt = try conn.prepare("""
-            INSERT INTO document (uuid, date, metadata, hash, body, lens)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO document (uuid, date, metadata, hash, body, lens, title)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(uuid) DO UPDATE SET
                 date = excluded.date,
                 metadata = excluded.metadata,
                 hash = excluded.hash,
                 body = excluded.body,
-                lens = excluded.lens
+                lens = excluded.lens,
+                title = excluded.title
             """)
+        let titleBinding: SQLValue = document.title.map { .text($0) } ?? .null
         try stmt.bind([
             .text(document.uuid),
             .real(Codecs.encode(document.date)),
@@ -61,6 +137,7 @@ actor SQLiteWriterActor {
             .text(document.hash),
             .text(document.body),
             .text(Codecs.encode(document.lens)),
+            titleBinding,
         ])
         try stmt.step()
     }
@@ -249,6 +326,7 @@ actor SQLiteWriterActor {
             metadata: stmt.columnBlob(2),
             hash: stmt.columnText(3),
             body: stmt.columnText(4),
+            title: stmt.columnTextOptional(6),
             lens: Codecs.decodeInts(stmt.columnText(5))
         )
     }
