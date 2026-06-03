@@ -16,7 +16,7 @@ extension SwitchcraftStore {
         embedder: any Embedder,
         config: StoreConfig = .default
     ) async throws -> SwitchcraftStore {
-        let storage = SQLiteStorage(path: databasePath)
+        let storage = SQLiteStorage(path: databasePath, ftsTitleWeight: config.hybrid.ftsTitleWeight)
         return try await SwitchcraftStore(
             storage: storage,
             embedder: embedder,

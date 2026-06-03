@@ -13,10 +13,12 @@ import SwitchcraftCore
 /// the reader opens).
 actor SQLiteReaderActor {
     private let path: String
+    private let ftsTitleWeight: Float
     private var connection: SQLiteConnection?
 
-    init(path: String) {
+    init(path: String, ftsTitleWeight: Float = 3.0) {
         self.path = path
+        self.ftsTitleWeight = ftsTitleWeight
     }
 
     // MARK: - Lifecycle
@@ -40,7 +42,7 @@ actor SQLiteReaderActor {
     func document(uuid: String) throws -> DocumentRecord? {
         let conn = try requireConnection()
         let stmt = try conn.prepare("""
-            SELECT uuid, date, metadata, hash, body, lens
+            SELECT uuid, date, metadata, hash, body, lens, title
             FROM document
             WHERE uuid = ?
             """)
@@ -53,7 +55,7 @@ actor SQLiteReaderActor {
         let conn = try requireConnection()
         let clause = filter.lower()
         let stmt = try conn.prepare("""
-            SELECT uuid, date, metadata, hash, body, lens
+            SELECT uuid, date, metadata, hash, body, lens, title
             FROM document
             WHERE \(clause.sql)
             """)
@@ -68,7 +70,7 @@ actor SQLiteReaderActor {
     func documents(forChunkHash hash: String) throws -> [DocumentRecord] {
         let conn = try requireConnection()
         let stmt = try conn.prepare("""
-            SELECT uuid, date, metadata, hash, body, lens
+            SELECT uuid, date, metadata, hash, body, lens, title
             FROM document
             WHERE hash = ?
             """)
@@ -190,8 +192,13 @@ actor SQLiteReaderActor {
         let conn = try requireConnection()
         let clause = filter.lower(tableAlias: "d")
 
+        // bm25 column weights: first arg = title weight, second = body weight (1.0).
+        // Column order in document_fts is (title, body) — see Schema.swift and ADR 026.
+        // ftsTitleWeight is a trusted Float from config, formatted with %.6g to avoid
+        // NaN/Inf stringification; using a bound parameter is not supported by FTS5 bm25().
+        let titleW = String(format: "%.6g", ftsTitleWeight)
         let sql = """
-            SELECT d.uuid, -bm25(document_fts) AS score
+            SELECT d.uuid, -bm25(document_fts, \(titleW), 1.0) AS score
             FROM document_fts
             JOIN document d ON d.rowid = document_fts.rowid
             WHERE document_fts MATCH ? AND \(clause.sql)
@@ -252,6 +259,7 @@ actor SQLiteReaderActor {
             metadata: stmt.columnBlob(2),
             hash: stmt.columnText(3),
             body: stmt.columnText(4),
+            title: stmt.columnTextOptional(6),
             lens: Codecs.decodeInts(stmt.columnText(5))
         )
     }
