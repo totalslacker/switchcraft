@@ -23,7 +23,7 @@ public actor SwitchcraftStore {
     public init(storage: any SwitchcraftStorage,
                 embedder: any Embedder,
                 config: StoreConfig = .default) async throws
-    public func add(id:date:metadata:title:body:) async throws  // title defaults to nil; see ADR 025
+    public func add(id:date:metadata:title:body:) async throws  // title defaults to nil; see ADR 025, ADR 026
     public func remove(id:) async throws
     public func index() async throws
     public func clear() async throws
@@ -109,6 +109,11 @@ with identical bodies but different titles produce distinct chunks with
 their own correctly-keyed embeddings. When `title == nil`, the hash is
 byte-identical to the pre-ADR-025 formula. See ADR 025 for the full
 policy, store-version compatibility notes, and re-indexing guidance.
+
+**Title storage (amended by ADR 026)**: `title` is now stored in
+`DocumentRecord.title` and indexed in `document_fts` with a configurable
+BM25 per-column weight, in addition to being prepended at embedding time.
+See ADR 026 for the schema, V0→V1 migration, and `HybridConfig.ftsTitleWeight`.
 
 ## (f) Auto-flush on `search` and `score`; no count threshold for v1
 

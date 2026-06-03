@@ -104,15 +104,13 @@ re-add without clear leaves stale orphan chunks.
 `DocumentRecord.body` continues to store the caller-supplied `body` (not the
 title-prefixed embedding text). This preserves round-trip semantics: a caller
 that fetches a document back via `storage.document(uuid:)` receives the
-original `body`, not a prefixed variant. The FTS/BM25 pipeline continues to
-see the original body.
+original `body`, not a prefixed variant.
 
-Callers who want the title indexed for BM25 matching should include it in
-`body` or `metadata`. This is documented on `SwitchcraftStore.add`.
-
-Option C (adding a `title` field to `DocumentRecord` and the SQLite schema)
-is cleaner long-term but requires a schema migration and multi-chunk work. It
-is deferred to a future cycle.
+`DocumentRecord.title` (added in ADR 026) stores the caller-supplied `title`
+and is indexed in `document_fts` with a configurable BM25 per-column weight
+(`HybridConfig.ftsTitleWeight`, default 3.0). Callers who supply a `title` now
+benefit from title-boosted FTS matching in addition to the embedding-time
+prepend. See ADR 026 for the schema, migration approach, and config placement.
 
 ### (e) Relationship to ADR 006 — H2 constants unchanged
 
