@@ -50,6 +50,7 @@ public enum StorageConformance {
         try await runFullTextRespectsFilter(storage)
         try await runFullTextDeterministicTieBreak(storage)
         try await runFullTextHandlesPunctuation(storage)
+        try await runFullTextTitleWeighting(storage)
 
         try await storage.close()
     }
@@ -457,13 +458,40 @@ public enum StorageConformance {
         #expect(onlyA.map(\.uuid) == ["a"])
     }
 
+    // MARK: - Full-text title weighting
+
+    static func runFullTextTitleWeighting(_ storage: any SwitchcraftStorage) async throws {
+        try await storage.clear()
+
+        // Document with title "Bartleby" but generic body (mirrors the production failure case).
+        let titled = makeDocument(uuid: "bartleby-com", body: "homework help literature", title: "Bartleby")
+        // Document without a title whose body mentions "bartleby".
+        let bodyMatch = makeDocument(uuid: "bartleby-body", body: "bartleby the scrivener melville")
+
+        try await storage.upsertDocument(titled)
+        try await storage.upsertDocument(bodyMatch)
+
+        // Round-trip: title must be stored and returned.
+        let fetched = try await storage.document(uuid: "bartleby-com")
+        #expect(fetched?.title == "Bartleby")
+
+        // FTS for "bartleby" must surface the titled document (rank ≤ 2).
+        let hits = try await storage.searchFullText(query: "bartleby", limit: 10, filter: .all)
+        let uuids = hits.map(\.uuid)
+        #expect(uuids.contains("bartleby-com"), "titled document must appear in FTS results")
+        if let idx = uuids.firstIndex(of: "bartleby-com") {
+            #expect(idx < 2, "titled document must rank in top 2")
+        }
+    }
+
     // MARK: - Helpers
 
     static func makeDocument(
         uuid: String,
         body: String,
         date: Date = Date(timeIntervalSince1970: 0),
-        metadata: [String: String] = [:]
+        metadata: [String: String] = [:],
+        title: String? = nil
     ) -> DocumentRecord {
         let metadataData: Data
         if metadata.isEmpty {
@@ -477,6 +505,7 @@ public enum StorageConformance {
             metadata: metadataData,
             hash: "hash-\(uuid)",
             body: body,
+            title: title,
             lens: []
         )
     }
