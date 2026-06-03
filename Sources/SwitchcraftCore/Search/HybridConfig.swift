@@ -51,7 +51,7 @@ public struct HybridConfig: Sendable, Hashable {
     public init(rrfK: Int = 60, perSourceBudget: Int = 50, ftsTitleWeight: Float = 3.0) {
         precondition(rrfK > 0, "rrfK must be positive")
         precondition(perSourceBudget > 0, "perSourceBudget must be positive")
-        precondition(ftsTitleWeight >= 0, "ftsTitleWeight must be non-negative")
+        precondition(ftsTitleWeight >= 0 && ftsTitleWeight.isFinite, "ftsTitleWeight must be non-negative and finite")
         self.rrfK = rrfK
         self.perSourceBudget = perSourceBudget
         self.ftsTitleWeight = ftsTitleWeight
