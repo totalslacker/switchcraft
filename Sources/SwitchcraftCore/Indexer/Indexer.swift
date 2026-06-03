@@ -584,6 +584,13 @@ public actor Indexer {
             maxChunkID = max(maxChunkID, g.maxChunkID)
         }
 
+        let inputSegments = mergedGens.count + 1
+        let inputBytes = total * dims * 4
+        let trigger = targetLevel > 0 ? "cascade" : "forced"
+        let compactStart = Date()
+        indexerLogger.info("[Compact] started: input_segments=\(inputSegments, privacy: .public) input_bytes=\(inputBytes, privacy: .public) trigger=\(trigger, privacy: .public)")
+        do {
+
         // 3. Collect every embedding in [minChunkID, maxChunkID] from
         // the in-memory ledger, in (chunkID ascending, tokenOffset
         // ascending) order.
@@ -667,6 +674,7 @@ public actor Indexer {
             maxChunkID: maxChunkID,
             created: Date()
         )
+        try Task.checkCancellation()
         let insertedGen = try await storage.insertGeneration(genRecord)
 
         // 10. Write one bucket per centroid (k buckets total, including
@@ -719,6 +727,17 @@ public actor Indexer {
         pendingMinChunkID = nil
         pendingMaxChunkID = nil
         pendingCount = 0
+        let outputBytes = m * dims * 4
+        indexerLogger.info("[Compact] finished: input_segments=\(inputSegments, privacy: .public) output_segments=\(1, privacy: .public) input_bytes=\(inputBytes, privacy: .public) output_bytes=\(outputBytes, privacy: .public) elapsed_ms=\(Int(Date().timeIntervalSince(compactStart) * 1000), privacy: .public)")
+        } catch is CancellationError {
+            let elapsedMs = Int(Date().timeIntervalSince(compactStart) * 1000)
+            indexerLogger.info("[Compact] cancelled: processed_segments=\(0, privacy: .public)/\(inputSegments, privacy: .public) elapsed_ms=\(elapsedMs, privacy: .public)")
+            throw CancellationError()
+        } catch {
+            let elapsedMs = Int(Date().timeIntervalSince(compactStart) * 1000)
+            indexerLogger.info("[Compact] failed: input_segments=\(inputSegments, privacy: .public) elapsed_ms=\(elapsedMs, privacy: .public) error=\(error.localizedDescription, privacy: .auto)")
+            throw error
+        }
     }
 
     /// Wipe every persisted generation (and its buckets, via FK
