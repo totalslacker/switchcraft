@@ -196,6 +196,12 @@ final class SQLiteStatement {
         return String(cString: p)
     }
 
+    func columnTextOptional(_ index: Int32) -> String? {
+        guard sqlite3_column_type(handle, index) != SQLITE_NULL,
+              let p = sqlite3_column_text(handle, index) else { return nil }
+        return String(cString: p)
+    }
+
     func columnBlob(_ index: Int32) -> Data {
         let len = Int(sqlite3_column_bytes(handle, index))
         guard len > 0, let bytes = sqlite3_column_blob(handle, index) else { return Data() }
