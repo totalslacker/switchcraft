@@ -188,6 +188,123 @@ struct KMeansTests {
         #expect(assignments == [0], "tie should resolve to the first maximum (index 0), got \(assignments)")
     }
 
+    // MARK: - Tiling regression (ADR 027 / issue #112)
+
+    /// Reference argmax: naive per-row dot-product loop, no BLAS. Used to
+    /// cross-check the tiled SGEMM path for correctness.
+    static func naiveAssign(data: [Float], dims: Int, centroids: [Float]) -> [Int] {
+        let m = data.count / dims
+        let k = centroids.count / dims
+        return (0..<m).map { row in
+            var bestIdx = 0
+            var bestDot = Float.leastNormalMagnitude
+            for c in 0..<k {
+                var dot: Float = 0
+                for d in 0..<dims {
+                    dot += data[row * dims + d] * centroids[c * dims + d]
+                }
+                if dot > bestDot { bestDot = dot; bestIdx = c }
+            }
+            return bestIdx
+        }
+    }
+
+    /// Tiling parity for m = assignBatchSize + 1 (4 097): forces two SGEMM
+    /// calls (one full tile + one row). Verifies per-row argmax is identical
+    /// to the naive reference on orthogonal-centroid data.
+    @Test("assign() tiling: m = B+1 matches naive argmax (issue #112)")
+    func tiledAssignOnePlusOneBatch() {
+        let dims = 8
+        // k orthogonal unit basis vectors (first k standard-basis directions).
+        let k = dims
+        var centroids = [Float](repeating: 0, count: k * dims)
+        for c in 0..<k { centroids[c * dims + c] = 1.0 }
+
+        // 4 097 rows: each row's strongest component is at index i % k.
+        let m = 4_097
+        var rng = SplitMix64(seed: 0xAB_CD_EF)
+        var data = [Float]()
+        data.reserveCapacity(m * dims)
+        for i in 0..<m {
+            let dominant = i % k
+            var v = [Float](repeating: 0, count: dims)
+            v[dominant] = 0.95
+            for j in 0..<dims where j != dominant {
+                v[j] = Float(rng.next() & 0xFFFF) / Float(1 << 16) * 0.05
+            }
+            let norm = sqrt(v.reduce(0) { $0 + $1 * $1 })
+            for j in 0..<dims { v[j] /= norm }
+            data.append(contentsOf: v)
+        }
+
+        let got = KMeans.assign(data: data, dims: dims, centroids: centroids)
+        let ref = Self.naiveAssign(data: data, dims: dims, centroids: centroids)
+        #expect(got == ref, "tiled assign() diverged from naive reference at m=\(m)")
+    }
+
+    /// Tiling parity for m = 2 × assignBatchSize + 100 (8 292): forces three
+    /// SGEMM calls. Same correctness check as above.
+    @Test("assign() tiling: m = 2B+100 matches naive argmax (issue #112)")
+    func tiledAssignThreeBatches() {
+        let dims = 4
+        let k = 4
+        var centroids = [Float](repeating: 0, count: k * dims)
+        for c in 0..<k { centroids[c * dims + c] = 1.0 }
+
+        let m = 4_096 * 2 + 100
+        var rng = SplitMix64(seed: 0xDEAD_BEEF)
+        var data = [Float]()
+        data.reserveCapacity(m * dims)
+        for i in 0..<m {
+            let dominant = i % k
+            var v = [Float](repeating: 0, count: dims)
+            v[dominant] = 0.9
+            for j in 0..<dims where j != dominant {
+                v[j] = Float(rng.next() & 0xFF) / Float(1 << 8) * 0.1
+            }
+            let norm = sqrt(v.reduce(0) { $0 + $1 * $1 })
+            for j in 0..<dims { v[j] /= norm }
+            data.append(contentsOf: v)
+        }
+
+        let got = KMeans.assign(data: data, dims: dims, centroids: centroids)
+        let ref = Self.naiveAssign(data: data, dims: dims, centroids: centroids)
+        #expect(got == ref, "tiled assign() diverged from naive reference at m=\(m)")
+    }
+
+    /// Edge case: m = 1 (single row — always one tile, trivially correct).
+    @Test("assign() tiling: m=1 edge case (issue #112)")
+    func tiledAssignSingleRow() {
+        let dims = 3
+        let data: [Float] = [0, 0, 1]
+        let centroids: [Float] = [1, 0, 0,   0, 1, 0,   0, 0, 1]
+        let got = KMeans.assign(data: data, dims: dims, centroids: centroids)
+        #expect(got == [2])
+    }
+
+    /// Edge case: m = assignBatchSize exactly (exactly one full tile).
+    @Test("assign() tiling: m = B exactly (issue #112)")
+    func tiledAssignExactlyOneBatch() {
+        let dims = 2
+        let centroids: [Float] = [1, 0,   0, 1]
+        let m = 4_096
+        var data = [Float]()
+        data.reserveCapacity(m * dims)
+        // Odd rows → centroid 0, even rows → centroid 1.
+        for i in 0..<m {
+            if i % 2 == 0 { data.append(contentsOf: [0.99, 0.14]) }
+            else          { data.append(contentsOf: [0.14, 0.99]) }
+        }
+        // Normalise.
+        for i in 0..<m {
+            let norm = sqrt(data[i*2]*data[i*2] + data[i*2+1]*data[i*2+1])
+            data[i*2] /= norm; data[i*2+1] /= norm
+        }
+        let got = KMeans.assign(data: data, dims: dims, centroids: centroids)
+        let expected = (0..<m).map { $0 % 2 == 0 ? 0 : 1 }
+        #expect(got == expected)
+    }
+
     @Test("respects maxIterations = 1")
     func minimalIterations() {
         var rng = SplitMix64(seed: 17)
