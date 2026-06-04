@@ -145,11 +145,18 @@ public enum KMeans {
 
     // MARK: - Helpers
 
+    /// Maximum rows processed per SGEMM call in `assignAll`. Caps the
+    /// transient scores buffer at `assignBatchSize × k × 4` bytes
+    /// (~330 MB at k=20 142) rather than the full `m × k × 4` bytes
+    /// (~128 GB at reproducer scale). See ADR 027.
+    private static let assignBatchSize = 4_096
+
     /// Compute `scores = data × centroidsᵀ` (m × k, row-major) via
     /// Accelerate's sgemm, then write the per-row argmax into
-    /// `assignments`. Same algorithm as the naive nested loop, but
-    /// vectorised — necessary for the indexer's 5,000-embedding perf
-    /// gate (acceptance criteria require <5s).
+    /// `assignments`. Processed in tiles of `assignBatchSize` rows so
+    /// peak memory is O(B × k) rather than O(m × k). Per-row argmax is
+    /// independent across rows, so tiling produces bit-identical results
+    /// to the single-call version. See ADR 027.
     private static func assignAll(
         data: [Float],
         dims: Int,
@@ -161,37 +168,45 @@ public enum KMeans {
         guard m > 0 else { return }
         guard k > 0 else { return }
         precondition(
-            m <= Int(Int32.max) && k <= Int(Int32.max) && dims <= Int(Int32.max),
-            "k-means dimensions (m=\(m), k=\(k), dims=\(dims)) must fit in Int32 for cblas_sgemm"
+            k <= Int(Int32.max) && dims <= Int(Int32.max),
+            "k-means dimensions (k=\(k), dims=\(dims)) must fit in Int32 for cblas_sgemm"
         )
-        var scores = [Float](repeating: 0, count: m * k)
+
         data.withUnsafeBufferPointer { dataPtr in
             centroids.withUnsafeBufferPointer { centroidsPtr in
-                scores.withUnsafeMutableBufferPointer { scoresPtr in
-                    cblas_sgemm(
-                        CblasRowMajor, CblasNoTrans, CblasTrans,
-                        Int32(m), Int32(k), Int32(dims),
-                        1.0,
-                        dataPtr.baseAddress, Int32(dims),
-                        centroidsPtr.baseAddress, Int32(dims),
-                        0.0,
-                        scoresPtr.baseAddress, Int32(k)
+                var rowOffset = 0
+                while rowOffset < m {
+                    let batchRows = min(assignBatchSize, m - rowOffset)
+                    precondition(
+                        batchRows <= Int(Int32.max),
+                        "batch size \(batchRows) exceeds Int32.max"
                     )
+                    // Scores buffer is reused (re-allocated) each batch so
+                    // peak resident memory is bounded by one tile, not all m rows.
+                    var scores = [Float](repeating: 0, count: batchRows * k)
+                    scores.withUnsafeMutableBufferPointer { scoresPtr in
+                        cblas_sgemm(
+                            CblasRowMajor, CblasNoTrans, CblasTrans,
+                            Int32(batchRows), Int32(k), Int32(dims),
+                            1.0,
+                            dataPtr.baseAddress! + rowOffset * dims, Int32(dims),
+                            centroidsPtr.baseAddress!, Int32(dims),
+                            0.0,
+                            scoresPtr.baseAddress!, Int32(k)
+                        )
+                        // Use vDSP_maxvi for per-row argmax: Accelerate's
+                        // implementation is always SIMD-compiled (pre-built dylib),
+                        // so debug mode pays the same cost as release.
+                        let base = scoresPtr.baseAddress!
+                        for row in 0..<batchRows {
+                            var maxVal: Float = 0
+                            var maxIdx: vDSP_Length = 0
+                            vDSP_maxvi(base + row * k, 1, &maxVal, &maxIdx, vDSP_Length(k))
+                            assignments[rowOffset + row] = Int(maxIdx)
+                        }
+                    }
+                    rowOffset += batchRows
                 }
-            }
-        }
-        // Use vDSP_maxvi for per-row argmax: Accelerate's implementation is
-        // always SIMD-compiled (pre-built dylib), so debug mode pays the same
-        // cost as release. The naive Swift loop above was ~5s in debug mode
-        // for m=5000, k=1131 — leaving essentially no headroom against the
-        // 10s budget. vDSP_maxvi reduces this to ~15ms in debug mode.
-        scores.withUnsafeBufferPointer { scoresPtr in
-            let base = scoresPtr.baseAddress!
-            for row in 0..<m {
-                var maxVal: Float = 0
-                var maxIdx: vDSP_Length = 0
-                vDSP_maxvi(base + row * k, 1, &maxVal, &maxIdx, vDSP_Length(k))
-                assignments[row] = Int(maxIdx)
             }
         }
     }

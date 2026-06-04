@@ -593,22 +593,28 @@ public actor Indexer {
 
         // 3. Collect every embedding in [minChunkID, maxChunkID] from
         // the in-memory ledger, in (chunkID ascending, tokenOffset
-        // ascending) order.
-        var allRows: [[Float]] = []
+        // ascending) order. Building allFlat directly (rather than an
+        // intermediate [[Float]]) avoids ~1 heap allocation per token
+        // and saves ~876 MB of per-element Swift Array overhead at
+        // reproducer scale. allFlat is reused in step 7 (no second copy).
+        var allFlat: [Float] = []
+        allFlat.reserveCapacity(total * dims)
         var rowChunkIDs: [Int64] = []
+        rowChunkIDs.reserveCapacity(total)
         var rowTokenOffsets: [UInt32] = []
+        rowTokenOffsets.reserveCapacity(total)
         let sortedChunkIDs = ledger.keys
             .filter { $0 >= minChunkID && $0 <= maxChunkID }
             .sorted()
         for chunkID in sortedChunkIDs {
             let tokens = ledger[chunkID]!
             for (idx, row) in tokens.enumerated() {
-                allRows.append(row)
+                allFlat.append(contentsOf: row)
                 rowChunkIDs.append(chunkID)
                 rowTokenOffsets.append(UInt32(idx))
             }
         }
-        let m = allRows.count
+        let m = rowChunkIDs.count
         if m != total {
             throw Error.ledgerOutOfSync(ledgerRows: m, expected: total)
         }
@@ -651,10 +657,8 @@ public actor Indexer {
         let centroids = kmeansResult.centroids
 
         // 7. Assign every row in [minChunkID, maxChunkID] to its nearest
-        // centroid using the trained centers.
-        var allFlat = [Float]()
-        allFlat.reserveCapacity(m * dims)
-        for row in allRows { allFlat.append(contentsOf: row) }
+        // centroid using the trained centers. allFlat was built in step 3
+        // — no second copy is needed.
         let assignments = KMeans.assign(
             data: allFlat, dims: dims, centroids: centroids
         )
@@ -701,18 +705,24 @@ public actor Indexer {
                     chunkID: UInt32(rowChunkIDs[rowIdx]),
                     tokenOffset: rowTokenOffsets[rowIdx]
                 ))
-                let row = allRows[rowIdx]
+                let rowStart = rowIdx * dims
                 for j in 0..<dims {
-                    residualValues.append(row[j] - centerSlice[j])
+                    residualValues.append(allFlat[rowStart + j] - centerSlice[j])
                 }
             }
 
-            let bucket = BucketRecord(
-                generationID: insertedGen.id,
-                center: Self.encodeFloat32LE(centerSlice),
-                indices: IndicesCodec.encode(pairs),
-                residuals: Q4Codec.encodeResiduals(residualValues)
-            )
+            // autoreleasepool drains transient Foundation Data objects produced
+            // by encodeFloat32LE, IndicesCodec.encode, and Q4Codec.encodeResiduals
+            // after each bucket iteration. The await is outside the pool so the
+            // pool closure remains synchronous (no await inside autoreleasepool).
+            let bucket = autoreleasepool {
+                BucketRecord(
+                    generationID: insertedGen.id,
+                    center: Self.encodeFloat32LE(centerSlice),
+                    indices: IndicesCodec.encode(pairs),
+                    residuals: Q4Codec.encodeResiduals(residualValues)
+                )
+            }
             _ = try await storage.insertBucket(bucket)
         }
 
