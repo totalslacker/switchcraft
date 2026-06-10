@@ -85,14 +85,14 @@ enum CoreMLModelIO {
 
         switch array.dataType {
         case .float16:
-            // Float16 is bit-identical to Swift's Float16 (since macOS 11).
+            // Float16 is unavailable on x86_64; use the pure-Swift decoder on all architectures.
             let base = array.dataPointer.bindMemory(
-                to: Float16.self, capacity: array.count
+                to: UInt16.self, capacity: array.count
             )
             for s in 0..<windowSize {
                 for d in 0..<dims {
                     let idx = s * strideSeq + d * strideDim
-                    out[s * dims + d] = Float(base[idx])
+                    out[s * dims + d] = float32FromFloat16Bits(base[idx])
                 }
             }
         case .float32:
