@@ -281,7 +281,10 @@ public actor SwitchcraftStore {
             throw SwitchcraftStoreError.searchTimedOut(elapsed: deadlineCtx.elapsed)
         }
 
-        let queryEmbeddings = try await embedder.encode(query)
+        let queryEmbeddings = try await embedder.encodeQuery(
+            query,
+            minSurfaceFormLength: config.search.queryMinSurfaceFormLength
+        )
         let dims = embedder.dims
         guard queryEmbeddings.count % dims == 0 else {
             throw SwitchcraftStoreError.embeddingMismatch(

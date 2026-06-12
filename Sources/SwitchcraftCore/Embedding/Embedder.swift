@@ -41,4 +41,31 @@ public protocol Embedder: Sendable {
     /// - Throws: `EmbedderError.inputTooLarge(actual:max:)` when the token
     ///   count exceeds `maxInputTokens` and the overflow policy is `.reject`.
     func encode(_ text: String) async throws -> [Float]
+
+    /// Encode a *query* string, optionally filtering out token embeddings whose
+    /// decoded surface form is too short to be discriminative.
+    ///
+    /// The default implementation ignores `minSurfaceFormLength` and forwards
+    /// to `encode(_:)`, providing Witchcraft-compatible behaviour for embedders
+    /// that do not have access to token surface forms.
+    ///
+    /// Token-aware embedders (e.g. `T5CoreMLEmbedder`) override this method to
+    /// suppress common short subword fragments (e.g. `"t"`, `"le"`, `"by"`)
+    /// that inflate noise scores at corpus scale. See ADR 028.
+    ///
+    /// - Parameters:
+    ///   - text: The query string to encode.
+    ///   - minSurfaceFormLength: Keep only token positions whose decoded
+    ///     surface form has `count > minSurfaceFormLength`. Pass `0` (default)
+    ///     to disable filtering and preserve Witchcraft parity.
+    /// - Throws: Same conditions as `encode(_:)`.
+    func encodeQuery(_ text: String, minSurfaceFormLength: Int) async throws -> [Float]
+}
+
+// MARK: - Default implementations
+
+public extension Embedder {
+    func encodeQuery(_ text: String, minSurfaceFormLength: Int) async throws -> [Float] {
+        try await encode(text)
+    }
 }
