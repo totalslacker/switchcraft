@@ -355,6 +355,24 @@ public actor T5CoreMLEmbedder: Embedder {
     ///   ObjC exception that the embedder cannot recover from; any
     ///   tokenizer-originated error.
     public func encode(_ text: String) async throws -> [Float] {
+        try await _encodeImpl(text, minSurfaceFormLength: 0)
+    }
+
+    /// Encode a query string with optional short-token filtering. See ADR 028.
+    public func encodeQuery(_ text: String, minSurfaceFormLength: Int) async throws -> [Float] {
+        try await _encodeImpl(text, minSurfaceFormLength: minSurfaceFormLength)
+    }
+
+    // MARK: - Private helpers
+
+    /// Shared implementation for `encode` and `encodeQuery`. Contains the
+    /// re-entrancy guard, proactive reload, sliding-window inference, and
+    /// optional surface-form length filter.
+    ///
+    /// Both `encode()` and `encodeQuery()` are thin wrappers here to avoid
+    /// re-entrancy deadlock: calling `self.encode()` from `encodeQuery()` while
+    /// `inFlight == true` would queue on the waiters list and deadlock.
+    private func _encodeImpl(_ text: String, minSurfaceFormLength: Int) async throws -> [Float] {
         // Re-entrancy guard: if another encode is in progress, queue and wait.
         if inFlight {
             await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
@@ -473,10 +491,27 @@ public actor T5CoreMLEmbedder: Embedder {
             windowRawNorms: perWindowRawNorms,
             minNorm: minNorm
         )
-        return merged.embeddings
+
+        // Surface-form length filter (ADR 028): drop query token positions whose
+        // decoded surface form is too short to be discriminative. At default
+        // minSurfaceFormLength=0 the fast path returns all embeddings unchanged.
+        guard minSurfaceFormLength > 0 else {
+            return merged.embeddings
+        }
+
+        var filtered: [Float] = []
+        filtered.reserveCapacity(merged.keptPositions.count * dims)
+        for (i, pos) in merged.keptPositions.enumerated() {
+            let tokenID = tokens[pos]
+            let surfaceForm = (try? tokenizer.decode([tokenID])) ?? ""
+            if surfaceForm.count > minSurfaceFormLength {
+                let offset = i * dims
+                filtered.append(contentsOf: merged.embeddings[offset..<(offset + dims)])
+            }
+        }
+        return filtered
     }
 
-    // MARK: - Private helpers
 
     /// Run one window prediction with autoreleasepool drainage and reactive reload + ANE retry.
     private func predictWindow(
