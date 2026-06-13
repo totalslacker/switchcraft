@@ -18,6 +18,9 @@ public actor InMemoryStorage: SwitchcraftStorage {
     private var chunksByID: [Int64: ChunkRecord] = [:]
     private var generations: [Int64: GenerationRecord] = [:]
     private var bucketsByGeneration: [Int64: [BucketRecord]] = [:]
+    // Cache of chunk IDs that appear in at least one bucket blob.
+    // nil = invalid (needs rebuild on next chunkHasBucketAssignments call).
+    private var indexedChunkIDsCache: Set<Int64>? = []
 
     private var nextChunkID: Int64 = 1
     private var nextGenerationID: Int64 = 1
@@ -45,6 +48,7 @@ public actor InMemoryStorage: SwitchcraftStorage {
         chunksByID.removeAll()
         generations.removeAll()
         bucketsByGeneration.removeAll()
+        indexedChunkIDsCache = []
         nextChunkID = 1
         nextGenerationID = 1
         nextBucketID = 1
@@ -111,14 +115,18 @@ public actor InMemoryStorage: SwitchcraftStorage {
     }
 
     public func chunkHasBucketAssignments(_ chunkID: Int64) async throws -> Bool {
-        guard let u32 = UInt32(exactly: chunkID) else { return false }
-        for buckets in bucketsByGeneration.values {
-            for bucket in buckets {
-                let pairs = try IndicesCodec.decode(bucket.indices)
-                if pairs.contains(where: { $0.chunkID == u32 }) { return true }
+        if indexedChunkIDsCache == nil {
+            // Cache is invalid; rebuild from all stored bucket blobs.
+            var ids = Set<Int64>()
+            for buckets in bucketsByGeneration.values {
+                for bucket in buckets {
+                    let pairs = try IndicesCodec.decode(bucket.indices)
+                    for pair in pairs { ids.insert(Int64(pair.chunkID)) }
+                }
             }
+            indexedChunkIDsCache = ids
         }
-        return false
+        return indexedChunkIDsCache!.contains(chunkID)
     }
 
     // MARK: - Generations
@@ -138,6 +146,7 @@ public actor InMemoryStorage: SwitchcraftStorage {
     public func deleteGeneration(id: Int64) async throws {
         generations.removeValue(forKey: id)
         bucketsByGeneration.removeValue(forKey: id)
+        indexedChunkIDsCache = nil
     }
 
     public func updateGenerationEmbeddingCount(id: Int64, count: Int) async throws {
@@ -152,6 +161,7 @@ public actor InMemoryStorage: SwitchcraftStorage {
         // Delete the losing generation and all its buckets first.
         generations.removeValue(forKey: losingGenerationID)
         bucketsByGeneration.removeValue(forKey: losingGenerationID)
+        indexedChunkIDsCache = nil
 
         // If no survivors, fully pruned — nothing to insert.
         guard !survivingBuckets.isEmpty else { return nil }
@@ -179,6 +189,7 @@ public actor InMemoryStorage: SwitchcraftStorage {
         inserted.id = nextBucketID
         nextBucketID += 1
         bucketsByGeneration[inserted.generationID, default: []].append(inserted)
+        indexedChunkIDsCache = nil
         return inserted
     }
 
