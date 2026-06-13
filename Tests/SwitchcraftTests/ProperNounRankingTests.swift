@@ -86,6 +86,75 @@ struct ProperNounRankingTests {
         indeed, one vague report, which will appear in the sequel.
         """
 
+    // MARK: - Sparse-title corpus
+
+    /// Document ID for the sparse-title Bartleby document.
+    private static let sparseBartlebyID = "sparse-bartleby"
+
+    /// Title for the sparse-title document — a single word so `title.count < 20`
+    /// triggers the constructive fallback in ADR 025 §(h).
+    private static let sparseBartlebyTitle = "Bartleby"
+
+    /// Body for the sparse-title document. Simulates a homework-help landing page
+    /// whose title is just "Bartleby" while the body references the name ~55 times.
+    // "Bartleby" appears approximately 55 times in this body.
+    private static let sparseBartlebyBody = """
+        Bartleby is the go-to resource for students studying classic American \
+        literature. Need help understanding Bartleby the Scrivener? Bartleby has \
+        comprehensive summaries, character analysis, and critical essays about Bartleby.
+
+        Search Bartleby for any passage from Bartleby the Scrivener and find instant \
+        explanations. Bartleby makes it easy to understand why Bartleby says \
+        "I would prefer not to", what Bartleby symbolises in a nineteenth-century \
+        office setting, and how Bartleby fits into American short fiction. Bartleby \
+        provides free access to the full text of Bartleby the Scrivener alongside \
+        Bartleby study guides written by expert teachers.
+
+        Students use Bartleby to write better essays about Bartleby. Whether your \
+        assignment covers Bartleby's passive resistance, Bartleby's relationship with \
+        the narrator, or the ending of Bartleby in the Tombs, Bartleby has a study \
+        guide for every aspect of the story. Bartleby also provides citation help so \
+        you can quote Bartleby correctly in MLA, APA, or Chicago format.
+
+        Bartleby covers all the major themes in Bartleby the Scrivener: alienation, \
+        dehumanisation, and the silent rebellion of Bartleby against the demands of \
+        commerce. Bartleby situates the character Bartleby within Melville's broader \
+        work and in the context of nineteenth-century America. Bartleby helps you \
+        compare Bartleby with characters from other Melville stories.
+
+        Millions of students visit Bartleby every semester. Whether you are reading \
+        Bartleby for the first time or writing a doctoral thesis about Bartleby, \
+        Bartleby provides the resources you need. Bartleby is the most trusted \
+        academic resource for understanding Bartleby the Scrivener and the world \
+        Bartleby inhabited.
+
+        Why is the site called Bartleby? Because Bartleby the Scrivener represents \
+        the spirit of quiet, determined inquiry. Just as Bartleby preferred not to \
+        do what others demanded, Bartleby the site gives you freedom to explore \
+        Bartleby on your own terms. Find Bartleby study guides, Bartleby essay \
+        prompts, and Bartleby quizzes — all free on Bartleby.
+        """
+
+    /// Ten distinct filler paragraphs about topics unrelated to "bartleby" or
+    /// "alfred". Cycled across the 52 filler documents.
+    private static let fillerCorpus: [String] = [
+        "The Amazon River is the largest river in the world by discharge volume. It flows through South America, primarily through Brazil, Peru, and Colombia. The Amazon basin contains the world's largest tropical rainforest, home to an extraordinary diversity of plant and animal species.",
+        "Pasta carbonara is a classic Roman dish made with eggs, hard cheese, cured pork, and black pepper. The sauce is created by combining beaten eggs and finely grated Pecorino Romano with cooked guanciale. The heat from the pasta cooks the eggs into a creamy sauce without scrambling them.",
+        "The FIFA World Cup is the most prestigious international football tournament in the world. It is held every four years and involves national teams competing from every continent. Brazil holds the record for the most World Cup victories, having won the tournament five times.",
+        "The Great Wall of China is one of the most impressive architectural achievements in human history. Construction began as early as the seventh century BC and continued for centuries under various dynasties. The wall stretches thousands of kilometres across northern China, crossing mountains, deserts, and plains.",
+        "Photosynthesis is the process by which plants, algae, and certain bacteria convert sunlight into chemical energy stored as glucose. The process occurs in chloroplasts and requires carbon dioxide and water as raw materials. Oxygen is released as a byproduct, making photosynthesis essential to life on Earth.",
+        "Mount Everest is the highest mountain on Earth, with a summit elevation of 8,848 metres above sea level. It is located in the Himalayas on the border between Nepal and Tibet. The first confirmed ascent was made on 29 May 1953 by Edmund Hillary and Tenzing Norgay.",
+        "Traditional French baguettes are made from simple ingredients: flour, water, yeast, and salt. The dough undergoes a long fermentation process to develop flavour and texture. Baguettes are characterised by their long, thin shape and crispy golden crust with a soft, chewy interior.",
+        "Wimbledon is the oldest tennis tournament in the world, held annually at the All England Club in London. Players compete on grass courts, which favour a fast, low-bouncing game style. The tournament is renowned for its strict dress code requiring all players to wear white.",
+        "The Roman Empire at its height controlled territories stretching from Britain to Egypt and from Spain to Mesopotamia. Roman engineering achievements such as aqueducts, roads, and amphitheatres remain visible across Europe and North Africa today.",
+        "Black holes are regions of spacetime where gravity is so strong that nothing, not even light, can escape once past the event horizon. They form when massive stars collapse at the end of their life cycle. The first direct image of a black hole was captured in 2019 by the Event Horizon Telescope.",
+    ]
+
+    /// 52 filler documents generated by cycling through `fillerCorpus`.
+    private static var fillerDocuments: [(id: String, body: String)] {
+        (0..<52).map { i in ("filler-\(i)", fillerCorpus[i % fillerCorpus.count]) }
+    }
+
     // MARK: - SharedResources
 
     /// One MLModel load shared across both tests.
@@ -151,6 +220,31 @@ struct ProperNounRankingTests {
 
         try await store.index()
         return try await store.search(query: "alfred", topK: 10)
+    }
+
+    /// Build a fresh in-memory store, index the sparse-Bartleby document
+    /// (title "Bartleby", 8 chars) and 52 unrelated filler documents, flush,
+    /// and return search results for the given query.
+    private func rankingsForSparseTitleQuery(_ query: String) async throws -> [HybridHit] {
+        let res = try await SharedResources.shared.get()
+        let storage = SQLiteStorage(path: ":memory:")
+        let store = try await SwitchcraftStore(
+            storage: storage,
+            embedder: res.embedder,
+            config: .default
+        )
+
+        try await store.add(
+            id: Self.sparseBartlebyID,
+            title: Self.sparseBartlebyTitle,
+            body: Self.sparseBartlebyBody
+        )
+        for doc in Self.fillerDocuments {
+            try await store.add(id: doc.id, body: doc.body)
+        }
+
+        try await store.index()
+        return try await store.search(query: query, topK: 10)
     }
 
     // MARK: - Tests
@@ -229,6 +323,95 @@ struct ProperNounRankingTests {
             If pathologyExists() passes but this fails, H1 dominates — escalate.
             """
         )
+    }
+
+    /// Verifies R1: a document with a sparse (single-word) title and a body
+    /// containing the query term 50+ times ranks in the top 5 by vector rank
+    /// against a corpus of 52 unrelated filler documents.
+    ///
+    /// This is the primary regression gate for the constructive title fallback
+    /// introduced in ADR 025 §(h) / issue #118. The test should fail before
+    /// the fix is applied and pass after.
+    @Test("Fix: sparse-title document ranks in top 5 for body-match query")
+    func sparseTitleRanksHighForBodyQuery() async throws {
+        let hits = try await rankingsForSparseTitleQuery("bartleby")
+
+        guard let hit = hits.first(where: { $0.uuid == Self.sparseBartlebyID }) else {
+            let desc = hits.map { h in "\(h.uuid)=vr\(h.vectorRank.map { String($0) } ?? "nil")" }
+                .joined(separator: ", ")
+            Issue.record(
+                "sparse-bartleby document missing from search results. hits: \(desc)"
+            )
+            return
+        }
+
+        let vr = hit.vectorRank ?? Int.max
+        #expect(
+            vr <= 5,
+            """
+            Sparse-title document ranked vr=\(vr) for query "bartleby"; expected ≤5. \
+            Score: \(hit.vectorScore.map { String($0) } ?? "nil"). \
+            If this fails before the ADR 025 §(h) fix is applied, the pathology is \
+            being correctly reproduced. Apply the fix and re-run.
+            """
+        )
+    }
+
+    /// Cross-regression guard: adding a sparse-title document to the same index
+    /// as a rich-title document must not hurt either group's ranking.
+    ///
+    /// Verifies:
+    /// - Alfred (rich title, 35 chars, `title.count ≥ 20`) ranks ≤5 for "alfred".
+    /// - Sparse-Bartleby (sparse title, 8 chars, `title.count < 20`) ranks ≤5
+    ///   for "bartleby", in the same index.
+    @Test("Fix: sparse-title and rich-title documents coexist without cross-regression")
+    func sparseTitleAndRichTitleCoexist() async throws {
+        let res = try await SharedResources.shared.get()
+        let storage = SQLiteStorage(path: ":memory:")
+        let store = try await SwitchcraftStore(
+            storage: storage,
+            embedder: res.embedder,
+            config: .default
+        )
+
+        try await store.add(
+            id: Self.alfredID,
+            title: Self.alfredTitle,
+            body: Self.alfredBody
+        )
+        try await store.add(
+            id: Self.sparseBartlebyID,
+            title: Self.sparseBartlebyTitle,
+            body: Self.sparseBartlebyBody
+        )
+        for doc in Self.fillerDocuments {
+            try await store.add(id: doc.id, body: doc.body)
+        }
+        try await store.index()
+
+        // Rich-title document (Alfred) must still rank top 5 for "alfred".
+        let alfredHits = try await store.search(query: "alfred", topK: 10)
+        if let alfredHit = alfredHits.first(where: { $0.uuid == Self.alfredID }) {
+            let vr = alfredHit.vectorRank ?? Int.max
+            #expect(
+                vr <= 5,
+                "Alfred (rich title) ranked vr=\(vr) for \"alfred\"; expected ≤5. Score: \(alfredHit.vectorScore.map { String($0) } ?? "nil")."
+            )
+        } else {
+            Issue.record("Alfred document missing from \"alfred\" search results.")
+        }
+
+        // Sparse-title document (sparse-bartleby) must also rank top 5 for "bartleby".
+        let bartlebyHits = try await store.search(query: "bartleby", topK: 10)
+        if let bartlebyHit = bartlebyHits.first(where: { $0.uuid == Self.sparseBartlebyID }) {
+            let vr = bartlebyHit.vectorRank ?? Int.max
+            #expect(
+                vr <= 5,
+                "Sparse-Bartleby (sparse title) ranked vr=\(vr) for \"bartleby\"; expected ≤5. Score: \(bartlebyHit.vectorScore.map { String($0) } ?? "nil")."
+            )
+        } else {
+            Issue.record("Sparse-bartleby document missing from \"bartleby\" search results.")
+        }
     }
 }
 #endif
