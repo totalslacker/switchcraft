@@ -810,7 +810,7 @@ Tests that Witchcraft doesn't have but Switchcraft must. Each suite below is a d
 - [x] Edge Cases suite (empty/short queries, very long docs, stopwords, Unicode, dedup, removal)
 - [x] Performance Regression suite (search latency, indexing throughput, memory)
 - [x] Search Timeout and Cancellation suite (pre-checkpoint path, progress-handler interrupt, task cancellation, happy-path regression, post-timeout recovery)
-- [x] Proper Noun Ranking suite — asset-gated; pathology-demo (Bartleby outranks Alfred without title) + fix assertion (Alfred outranks Bartleby with title prepend); validates ADR 025 / issue #105
+- [x] Proper Noun Ranking suite — asset-gated; pathology-demo (Bartleby outranks Alfred without title) + fix assertion (Alfred outranks Bartleby with title prepend); sparse-title R1 gate (sparse-Bartleby, title "Bartleby" 8 chars, ranks ≤5 for "bartleby" against 52 fillers) + cross-regression guard (sparse-title and rich-title coexist in same index); validates ADR 025 §(a),(h) / issues #105, #118
 - [x] Noise Floor Precision suite — asset-gated; baseline (precision@5 < 0.4 without filter, 200-doc noise corpus saturated with "t"/"le"/"by" fragments), fix (precision@5 ≥ 0.6 with queryMinSurfaceFormLength=2), top-1 preserved at 35-doc scale; validates ADR 028 / issue #117
 
 #### GEMM / Matrix Operations

@@ -135,6 +135,87 @@ SentencePiece tokenizer at word boundaries can produce a wordpiece that
 conflates the last title token with the first body token if the body begins
 mid-sentence.
 
+### (h) Sparse-title asymmetry and constructive title fallback (issue #118)
+
+#### The inverse pathology
+
+The §(a) title-prepend policy introduced a symmetric counter-pathology for
+documents whose titles are sparse (a single word or very short phrase). When a
+sparse title (e.g. "Bartleby", 3–4 SentencePiece tokens) is prepended, it
+shifts the first body occurrence of the query term from T5 position 0 to
+position 3+. Because T5's self-attention embeds each token in the context of
+its neighbours, a body token at position 3+ receives a richer surrounding
+context and diverges further from the standalone query token at position 0 of
+a one-token query. MaxSim dot products for those body tokens decrease. For
+rich-title documents (many title tokens matching the query), this shift is
+acceptable because the title itself contributes many high-quality
+position-0 embeddings. For sparse-title documents where the body carries all
+the signal, the shift is harmful.
+
+Concrete reproducer: a homework-help landing page with title "Bartleby" (8
+chars) and a body containing "Bartleby" 50+ times. After §(a), the page ranks
+significantly lower for the query "bartleby" than it would with mean-pooled
+single-vector models. Before §(a) it ranked correctly (body tokens at
+position 0).
+
+#### Fix: constructive title fallback
+
+When `title.count < N` (N=20), the `embeddingText` formula is extended to
+prepend the first M characters of body as well:
+
+```
+embeddingText = "\(title)\n\(body.prefix(M))\n\(body)"
+```
+
+This brings body content into early T5 positions (positions ~3–53 for M=200),
+restoring the near-position-0 advantage for body tokens that contain the query
+term.
+
+#### Parameter values and rationale
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| N (sparse threshold) | 20 chars | "Bartleby" (8) and "About Us" (8) trigger; "Bartleby, the Scrivener" (22) and "Alfred - Productivity App for macOS" (35) do not. Separates single-word and very-short-phrase titles from descriptive titles. |
+| M (body prefix length) | 200 chars | ≈40–80 English tokens. Enough body context near position 0 without doubling token count for typical documents. |
+| Title→prefix separator | `"\n"` | Per §(g) rationale: natural SentencePiece whitespace boundary. |
+| Prefix→body separator | `"\n"` | Same rationale — avoids wordpiece fusion at the junction. |
+
+#### Body prefix style: inclusive (duplicated)
+
+The first M characters of body appear at two locations in `embeddingText`:
+once in the prefix position (T5 positions ~3–53) and once within the full
+body. This means those tokens are encoded exactly once (they appear in a single
+T5 context window for all short documents). For documents longer than 512
+tokens, `SlidingWindow.merge` averages overlapping windows; the duplicated
+prefix content in window 0 is acceptable because the early-position
+representation is the one that matters for MaxSim quality.
+
+The alternative (exclusive prefix: `"\(title)\n\(body.prefix(M))"`) would lose
+tail content for long bodies. Inclusive form is preferred.
+
+#### Hash implications
+
+Same as §(b): sparse-title documents receive a new chunk hash after this
+change. Callers re-indexing sparse-title documents should call `clear()` first
+to avoid orphan chunk accumulation.
+
+#### Benchmark invariants preserved
+
+§(f) remains intact: the 33-fact corpus and NFCorpus benchmark index documents
+with `title == nil`, so `embeddingText == body` for those documents. The
+constructive fallback is a dead code path for both benchmarks — zero regression
+risk.
+
+#### Acceptance tests
+
+`ProperNounRankingTests` (issue #118):
+- `sparseTitleRanksHighForBodyQuery` (R1): sparse-title Bartleby (title
+  "Bartleby", 8 chars) ranks ≤5 by vectorRank for query "bartleby" against
+  52 unrelated filler documents.
+- `sparseTitleAndRichTitleCoexist`: Alfred (rich title, 35 chars) and
+  sparse-Bartleby coexist in the same index; both rank ≤5 for their
+  respective queries.
+
 ---
 
 ## Consequences

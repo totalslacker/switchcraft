@@ -82,11 +82,13 @@ public actor SwitchcraftStore {
     /// `metadata` is JSON-encoded with sorted keys so byte-identical input
     /// produces byte-identical `DocumentRecord.metadata`.
     ///
-    /// When `title` is supplied, the embedder sees `"<title>\n<body>"` rather
-    /// than `body` alone. This improves retrieval quality for short proper-noun
-    /// queries by ensuring title tokens appear at the start of the T5 context
-    /// window, where their embeddings are closest to the same token in a
-    /// standalone query. See ADR 025 for the full rationale and hash-semantics.
+    /// When `title` is supplied, the embedder sees a title-prefixed text rather
+    /// than `body` alone. For rich titles (`title.count ≥ 20`) the formula is
+    /// `"\(title)\n\(body)"` (ADR 025 §a). For sparse titles (`title.count < 20`)
+    /// a 200-character body excerpt is also prepended — `"\(title)\n\(body.prefix(200))\n\(body)"` —
+    /// so body tokens appear near T5 position 0 rather than being shifted right
+    /// by a short title (ADR 025 §h). See ADR 025 for the full rationale and
+    /// hash-semantics.
     ///
     /// The chunk dedup key is `SHA-256(embeddingText)` — so two documents
     /// with identical bodies but different titles produce distinct chunks with
@@ -121,7 +123,17 @@ public actor SwitchcraftStore {
     ) async throws {
         try ensureRunning()
 
-        let embeddingText = title.map { "\($0)\n\(body)" } ?? body
+        // ADR 025 §(h): For sparse titles (< 20 chars), prepend a body excerpt so
+        // body tokens appear near T5 position 0 — restoring the near-context shape
+        // they had before the title shift introduced by §(a).
+        let embeddingText: String
+        if let title {
+            embeddingText = title.count < 20
+                ? "\(title)\n\(body.prefix(200))\n\(body)"
+                : "\(title)\n\(body)"
+        } else {
+            embeddingText = body
+        }
 
         // TODO: paragraph splitter — single chunk per body for v1.
         let embeddings = try await embedder.encode(embeddingText)
