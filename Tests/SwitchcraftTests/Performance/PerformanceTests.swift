@@ -192,6 +192,55 @@ struct PerformanceTests {
                 "indexing throughput \(throughput) docs/s below 10 docs/s floor")
     }
 
+    // MARK: - R14: dedup-hit overhead of chunkHasBucketAssignments
+
+    /// Measures the per-call cost of the bucket-presence check introduced by
+    /// issue #120.  The check fires on every `add()` call whose content hash
+    /// matches an existing indexed chunk (the common dedup case).
+    ///
+    /// Methodology: build a 200-doc corpus, flush to buckets, then re-add the
+    /// same 200 bodies 5× each (1,000 calls total).  Every re-add hits the
+    /// R3 path (`chunkHasBucketAssignments` returns `true`, skip `indexer.add()`).
+    ///
+    /// Threshold: 100 ms for 1,000 dedup-hits (≤ 100 µs/call) — generous
+    /// relative to InMemoryStorage's O(total_indexed_tokens) scan cost.
+    @Test("dedup-hit: 1000 re-adds with bucket-presence check complete < 100 ms (release)")
+    func dedupHitBucketPresenceCheckOverhead() async throws {
+        let dedupCorpusSize = 200
+        let repeatCount = 5
+
+        let storage = InMemoryStorage()
+        let store = try await SwitchcraftStore(
+            storage: storage,
+            embedder: MockEmbedder(dims: Self.embedDims),
+            config: .default
+        )
+        for i in 0..<dedupCorpusSize {
+            try await store.add(id: "dedup-\(i)", body: Self.body(i))
+        }
+        try await store.index()
+
+        // Warm-up pass.
+        for i in 0..<dedupCorpusSize {
+            try await store.add(id: "dedup-\(i)", body: Self.body(i))
+        }
+
+        // Timed pass.
+        let clock = ContinuousClock()
+        let start = clock.now
+        for _ in 0..<repeatCount {
+            for i in 0..<dedupCorpusSize {
+                try await store.add(id: "dedup-\(i)", body: Self.body(i))
+            }
+        }
+        let elapsedNs = Self.nanoseconds(clock.now - start)
+        let elapsedMs = Double(elapsedNs) / 1_000_000.0
+        let totalCalls = dedupCorpusSize * repeatCount
+
+        #expect(elapsedMs < 100.0,
+                "\(totalCalls) dedup-hits took \(elapsedMs) ms; expected < 100 ms")
+    }
+
     @Test("memory peak: resident-size delta < 300 MB during repeated search")
     func memoryPeakUnder300MBDuringSearch() async throws {
         let fixture = try await Self.buildOnce.value

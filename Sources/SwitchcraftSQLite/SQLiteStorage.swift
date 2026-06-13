@@ -355,6 +355,62 @@ public actor SQLiteStorage: SwitchcraftStorage {
         }
     }
 
+    public func allChunks() async throws -> [ChunkRecord] {
+        switch mode {
+        case .closed:
+            throw SQLiteError(code: 1, message: "storage is not open")
+        case .inMemory(let conn):
+            let stmt = try conn.prepare("""
+                SELECT id, hash, model, embeddings, counts
+                FROM chunk
+                ORDER BY id ASC
+                """)
+            var rows: [ChunkRecord] = []
+            while try stmt.step() {
+                rows.append(decodeChunk(stmt))
+            }
+            return rows
+        case .fileBacked(_, let reader):
+            return try await reader.allChunks()
+        }
+    }
+
+    public func chunkHasBucketAssignments(_ chunkID: Int64) async throws -> Bool {
+        guard let u32 = UInt32(exactly: chunkID) else { return false }
+        switch mode {
+        case .closed:
+            throw SQLiteError(code: 1, message: "storage is not open")
+        case .inMemory(let conn):
+            // Fast path: range check across generations.
+            let rangeStmt = try conn.prepare("""
+                SELECT id FROM generation
+                WHERE min_chunk_id <= ? AND max_chunk_id >= ?
+                ORDER BY id ASC
+                """)
+            try rangeStmt.bind([.int(chunkID), .int(chunkID)])
+            var generationIDs: [Int64] = []
+            while try rangeStmt.step() {
+                generationIDs.append(rangeStmt.columnInt64(0))
+            }
+            if generationIDs.isEmpty { return false }
+            // Slow path: decode blobs.
+            for genID in generationIDs {
+                let bucketStmt = try conn.prepare("""
+                    SELECT indices FROM bucket WHERE generation_id = ?
+                    """)
+                try bucketStmt.bind([.int(genID)])
+                while try bucketStmt.step() {
+                    let blob = bucketStmt.columnBlob(0)
+                    let pairs = try IndicesCodec.decode(blob)
+                    if pairs.contains(where: { $0.chunkID == u32 }) { return true }
+                }
+            }
+            return false
+        case .fileBacked(_, let reader):
+            return try await reader.chunkHasBucketAssignments(chunkID)
+        }
+    }
+
     // MARK: - Generations
 
     public func insertGeneration(_ generation: GenerationRecord) async throws -> GenerationRecord {

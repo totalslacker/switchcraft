@@ -78,6 +78,26 @@ public protocol SwitchcraftStorage: Sendable {
     /// Return the total number of chunks.
     func chunkCount() async throws -> Int
 
+    /// Return every chunk record in the store, in unspecified order.
+    ///
+    /// Used by `SwitchcraftStore.findOrphanedChunks()` to enumerate chunks
+    /// that may lack bucket assignments. Backends that do not implement this
+    /// method return an empty array via the default extension, so
+    /// `findOrphanedChunks()` returns an empty result rather than an error.
+    func allChunks() async throws -> [ChunkRecord]
+
+    /// Return `true` if the given chunk has at least one
+    /// `(chunkID, tokenOffset)` pair across all committed bucket blobs.
+    ///
+    /// Used by `SwitchcraftStore.add()` to detect orphaned chunks in the
+    /// content-hash dedup branch.  Returning `true` (the default) is the
+    /// safe conservative choice: it treats unknown chunks as fully indexed,
+    /// so third-party backends opt out of orphan recovery rather than
+    /// unconditionally re-indexing on every `add()` call.
+    ///
+    /// - Throws: `IndicesCodec.Error` if a bucket blob is corrupt.
+    func chunkHasBucketAssignments(_ chunkID: Int64) async throws -> Bool
+
     // MARK: - Generations
 
     /// Insert a generation record. The provided `id` is ignored; the backend
@@ -179,4 +199,6 @@ public protocol SwitchcraftStorage: Sendable {
 extension SwitchcraftStorage {
     public func configureSearchDeadline(_ ctx: SearchDeadlineContext?) async {}
     public func walCheckpoint() async throws {}
+    public func allChunks() async throws -> [ChunkRecord] { [] }
+    public func chunkHasBucketAssignments(_ chunkID: Int64) async throws -> Bool { true }
 }
