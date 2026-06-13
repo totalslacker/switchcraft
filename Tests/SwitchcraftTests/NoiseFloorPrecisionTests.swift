@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import Foundation
 import Testing
 @testable import Switchcraft
 @testable import SwitchcraftCore
@@ -192,6 +193,7 @@ struct NoiseFloorPrecisionTests {
         let hits = try await store.search(query: "bartleby", topK: 5)
 
         let p5 = precision(at: 5, hits: hits)
+        try await store.shutdown()
         #expect(
             p5 < 0.4,
             """
@@ -215,6 +217,7 @@ struct NoiseFloorPrecisionTests {
         let hits = try await store.search(query: "bartleby", topK: 5)
 
         let p5 = precision(at: 5, hits: hits)
+        try await store.shutdown()
         #expect(
             p5 >= 0.6,
             """
@@ -256,6 +259,7 @@ struct NoiseFloorPrecisionTests {
         let hits = try await store.search(query: "bartleby", topK: 5)
 
         let p1 = precision(at: 1, hits: hits)
+        try await store.shutdown()
         #expect(
             p1 == 1.0,
             """

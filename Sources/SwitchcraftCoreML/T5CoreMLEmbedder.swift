@@ -360,7 +360,8 @@ public actor T5CoreMLEmbedder: Embedder {
 
     /// Encode a query string with optional short-token filtering. See ADR 028.
     public func encodeQuery(_ text: String, minSurfaceFormLength: Int) async throws -> [Float] {
-        try await _encodeImpl(text, minSurfaceFormLength: minSurfaceFormLength)
+        precondition(minSurfaceFormLength >= 0, "minSurfaceFormLength must be non-negative")
+        return try await _encodeImpl(text, minSurfaceFormLength: minSurfaceFormLength)
     }
 
     // MARK: - Private helpers
