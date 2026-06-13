@@ -126,6 +126,53 @@ actor SQLiteReaderActor {
         try scalarInt("SELECT COUNT(*) FROM chunk")
     }
 
+    func allChunks() throws -> [ChunkRecord] {
+        let conn = try requireConnection()
+        let stmt = try conn.prepare("""
+            SELECT id, hash, model, embeddings, counts
+            FROM chunk
+            ORDER BY id ASC
+            """)
+        var rows: [ChunkRecord] = []
+        while try stmt.step() {
+            rows.append(decodeChunk(stmt))
+        }
+        return rows
+    }
+
+    func chunkHasBucketAssignments(_ chunkID: Int64) throws -> Bool {
+        guard let u32 = UInt32(exactly: chunkID) else { return false }
+        let conn = try requireConnection()
+
+        // Fast path: check whether any generation's range covers this chunkID.
+        // If no generation range includes it, no bucket can reference it.
+        let rangeStmt = try conn.prepare("""
+            SELECT id FROM generation
+            WHERE min_chunk_id <= ? AND max_chunk_id >= ?
+            ORDER BY id ASC
+            """)
+        try rangeStmt.bind([.int(chunkID), .int(chunkID)])
+        var generationIDs: [Int64] = []
+        while try rangeStmt.step() {
+            generationIDs.append(rangeStmt.columnInt64(0))
+        }
+        if generationIDs.isEmpty { return false }
+
+        // Slow path: decode bucket blobs for matching generations, short-circuiting on first hit.
+        for genID in generationIDs {
+            let bucketStmt = try conn.prepare("""
+                SELECT indices FROM bucket WHERE generation_id = ?
+                """)
+            try bucketStmt.bind([.int(genID)])
+            while try bucketStmt.step() {
+                let blob = bucketStmt.columnBlob(0)
+                let pairs = try IndicesCodec.decode(blob)
+                if pairs.contains(where: { $0.chunkID == u32 }) { return true }
+            }
+        }
+        return false
+    }
+
     // MARK: - Generations
 
     func generations() throws -> [GenerationRecord] {
