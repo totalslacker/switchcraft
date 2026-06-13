@@ -52,6 +52,9 @@ public enum StorageConformance {
         try await runFullTextHandlesPunctuation(storage)
         try await runFullTextTitleWeighting(storage)
 
+        try await runAllChunks(storage)
+        try await runChunkHasBucketAssignments(storage)
+
         try await storage.close()
     }
 
@@ -482,6 +485,68 @@ public enum StorageConformance {
         if let idx = uuids.firstIndex(of: "bartleby-com") {
             #expect(idx < 2, "titled document must rank in top 2")
         }
+    }
+
+    // MARK: - allChunks / chunkHasBucketAssignments
+
+    static func runAllChunks(_ storage: any SwitchcraftStorage) async throws {
+        try await storage.clear()
+
+        let c1 = try await storage.upsertChunk(
+            ChunkRecord(hash: "all-h1", model: "m1", embeddings: Data(), counts: [3])
+        )
+        let c2 = try await storage.upsertChunk(
+            ChunkRecord(hash: "all-h2", model: "m2", embeddings: Data(), counts: [5])
+        )
+
+        let all = try await storage.allChunks()
+        let ids = Set(all.map(\.id))
+        #expect(ids.contains(c1.id))
+        #expect(ids.contains(c2.id))
+        #expect(all.count >= 2)
+
+        let hashes = Set(all.map(\.hash))
+        #expect(hashes.contains("all-h1"))
+        #expect(hashes.contains("all-h2"))
+    }
+
+    static func runChunkHasBucketAssignments(_ storage: any SwitchcraftStorage) async throws {
+        try await storage.clear()
+
+        // Chunk with no bucket assignment — orphan.
+        let orphan = try await storage.upsertChunk(
+            ChunkRecord(hash: "bpa-orphan", model: "m", embeddings: Data(), counts: [1])
+        )
+
+        // Chunk with a bucket assignment.
+        let indexed = try await storage.upsertChunk(
+            ChunkRecord(hash: "bpa-indexed", model: "m", embeddings: Data(), counts: [1])
+        )
+        let gen = try await storage.insertGeneration(
+            GenerationRecord(
+                level: 0,
+                numEmbeddings: 1,
+                minChunkID: indexed.id,
+                maxChunkID: indexed.id,
+                created: Date()
+            )
+        )
+        let indicesBlob = IndicesCodec.encode([
+            IndexPair(chunkID: UInt32(indexed.id), tokenOffset: 0)
+        ])
+        _ = try await storage.insertBucket(
+            BucketRecord(
+                generationID: gen.id,
+                center: Data(repeating: 0, count: 4),
+                indices: indicesBlob,
+                residuals: Data()
+            )
+        )
+
+        let orphanHas = try await storage.chunkHasBucketAssignments(orphan.id)
+        let indexedHas = try await storage.chunkHasBucketAssignments(indexed.id)
+        #expect(!orphanHas, "orphan chunk must have no bucket assignments")
+        #expect(indexedHas, "indexed chunk must have bucket assignments")
     }
 
     // MARK: - Helpers

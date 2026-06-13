@@ -36,6 +36,10 @@ public actor SwitchcraftStore {
     public let config: StoreConfig
 
     private var isShutDown: Bool = false
+    // Tracks chunkIDs passed to `indexer.add()` since the last flush.
+    // Guards against double-buffering when a pending-but-unflushed chunk
+    // is re-added with matching content (R2 of issue #120).
+    private var pendingChunkIDs: Set<Int64> = []
 
     // MARK: - Init
 
@@ -100,6 +104,32 @@ public actor SwitchcraftStore {
     /// configurable BM25 column weight (`HybridConfig.ftsTitleWeight`). See
     /// ADR 026 for the schema and migration details.
     ///
+    /// ## Content-hash dedup and orphan recovery
+    ///
+    /// `add()` deduplicates chunks by `SHA-256(embeddingText)`. When a chunk
+    /// row already exists for that hash, the dedup branch applies a three-way
+    /// check before deciding whether to call `indexer.add()`:
+    ///
+    /// 1. **Pending (R2):** if the existing chunk was already passed to
+    ///    `indexer.add()` in this store's lifetime but not yet flushed, skip
+    ///    `indexer.add()` — it is already buffered. Double-buffering the same
+    ///    chunkID violates the Indexer's single-reference invariant.
+    /// 2. **Indexed (R3):** if the existing chunk has bucket assignments in
+    ///    committed storage, skip `indexer.add()` — this is the normal,
+    ///    already-indexed dedup case.
+    /// 3. **Orphan (R1):** if the existing chunk has *no* bucket assignments
+    ///    and is not pending, call `indexer.add()` with the freshly computed
+    ///    embeddings to recover it. This handles the permanent-invisibility
+    ///    failure mode where `storage.upsertChunk()` succeeded but a
+    ///    subsequent crash or error prevented `indexer.add()` from running.
+    ///    The recovery is always-on; no opt-in flag is required.
+    ///
+    /// Use `SwitchcraftStore.findOrphanedChunks()` to enumerate all orphans
+    /// already present in storage that pre-date this fix.
+    ///
+    /// See ADR 029 for the full orphan failure-mode analysis and recovery
+    /// contract.
+    ///
     /// - Parameters:
     ///   - id: caller-supplied document identifier (UUID, slug, etc.).
     ///   - date: date associated with the document. Defaults to `now`.
@@ -136,15 +166,21 @@ public actor SwitchcraftStore {
         let hash = Self.contentHash(embeddingText)
         let metadataData = try Self.encodeMetadata(metadata)
 
-        // Pre-check chunk existence so we only buffer embeddings into the
-        // indexer ledger when the chunk is genuinely new. `upsertChunk`
-        // alone returns the existing record on hash collision but does
-        // not signal whether an insert happened, so we'd risk
-        // double-buffering identical embeddings under the same chunkID.
+        // Pre-check chunk existence to decide whether embeddings need
+        // buffering. Three-way dedup logic (see doc comment above):
         let existing = try await storage.chunk(hash: hash)
         let chunkID: Int64
         if let existing {
             chunkID = existing.id
+            if pendingChunkIDs.contains(chunkID) {
+                // R2: already buffered in the indexer ledger — skip.
+            } else if try await storage.chunkHasBucketAssignments(chunkID) {
+                // R3: fully indexed — existing dedup behaviour, skip.
+            } else if tokenCount > 0 {
+                // R1: orphan — no bucket assignments, re-buffer to recover.
+                try await indexer.add(chunkID: chunkID, embeddings: embeddings, dims: dims)
+                pendingChunkIDs.insert(chunkID)
+            }
         } else {
             let inserted = try await storage.upsertChunk(
                 ChunkRecord(
@@ -161,6 +197,7 @@ public actor SwitchcraftStore {
                     embeddings: embeddings,
                     dims: dims
                 )
+                pendingChunkIDs.insert(chunkID)
             }
         }
 
@@ -196,7 +233,68 @@ public actor SwitchcraftStore {
     /// - Throws: `SwitchcraftStoreError.alreadyShutDown`; indexer errors.
     public func index() async throws {
         try ensureRunning()
-        try await indexer.flush()
+        try await flushAndClearPending()
+    }
+
+    /// Return all chunk rows that have no, or only partial, bucket
+    /// assignments across all committed generations.
+    ///
+    /// A chunk is an orphan when `storage.upsertChunk()` succeeded but a
+    /// subsequent crash or error prevented `indexer.add()` from running.
+    /// Orphaned chunks are visible in FTS results but invisible to vector
+    /// search.
+    ///
+    /// ## Recovery contract
+    ///
+    /// For each returned `OrphanedChunkInfo`, re-add any document in
+    /// `owningDocuments` through `store.add(id:body:)`.  `add()` detects
+    /// the missing bucket assignments and calls `indexer.add()` automatically;
+    /// the next `store.search()` or explicit `store.index()` call flushes
+    /// the recovered embeddings into the bucket index.
+    ///
+    /// This method operates on committed storage state only and does not
+    /// require a flush before being called.
+    ///
+    /// - Throws: `SwitchcraftStoreError.alreadyShutDown`; storage errors;
+    ///   `IndicesCodec.Error` if a bucket blob is corrupt.
+    public func findOrphanedChunks() async throws -> [OrphanedChunkInfo] {
+        try ensureRunning()
+
+        let chunks = try await storage.allChunks()
+        guard !chunks.isEmpty else { return [] }
+
+        // Build a map of chunkID → bucket reference count by decoding all blobs.
+        var refCounts: [Int64: Int] = [:]
+        let gens = try await storage.generations()
+        for gen in gens {
+            let buckets = try await storage.buckets(forGeneration: gen.id)
+            for bucket in buckets {
+                let pairs = try IndicesCodec.decode(bucket.indices)
+                for pair in pairs {
+                    let cid = Int64(pair.chunkID)
+                    refCounts[cid, default: 0] += 1
+                }
+            }
+        }
+
+        var orphans: [OrphanedChunkInfo] = []
+        for chunk in chunks {
+            let expected = chunk.counts.reduce(0, +)
+            let refs = refCounts[chunk.id] ?? 0
+            if refs < expected {
+                let docs = try await storage.documents(forChunkHash: chunk.hash)
+                let uuids = docs.map { $0.uuid }
+                orphans.append(OrphanedChunkInfo(
+                    chunkID: chunk.id,
+                    hash: chunk.hash,
+                    model: chunk.model,
+                    expectedTokenCount: expected,
+                    bucketReferenceCount: refs,
+                    owningDocuments: uuids
+                ))
+            }
+        }
+        return orphans
     }
 
     /// Wipe all documents, chunks, and LSM generations. The backing
@@ -274,7 +372,7 @@ public actor SwitchcraftStore {
             deadline: effectiveDeadline
         )
 
-        try await indexer.flush()
+        try await flushAndClearPending()
 
         // Pre-SQLite checkpoint: flush may have consumed the budget.
         if deadlineCtx.isExpired {
@@ -337,7 +435,7 @@ public actor SwitchcraftStore {
     ///   `embeddingMismatch`; embedder errors.
     public func score(query: String, passages: [String]) async throws -> [Float] {
         try ensureRunning()
-        try await indexer.flush()
+        try await flushAndClearPending()
         let queryEmbeddings = try await embedder.encode(query)
         let dims = embedder.dims
         guard queryEmbeddings.count % dims == 0 else {
@@ -377,7 +475,7 @@ public actor SwitchcraftStore {
         // the actor is suspended in flush/close observe shutdown and
         // throw `alreadyShutDown` instead of racing through gates.
         isShutDown = true
-        try await indexer.flush()
+        try await flushAndClearPending()
         // Checkpoint the WAL before closing so that the next launch finds
         // a clean database file. Skipped on error — a partial WAL is still
         // better than a half-checkpointed file, and `close()` handles final
@@ -390,6 +488,11 @@ public actor SwitchcraftStore {
 
     private func ensureRunning() throws {
         if isShutDown { throw SwitchcraftStoreError.alreadyShutDown }
+    }
+
+    private func flushAndClearPending() async throws {
+        try await indexer.flush()
+        pendingChunkIDs.removeAll()
     }
 
     /// SHA-256 of the body's UTF-8 bytes, hex-encoded. Used as the chunk

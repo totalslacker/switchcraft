@@ -106,6 +106,21 @@ public actor InMemoryStorage: SwitchcraftStorage {
         chunksByHash.count
     }
 
+    public func allChunks() async throws -> [ChunkRecord] {
+        Array(chunksByID.values)
+    }
+
+    public func chunkHasBucketAssignments(_ chunkID: Int64) async throws -> Bool {
+        guard let u32 = UInt32(exactly: chunkID) else { return false }
+        for buckets in bucketsByGeneration.values {
+            for bucket in buckets {
+                let pairs = try IndicesCodec.decode(bucket.indices)
+                if pairs.contains(where: { $0.chunkID == u32 }) { return true }
+            }
+        }
+        return false
+    }
+
     // MARK: - Generations
 
     public func insertGeneration(_ generation: GenerationRecord) async throws -> GenerationRecord {
