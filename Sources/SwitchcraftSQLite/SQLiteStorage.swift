@@ -102,13 +102,13 @@ public actor SQLiteStorage: SwitchcraftStorage {
     }
 
     /// Flush pending WAL pages to the main database file and reset the WAL.
-    /// No-op for in-memory or closed stores.
-    public func walCheckpoint() async throws {
+    /// Returns `.complete` for in-memory or closed stores (no WAL to truncate).
+    public func walCheckpoint() async throws -> CheckpointResult {
         switch mode {
         case .closed, .inMemory:
-            break
+            return .complete
         case .fileBacked(let writer, _):
-            try await writer.walCheckpoint()
+            return try await writer.walCheckpoint()
         }
     }
 

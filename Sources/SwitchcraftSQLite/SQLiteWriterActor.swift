@@ -108,10 +108,16 @@ actor SQLiteWriterActor {
 
     /// Run `PRAGMA wal_checkpoint(TRUNCATE)` on the writer connection,
     /// flushing all pending WAL pages to the main database file and resetting
-    /// the WAL header. No-op if the connection is not open.
-    func walCheckpoint() throws {
-        guard let conn = connection else { return }
-        try conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    /// the WAL header. No-op (returns `.complete`) if the connection is not open.
+    func walCheckpoint() throws -> CheckpointResult {
+        guard let conn = connection else { return .complete }
+        let stmt = try conn.prepare("PRAGMA wal_checkpoint(TRUNCATE)")
+        guard try stmt.step() else { return .complete }
+        // Result row: (busy INT, log INT, checkpointed INT)
+        // busy=1 means a reader blocked truncation; log=total WAL frames.
+        let busy = stmt.columnInt64(0)
+        let log  = stmt.columnInt64(1)
+        return busy == 0 ? .complete : .partial(framesRemaining: Int(log))
     }
 
     // MARK: - Documents

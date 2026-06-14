@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import CryptoKit
+import os
 import SwitchcraftCore
 
 /// Public, async, document-management surface over a `SwitchcraftStorage`
@@ -29,6 +30,7 @@ public actor SwitchcraftStore {
 
     // MARK: - State
 
+    private let logger = Logger(subsystem: "com.switchcraft", category: "Store")
     private let storage: any SwitchcraftStorage
     private let embedder: any Embedder
     private var indexer: Indexer!
@@ -370,18 +372,26 @@ public actor SwitchcraftStore {
         return try await storage.indexedURLs()
     }
 
-    /// Flush any pending WAL writes to the main database file and truncate
-    /// the WAL. No-op for in-memory stores.
+    /// Flush pending indexer writes, then run `wal_checkpoint(TRUNCATE)`.
     ///
-    /// Call this during graceful shutdown to ensure the database is in a
-    /// clean state before process exit. If the WAL is not checkpointed and
-    /// the process is killed, the next launch may encounter a rehydration
-    /// conflict during index reconstruction.
+    /// Flushing the indexer first ensures that all `add()` calls issued before
+    /// this call are durable on disk when the method returns — matching the
+    /// intuitive "I just checkpointed, my data is safe" contract. Without the
+    /// flush, buffered indexer writes would survive a call to this method but
+    /// be lost on a crash that followed.
     ///
-    /// - Throws: `SwitchcraftStoreError.alreadyShutDown`; storage errors.
-    public func walCheckpoint() async throws {
+    /// Returns `.partial(framesRemaining:)` when a reader connection blocked
+    /// WAL truncation. Data is durable; only the WAL file compaction is
+    /// incomplete. Retry after the reader closes, or let the next
+    /// `shutdown()` drain it. No-op for in-memory stores (always `.complete`).
+    ///
+    /// - Returns: `.complete` when the WAL was truncated; `.partial` when
+    ///   a reader blocked truncation.
+    /// - Throws: `SwitchcraftStoreError.alreadyShutDown`; indexer or storage errors.
+    public func walCheckpoint() async throws -> CheckpointResult {
         try ensureRunning()
-        try await storage.walCheckpoint()
+        try await flushAndClearPending()
+        return try await storage.walCheckpoint()
     }
 
     // MARK: - Search
@@ -523,8 +533,13 @@ public actor SwitchcraftStore {
         // Checkpoint the WAL before closing so that the next launch finds
         // a clean database file. Skipped on error — a partial WAL is still
         // better than a half-checkpointed file, and `close()` handles final
-        // cleanup regardless.
-        try? await storage.walCheckpoint()
+        // cleanup regardless. Calls storage directly (not self.walCheckpoint())
+        // to avoid re-entering the isShutDown guard and to skip a second flush.
+        if case .partial(let frames) = try? await storage.walCheckpoint() {
+            logger.error(
+                "WAL checkpoint partial on shutdown: \(frames) frames remaining"
+            )
+        }
         try await storage.close()
     }
 
