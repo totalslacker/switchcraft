@@ -37,3 +37,4 @@ ADRs document significant design decisions for Switchcraft. Each file follows th
 - [029 — Orphan chunk detection and recovery](029-orphan-chunk-detection-recovery.md)
 - [030 — Mid-operation compaction ledger divergence](030-mid-operation-compaction-ledger-divergence.md)
 - [031 — `Embedder.resetState()`: explicit consumer-controlled ANE IOSurface pool flush](031-embedder-reset-state-iosurface-pool-flush.md)
+- [032 — CompactionEvent callback API](032-compaction-event-callback-api.md)
