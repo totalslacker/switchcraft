@@ -197,5 +197,42 @@ struct T5CoreMLEmbedderTests {
             )
         }
     }
+    // MARK: - resetState() reproducer
+
+    /// Reproducer test: a sustained-inference loop that previously exhausted the
+    /// ANE IOSurface pool must complete without throwing when `resetState()` is
+    /// called every `resetInterval` inferences.
+    ///
+    /// The real failure mode (observed at ~1,100 encodes without any reset) is
+    /// "Failed to allocate E5 buffer object." This test runs 500+ encodes with
+    /// periodic explicit resets and must not throw.
+    ///
+    /// Callers can set `resetInterval` to a different value to test different
+    /// batch cadences. The default of 500 provides a full-sized "batch" between
+    /// resets and exceeds the observed ~388-encode exhaustion point.
+    @Test("resetState() sustains ≥500 encode calls without IOSurface exhaustion")
+    func resetStateSustainedInference() async throws {
+        let embedder = try await SharedEmbedder.shared.get()
+        let resetInterval = 500
+        let totalCalls = 550  // Exceed the ~388 historic failure point with margin.
+
+        let inputs: [String] = [
+            "neural information retrieval",
+            "token-level semantic search with sub-linear retrieval",
+            "the quick brown fox jumps over the lazy dog",
+        ]
+
+        for i in 0..<totalCalls {
+            if i > 0 && i % resetInterval == 0 {
+                try await embedder.resetState()
+            }
+            let text = inputs[i % inputs.count]
+            let result = try await embedder.encode(text)
+            #expect(
+                !result.isEmpty,
+                "encode returned empty at iteration \(i)"
+            )
+        }
+    }
 }
 #endif
