@@ -182,7 +182,7 @@ category: "Indexer")`). No new subsystem or category is introduced.
 |-------|-------|
 | `input_segments` | `mergedGens.count + 1` — stored generations at level ≤ targetLevel plus the pending L0 buffer |
 | `input_bytes` | `total × dims × 4` — cascade walk's total embedding count times Float32 byte size |
-| `trigger` | `cascade` when `targetLevel > 0` (embeddings promoted into higher levels); `forced` when `targetLevel == 0` (confined L0 write). `recovery` and `other` are forward-compatibility labels with no current call site. |
+| `trigger` | `cascade` when `targetLevel > 0` (embeddings promoted into higher levels); `manual` when `targetLevel == 0` (confined L0 write). Renamed from `forced` in issue #113 to match the public `CompactionEvent.Trigger.manual` enum case. |
 | `output_segments` | Always `1` — the current implementation produces exactly one output generation per flush |
 | `output_bytes` | `m × dims × 4` — ledger row count (verified equal to `total`) times Float32 byte size |
 | `elapsed_ms` | Wall-clock milliseconds from `[Compact] started` to the terminal event, using `Date()` |
