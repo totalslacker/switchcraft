@@ -37,23 +37,29 @@ public actor SwitchcraftStore {
 
     private var isShutDown: Bool = false
 
-    /// Called once per compaction that produces at least one output generation.
+    private var onCompactionEvent: (@Sendable (CompactionEvent) async -> Void)?
+
+    /// Register or replace the compaction event callback.
     ///
-    /// The callback is invoked from the `SwitchcraftStore` actor after the
-    /// flush completes. Fields on the delivered `CompactionEvent` reflect
-    /// the final post-recovery state (see ADR 030 and ADR 032): if the
-    /// mid-operation divergence recovery absorbed additional generations,
-    /// `inputBytes` and `inputSegments` will be larger than the initial
-    /// cascade-walk estimates.
+    /// The callback fires once per compaction that produces at least one output
+    /// generation, invoked from the `SwitchcraftStore` actor after the flush
+    /// completes. Fields on the delivered `CompactionEvent` reflect the final
+    /// post-recovery state (see ADR 030 and ADR 032): if mid-operation
+    /// divergence recovery absorbed additional generations, `inputBytes` and
+    /// `inputSegments` will be larger than the initial cascade-walk estimates.
     ///
-    /// The callback does **not** fire for no-op flushes (flush called when
-    /// the L0 buffer is empty and no cascade is triggered).
+    /// The callback does **not** fire for no-op flushes (flush called when the
+    /// L0 buffer is empty and no cascade is triggered).
+    ///
+    /// Pass `nil` to clear a previously registered callback.
     ///
     /// > Warning: Do not call store methods that themselves trigger a flush
     /// > (e.g. `index()`) from within this callback. Doing so is safe (calls
     /// > queue behind the current actor turn via Swift actor re-entrancy), but
     /// > can cause unexpected recursive compaction bursts.
-    public var onCompactionEvent: (@Sendable (CompactionEvent) async -> Void)?
+    public func setOnCompactionEvent(_ callback: (@Sendable (CompactionEvent) async -> Void)?) {
+        onCompactionEvent = callback
+    }
 
     // Tracks chunkIDs passed to `indexer.add()` since the last flush.
     // Guards against double-buffering when a pending-but-unflushed chunk
