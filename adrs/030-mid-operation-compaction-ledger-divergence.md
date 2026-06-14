@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-06-13
-**Refs:** [ADR 004](004-lsm-cascade-policy.md), [ADR 024](024-rehydration-conflict-resolution.md), [ADR 029](029-orphan-chunk-detection-recovery.md)
+**Refs:** [ADR 004](004-lsm-cascade-policy.md), [ADR 024](024-rehydration-conflict-autorecovery.md), [ADR 029](029-orphan-chunk-detection-recovery.md)
 
 ---
 
