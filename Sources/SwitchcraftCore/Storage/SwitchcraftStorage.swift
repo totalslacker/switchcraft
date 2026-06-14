@@ -193,12 +193,12 @@ public protocol SwitchcraftStorage: Sendable {
     ///
     /// Called during graceful shutdown to ensure the database file is in a
     /// clean state before process exit.
-    func walCheckpoint() async throws
+    func walCheckpoint() async throws -> CheckpointResult
 }
 
 extension SwitchcraftStorage {
     public func configureSearchDeadline(_ ctx: SearchDeadlineContext?) async {}
-    public func walCheckpoint() async throws {}
+    public func walCheckpoint() async throws -> CheckpointResult { .complete }
     public func allChunks() async throws -> [ChunkRecord] { [] }
     public func chunkHasBucketAssignments(_ chunkID: Int64) async throws -> Bool { true }
 }
