@@ -364,6 +364,47 @@ public actor T5CoreMLEmbedder: Embedder {
         return try await _encodeImpl(text, minSurfaceFormLength: minSurfaceFormLength)
     }
 
+    /// Tear down and reload the CoreML model to flush the ANE IOSurface pool.
+    ///
+    /// This is an explicit Layer 0 pool flush complementing the internal Layer 2
+    /// (proactive periodic reload) and Layer 3 (reactive reload on IOSurface
+    /// failure) defences. See ADR 031 and ADR 021 for the full rationale.
+    ///
+    /// The method serialises with concurrent `encode()` calls via the same
+    /// `inFlight`/`waiters` re-entrancy guard used by `_encodeImpl`. In-flight
+    /// encodes complete first; encodes queued after this call wait until the
+    /// reload finishes.
+    ///
+    /// On success, `callCount` is reset to 0 so the next Layer 2 proactive
+    /// reload fires `reloadInterval` encodes after this explicit reset.
+    ///
+    /// On factory failure the error propagates to the caller; `self.predictor`
+    /// retains its old (stale) reference and queued `encode()` calls resume
+    /// against it.
+    public func resetState() async throws {
+        // Re-entrancy guard: same pattern as `_encodeImpl`.
+        if inFlight {
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                waiters.append(cont)
+            }
+        }
+        inFlight = true
+        defer {
+            if let next = waiters.first {
+                waiters = Array(waiters.dropFirst())
+                inFlight = false
+                next.resume()
+            } else {
+                inFlight = false
+            }
+        }
+
+        let newPredictor = try predictorFactory()
+        self.predictor = newPredictor
+        self.callCount = 0
+        coreMLLogger.info("T5CoreMLEmbedder: resetState() completed — IOSurface pool flushed, callCount reset to 0")
+    }
+
     // MARK: - Private helpers
 
     /// Shared implementation for `encode` and `encodeQuery`. Contains the
