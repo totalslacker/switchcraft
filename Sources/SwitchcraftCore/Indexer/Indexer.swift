@@ -88,7 +88,7 @@ public actor Indexer {
     /// yielded `CheckedContinuation<_, any Error>`. The `Swift.` prefix
     /// is required because the unqualified `Error` would resolve to the
     /// nested `Indexer.Error` enum in this scope.
-    private var flushWaiters: [CheckedContinuation<Void, any Swift.Error>] = []
+    private var flushWaiters: [CheckedContinuation<CompactionEvent?, any Swift.Error>] = []
 
     // MARK: - Init
 
@@ -438,7 +438,7 @@ public actor Indexer {
         // leader would then see m > expected and throw
         // `Error.ledgerOutOfSync`. Same waiter pattern as `flush()`.
         while flushInProgress {
-            try await withCheckedThrowingContinuation { c in
+            _ = try await withCheckedThrowingContinuation { (c: CheckedContinuation<CompactionEvent?, any Swift.Error>) in
                 flushWaiters.append(c)
             }
         }
@@ -496,18 +496,19 @@ public actor Indexer {
     /// callers return immediately without taking the leader/waiter slow
     /// path. (When a flush is in flight, even pending=0 callers wait,
     /// because the in-flight flush is exactly the one their data needs.)
-    public func flush() async throws {
+    @discardableResult
+    public func flush() async throws -> CompactionEvent? {
         // Fast path: nothing to flush AND no in-flight flush.
-        if pendingCount == 0 && !flushInProgress { return }
+        if pendingCount == 0 && !flushInProgress { return nil }
 
         // If a leader is already running, queue and wait for its result.
         // The leader rethrows its error to every waiter; on success
-        // every waiter resumes with `()` and returns.
+        // every waiter resumes with `nil` and returns.
         if flushInProgress {
-            try await withCheckedThrowingContinuation { c in
+            _ = try await withCheckedThrowingContinuation { (c: CheckedContinuation<CompactionEvent?, any Swift.Error>) in
                 flushWaiters.append(c)
             }
-            return
+            return nil
         }
 
         // Re-check the empty-pending guard now that we know we are the
@@ -519,14 +520,15 @@ public actor Indexer {
               pendingMinChunkID != nil,
               pendingMaxChunkID != nil
         else {
-            return
+            return nil
         }
 
         // Become the leader. Run the body; on completion (success or
         // throw), drain the waiter list with the same outcome.
         flushInProgress = true
+        let event: CompactionEvent
         do {
-            try await performFlush()
+            event = try await performFlush()
         } catch {
             let waiters = flushWaiters
             flushWaiters.removeAll()
@@ -537,18 +539,20 @@ public actor Indexer {
         let waiters = flushWaiters
         flushWaiters.removeAll()
         flushInProgress = false
-        for w in waiters { w.resume(returning: ()) }
+        for w in waiters { w.resume(returning: nil) }
+        return event
     }
 
     /// Body of the flush operation. Must only be invoked by `flush()`,
     /// which holds the `flushInProgress` leader guard. Concurrent calls
     /// to this method would re-introduce the race documented on `flush()`.
-    private func performFlush() async throws {
+    private func performFlush() async throws -> CompactionEvent {
         guard pendingCount > 0, let dims = self.dims,
               let pendingMin = pendingMinChunkID,
               let pendingMax = pendingMaxChunkID
         else {
-            return
+            // flush() always guards these preconditions before calling performFlush().
+            fatalError("performFlush() called without pending data — invariant violated in flush()")
         }
         let pending = pendingCount
 
@@ -586,7 +590,7 @@ public actor Indexer {
 
         let inputSegments = mergedGens.count + 1
         let inputBytes = total * dims * 4
-        let trigger = targetLevel > 0 ? "cascade" : "forced"
+        let trigger = targetLevel > 0 ? "cascade" : "manual"
         let compactStart = Date()
         indexerLogger.info("[Compact] started: input_segments=\(inputSegments, privacy: .public) input_bytes=\(inputBytes, privacy: .public) trigger=\(trigger, privacy: .public)")
         do {
@@ -666,6 +670,12 @@ public actor Indexer {
             }
             indexerLogger.info("[Compact] self-recovered: extended to \(mergedGens.count, privacy: .public) merged gens, targetLevel=\(targetLevel, privacy: .public), total=\(total, privacy: .public)")
         }
+
+        // Compute final post-recovery values for the CompactionEvent (ADR 030:
+        // self-recovery may have appended to mergedGens and incremented total).
+        let finalInputSegments = mergedGens.count + 1
+        let finalInputBytes = UInt64(total * dims * 4)
+        let finalTrigger: CompactionEvent.Trigger = targetLevel > 0 ? .cascade : .manual
 
         // 4. Build the per-chunk sqrt-sample training set, matching
         // Witchcraft's `sample_embeddings_for_kmeans`.
@@ -786,7 +796,13 @@ public actor Indexer {
         pendingMaxChunkID = nil
         pendingCount = 0
         let outputBytes = m * dims * 4
-        indexerLogger.info("[Compact] finished: input_segments=\(inputSegments, privacy: .public) output_segments=\(1, privacy: .public) input_bytes=\(inputBytes, privacy: .public) output_bytes=\(outputBytes, privacy: .public) elapsed_ms=\(Int(Date().timeIntervalSince(compactStart) * 1000), privacy: .public)")
+        indexerLogger.info("[Compact] finished: input_segments=\(finalInputSegments, privacy: .public) output_segments=\(1, privacy: .public) input_bytes=\(finalInputBytes, privacy: .public) output_bytes=\(outputBytes, privacy: .public) elapsed_ms=\(Int(Date().timeIntervalSince(compactStart) * 1000), privacy: .public)")
+        return CompactionEvent(
+            inputBytes: finalInputBytes,
+            trigger: finalTrigger,
+            inputSegments: finalInputSegments,
+            startedAt: compactStart
+        )
         } catch is CancellationError {
             let elapsedMs = Int(Date().timeIntervalSince(compactStart) * 1000)
             indexerLogger.info("[Compact] cancelled: processed_segments=\(0, privacy: .public)/\(inputSegments, privacy: .public) elapsed_ms=\(elapsedMs, privacy: .public)")
