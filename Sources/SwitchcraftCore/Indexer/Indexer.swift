@@ -578,7 +578,7 @@ public actor Indexer {
         // chunk` — equivalent to "pending range ∪ ranges of merged gens".
         var minChunkID = pendingMin
         var maxChunkID = pendingMax
-        let mergedGens = allGens.filter { $0.level <= targetLevel }
+        var mergedGens = allGens.filter { $0.level <= targetLevel }
         for g in mergedGens {
             minChunkID = min(minChunkID, g.minChunkID)
             maxChunkID = max(maxChunkID, g.maxChunkID)
@@ -603,7 +603,7 @@ public actor Indexer {
         rowChunkIDs.reserveCapacity(total)
         var rowTokenOffsets: [UInt32] = []
         rowTokenOffsets.reserveCapacity(total)
-        let sortedChunkIDs = ledger.keys
+        var sortedChunkIDs = ledger.keys
             .filter { $0 >= minChunkID && $0 <= maxChunkID }
             .sorted()
         for chunkID in sortedChunkIDs {
@@ -614,9 +614,57 @@ public actor Indexer {
                 rowTokenOffsets.append(UInt32(idx))
             }
         }
-        let m = rowChunkIDs.count
+        var m = rowChunkIDs.count
         if m != total {
-            throw Error.ledgerOutOfSync(ledgerRows: m, expected: total)
+            // Mid-operation ledger–storage divergence: the cascade walk's
+            // chunk-ID range swept in rows from higher-level gens not included
+            // in mergedGens (ADR 030). This happens when an add() workload
+            // re-buffers embeddings for chunkIDs already rehydrated from a
+            // higher-level gen, making the ledger count exceed what the storage
+            // generation counters expected.
+            //
+            // Self-recovery: identify surprise gens (at levels above targetLevel
+            // whose chunk-ID ranges overlap [minChunkID..maxChunkID]), absorb
+            // them into mergedGens, extend the range, and re-collect the ledger.
+            let mergedGenIDs = Set(mergedGens.map { $0.id })
+            let surpriseGens = allGens.filter { g in
+                !mergedGenIDs.contains(g.id) &&
+                g.minChunkID <= maxChunkID &&
+                g.maxChunkID >= minChunkID
+            }
+            guard !surpriseGens.isEmpty else {
+                throw Error.ledgerOutOfSync(ledgerRows: m, expected: total)
+            }
+            indexerLogger.warning("[Compact] mid-operation ledger divergence detected (ledger=\(m, privacy: .public) expected=\(total, privacy: .public)); absorbing \(surpriseGens.count, privacy: .public) surprise gen(s) — see ADR 030")
+            mergedGens.append(contentsOf: surpriseGens)
+            for g in surpriseGens {
+                minChunkID = min(minChunkID, g.minChunkID)
+                maxChunkID = max(maxChunkID, g.maxChunkID)
+                total += g.numEmbeddings
+                targetLevel = max(targetLevel, g.level)
+            }
+            allFlat.removeAll(keepingCapacity: true)
+            allFlat.reserveCapacity(total * dims)
+            rowChunkIDs.removeAll(keepingCapacity: true)
+            rowChunkIDs.reserveCapacity(total)
+            rowTokenOffsets.removeAll(keepingCapacity: true)
+            rowTokenOffsets.reserveCapacity(total)
+            sortedChunkIDs = ledger.keys
+                .filter { $0 >= minChunkID && $0 <= maxChunkID }
+                .sorted()
+            for chunkID in sortedChunkIDs {
+                let tokens = ledger[chunkID]!
+                for (idx, row) in tokens.enumerated() {
+                    allFlat.append(contentsOf: row)
+                    rowChunkIDs.append(chunkID)
+                    rowTokenOffsets.append(UInt32(idx))
+                }
+            }
+            m = rowChunkIDs.count
+            if m != total {
+                throw Error.ledgerOutOfSync(ledgerRows: m, expected: total)
+            }
+            indexerLogger.info("[Compact] self-recovered: extended to \(mergedGens.count, privacy: .public) merged gens, targetLevel=\(targetLevel, privacy: .public), total=\(total, privacy: .public)")
         }
 
         // 4. Build the per-chunk sqrt-sample training set, matching
