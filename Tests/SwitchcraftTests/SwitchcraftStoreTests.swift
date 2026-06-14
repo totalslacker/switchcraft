@@ -351,6 +351,91 @@ struct SwitchcraftStoreTests {
         }
     }
 
+    // MARK: - WAL checkpoint bounds regression
+
+    /// Verifies that shutdown() keeps the WAL file bounded across multiple
+    /// open/write/shutdown cycles, and that walCheckpoint() flushes pending
+    /// writes before checkpointing (durability invariant).
+    @Test("WAL file stays bounded across multiple shutdown/reopen cycles")
+    func testWALBoundsAcrossShutdownCycles() async throws {
+        let (dbPath, cleanupDB) = Self.makeTempDatabasePath()
+        let walPath = dbPath + "-wal"
+        let shmPath = dbPath + "-shm"
+        defer {
+            cleanupDB()
+            try? FileManager.default.removeItem(atPath: walPath)
+            try? FileManager.default.removeItem(atPath: shmPath)
+        }
+
+        func walFileSize() -> Int {
+            (try? FileManager.default.attributesOfItem(atPath: walPath)[.size] as? Int) ?? 0
+        }
+
+        let batchCount = 4
+        let batchSize  = 5
+
+        // Measure WAL size after one batch of writes but BEFORE shutdown().
+        // This is the single-batch baseline; with shutdown() checkpointing the
+        // WAL after each cycle, the N-th batch's pre-shutdown WAL size should
+        // be approximately the same — not N times larger.
+        var singleBatchWALSize = 0
+        for batch in 0..<batchCount {
+            let store = try await SwitchcraftStore.sqlite(
+                databasePath: dbPath,
+                embedder: MockEmbedder(dims: 32)
+            )
+            for i in 0..<batchSize {
+                try await store.add(
+                    id: "batch-\(batch)-doc-\(i)",
+                    body: "batch \(batch) document \(i) content for WAL bounds test"
+                )
+            }
+            // Capture baseline AFTER writes, BEFORE checkpoint-on-shutdown.
+            if batch == 0 {
+                singleBatchWALSize = walFileSize()
+                #expect(singleBatchWALSize > 0, "WAL should be non-empty after first batch")
+            }
+            try await store.shutdown()
+        }
+
+        // After the last batch's shutdown(), the WAL should have been truncated
+        // back to a bounded size (≤ 2× one-batch baseline, not N× it).
+        // If shutdown() were NOT checkpointing, the WAL would grow to
+        // ≈ batchCount × singleBatchWALSize.
+        let finalWALSize = walFileSize()
+        #expect(
+            finalWALSize <= 2 * singleBatchWALSize,
+            "WAL size should stay bounded across multiple shutdown/reopen cycles"
+        )
+
+        // walCheckpoint() durability invariant: add a doc, then explicitly
+        // checkpoint; the write must survive (be readable through a fresh store).
+        let checkpointStore = try await SwitchcraftStore.sqlite(
+            databasePath: dbPath,
+            embedder: MockEmbedder(dims: 32)
+        )
+        try await checkpointStore.add(
+            id: "checkpoint-doc",
+            body: "document added before explicit walCheckpoint call"
+        )
+        let result = try await checkpointStore.walCheckpoint()
+        #expect(result == .complete, "explicit walCheckpoint() should return .complete")
+        try await checkpointStore.shutdown()
+
+        // A fresh store must be able to read the doc added before the checkpoint.
+        let verifyStore = try await SwitchcraftStore.sqlite(
+            databasePath: dbPath,
+            embedder: MockEmbedder(dims: 32)
+        )
+        let count = try await verifyStore.documentCount()
+        let expectedCount = batchCount * batchSize + 1
+        #expect(
+            count == expectedCount,
+            "all documents should be readable after explicit walCheckpoint"
+        )
+        try await verifyStore.shutdown()
+    }
+
     // MARK: - End-to-end with the real T5/CoreML embedder
 
 #if canImport(CoreML)
