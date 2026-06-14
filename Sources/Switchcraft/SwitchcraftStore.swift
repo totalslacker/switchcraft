@@ -36,6 +36,25 @@ public actor SwitchcraftStore {
     public let config: StoreConfig
 
     private var isShutDown: Bool = false
+
+    /// Called once per compaction that produces at least one output generation.
+    ///
+    /// The callback is invoked from the `SwitchcraftStore` actor after the
+    /// flush completes. Fields on the delivered `CompactionEvent` reflect
+    /// the final post-recovery state (see ADR 030 and ADR 032): if the
+    /// mid-operation divergence recovery absorbed additional generations,
+    /// `inputBytes` and `inputSegments` will be larger than the initial
+    /// cascade-walk estimates.
+    ///
+    /// The callback does **not** fire for no-op flushes (flush called when
+    /// the L0 buffer is empty and no cascade is triggered).
+    ///
+    /// > Warning: Do not call store methods that themselves trigger a flush
+    /// > (e.g. `index()`) from within this callback. Doing so is safe (calls
+    /// > queue behind the current actor turn via Swift actor re-entrancy), but
+    /// > can cause unexpected recursive compaction bursts.
+    public var onCompactionEvent: (@Sendable (CompactionEvent) async -> Void)?
+
     // Tracks chunkIDs passed to `indexer.add()` since the last flush.
     // Guards against double-buffering when a pending-but-unflushed chunk
     // is re-added with matching content (R2 of issue #120).
@@ -510,8 +529,11 @@ public actor SwitchcraftStore {
     }
 
     private func flushAndClearPending() async throws {
-        try await indexer.flush()
+        let event = try await indexer.flush()
         pendingChunkIDs.removeAll()
+        if let event {
+            await onCompactionEvent?(event)
+        }
     }
 
     /// SHA-256 of the body's UTF-8 bytes, hex-encoded. Used as the chunk
