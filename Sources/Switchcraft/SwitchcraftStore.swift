@@ -132,6 +132,13 @@ public actor SwitchcraftStore {
     /// See ADR 029 for the full orphan failure-mode analysis and recovery
     /// contract.
     ///
+    /// - Note: **Bulk-indexing callers** (e.g. indexing thousands of documents
+    ///   in a single process) should call `embedder.resetState()` periodically
+    ///   between batches to release the ANE IOSurface pool and prevent
+    ///   throughput degradation. The store does not expose the embedder
+    ///   directly — callers hold the `Embedder` reference they supplied at
+    ///   `SwitchcraftStore.init` and call `resetState()` on it. See ADR 031.
+    ///
     /// - Parameters:
     ///   - id: caller-supplied document identifier (UUID, slug, etc.).
     ///   - date: date associated with the document. Defaults to `now`.
