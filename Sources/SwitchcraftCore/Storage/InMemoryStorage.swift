@@ -18,9 +18,9 @@ public actor InMemoryStorage: SwitchcraftStorage {
     private var chunksByID: [Int64: ChunkRecord] = [:]
     private var generations: [Int64: GenerationRecord] = [:]
     private var bucketsByGeneration: [Int64: [BucketRecord]] = [:]
-    // Cache of chunk IDs that appear in at least one bucket blob.
-    // nil = invalid (needs rebuild on next chunkHasBucketAssignments call).
-    private var indexedChunkIDsCache: Set<Int64>? = []
+    // Cache mapping chunkID → total (chunkID, tokenOffset) pair count across all bucket blobs.
+    // nil = invalid (needs rebuild on next chunkBucketRefCount call).
+    private var indexedChunkIDsCache: [Int64: Int]? = [:]
 
     private var nextChunkID: Int64 = 1
     private var nextGenerationID: Int64 = 1
@@ -48,7 +48,7 @@ public actor InMemoryStorage: SwitchcraftStorage {
         chunksByID.removeAll()
         generations.removeAll()
         bucketsByGeneration.removeAll()
-        indexedChunkIDsCache = []
+        indexedChunkIDsCache = [:]
         nextChunkID = 1
         nextGenerationID = 1
         nextBucketID = 1
@@ -114,19 +114,19 @@ public actor InMemoryStorage: SwitchcraftStorage {
         Array(chunksByID.values)
     }
 
-    public func chunkHasBucketAssignments(_ chunkID: Int64) async throws -> Bool {
+    public func chunkBucketRefCount(_ chunkID: Int64) async throws -> Int {
         if indexedChunkIDsCache == nil {
             // Cache is invalid; rebuild from all stored bucket blobs.
-            var ids = Set<Int64>()
+            var counts: [Int64: Int] = [:]
             for buckets in bucketsByGeneration.values {
                 for bucket in buckets {
                     let pairs = try IndicesCodec.decode(bucket.indices)
-                    for pair in pairs { ids.insert(Int64(pair.chunkID)) }
+                    for pair in pairs { counts[Int64(pair.chunkID), default: 0] += 1 }
                 }
             }
-            indexedChunkIDsCache = ids
+            indexedChunkIDsCache = counts
         }
-        return indexedChunkIDsCache!.contains(chunkID)
+        return indexedChunkIDsCache![chunkID] ?? 0
     }
 
     // MARK: - Generations

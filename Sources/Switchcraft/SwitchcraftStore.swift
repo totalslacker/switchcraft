@@ -143,15 +143,17 @@ public actor SwitchcraftStore {
     ///    `indexer.add()` in this store's lifetime but not yet flushed, skip
     ///    `indexer.add()` — it is already buffered. Double-buffering the same
     ///    chunkID violates the Indexer's single-reference invariant.
-    /// 2. **Indexed (R3):** if the existing chunk has bucket assignments in
-    ///    committed storage, skip `indexer.add()` — this is the normal,
-    ///    already-indexed dedup case.
-    /// 3. **Orphan (R1):** if the existing chunk has *no* bucket assignments
-    ///    and is not pending, call `indexer.add()` with the freshly computed
-    ///    embeddings to recover it. This handles the permanent-invisibility
-    ///    failure mode where `storage.upsertChunk()` succeeded but a
-    ///    subsequent crash or error prevented `indexer.add()` from running.
-    ///    The recovery is always-on; no opt-in flag is required.
+    /// 2. **Indexed (R3):** if the existing chunk's committed bucket reference
+    ///    count equals its expected token count, skip `indexer.add()` — this
+    ///    is the normal, fully-indexed dedup case.
+    /// 3. **Incomplete (R1):** if the existing chunk has fewer bucket refs
+    ///    than its expected token count (including zero), and is not pending,
+    ///    clear any stale rehydrated ledger rows via `indexer.removeFromLedger()`
+    ///    and call `indexer.add()` with the freshly computed embeddings to
+    ///    recover it. This handles both full orphans (zero refs, caused by a
+    ///    crash between `upsertChunk` and `indexer.add()`) and partial-indexing
+    ///    anomalies (some refs but not all). The recovery is always-on; no
+    ///    opt-in flag is required.
     ///
     /// Use `SwitchcraftStore.findOrphanedChunks()` to enumerate all orphans
     /// already present in storage that pre-date this fix.
@@ -218,12 +220,15 @@ public actor SwitchcraftStore {
         let chunkID: Int64
         if let existing {
             chunkID = existing.id
+            let expectedRefs = existing.counts.reduce(0, +)
             if pendingChunkIDs.contains(chunkID) {
                 // R2: already buffered in the indexer ledger — skip.
-            } else if try await storage.chunkHasBucketAssignments(chunkID) {
-                // R3: fully indexed — existing dedup behaviour, skip.
+            } else if try await storage.chunkBucketRefCount(chunkID) >= expectedRefs {
+                // R3: fully indexed (actualRefs == expectedTokenCount) — skip.
             } else if tokenCount > 0 {
-                // R1: orphan — no bucket assignments, re-buffer to recover.
+                // R1: incomplete — zero or partial bucket refs; clear stale
+                // rehydrated ledger rows then re-buffer to recover.
+                try await indexer.removeFromLedger(chunkID)
                 try await indexer.add(chunkID: chunkID, embeddings: embeddings, dims: dims)
                 pendingChunkIDs.insert(chunkID)
             }

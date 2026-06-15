@@ -140,8 +140,8 @@ actor SQLiteReaderActor {
         return rows
     }
 
-    func chunkHasBucketAssignments(_ chunkID: Int64) throws -> Bool {
-        guard let u32 = UInt32(exactly: chunkID) else { return false }
+    func chunkBucketRefCount(_ chunkID: Int64) throws -> Int {
+        guard let u32 = UInt32(exactly: chunkID) else { return 0 }
         let conn = try requireConnection()
 
         // Fast path: check whether any generation's range covers this chunkID.
@@ -156,9 +156,10 @@ actor SQLiteReaderActor {
         while try rangeStmt.step() {
             generationIDs.append(rangeStmt.columnInt64(0))
         }
-        if generationIDs.isEmpty { return false }
+        if generationIDs.isEmpty { return 0 }
 
-        // Slow path: decode bucket blobs for matching generations, short-circuiting on first hit.
+        // Slow path: decode all blobs for matching generations and accumulate total pair count.
+        var total = 0
         for genID in generationIDs {
             let bucketStmt = try conn.prepare("""
                 SELECT indices FROM bucket WHERE generation_id = ?
@@ -167,10 +168,10 @@ actor SQLiteReaderActor {
             while try bucketStmt.step() {
                 let blob = bucketStmt.columnBlob(0)
                 let pairs = try IndicesCodec.decode(blob)
-                if pairs.contains(where: { $0.chunkID == u32 }) { return true }
+                total += pairs.filter { $0.chunkID == u32 }.count
             }
         }
-        return false
+        return total
     }
 
     // MARK: - Generations

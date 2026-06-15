@@ -53,7 +53,7 @@ public enum StorageConformance {
         try await runFullTextTitleWeighting(storage)
 
         try await runAllChunks(storage)
-        try await runChunkHasBucketAssignments(storage)
+        try await runChunkBucketRefCount(storage)
 
         try await storage.close()
     }
@@ -487,7 +487,7 @@ public enum StorageConformance {
         }
     }
 
-    // MARK: - allChunks / chunkHasBucketAssignments
+    // MARK: - allChunks / chunkBucketRefCount
 
     static func runAllChunks(_ storage: any SwitchcraftStorage) async throws {
         try await storage.clear()
@@ -510,7 +510,7 @@ public enum StorageConformance {
         #expect(hashes.contains("all-h2"))
     }
 
-    static func runChunkHasBucketAssignments(_ storage: any SwitchcraftStorage) async throws {
+    static func runChunkBucketRefCount(_ storage: any SwitchcraftStorage) async throws {
         try await storage.clear()
 
         // Chunk with no bucket assignment — orphan.
@@ -518,7 +518,7 @@ public enum StorageConformance {
             ChunkRecord(hash: "bpa-orphan", model: "m", embeddings: Data(), counts: [1])
         )
 
-        // Chunk with a bucket assignment.
+        // Chunk with one bucket assignment.
         let indexed = try await storage.upsertChunk(
             ChunkRecord(hash: "bpa-indexed", model: "m", embeddings: Data(), counts: [1])
         )
@@ -543,10 +543,10 @@ public enum StorageConformance {
             )
         )
 
-        let orphanHas = try await storage.chunkHasBucketAssignments(orphan.id)
-        let indexedHas = try await storage.chunkHasBucketAssignments(indexed.id)
-        #expect(!orphanHas, "orphan chunk must have no bucket assignments")
-        #expect(indexedHas, "indexed chunk must have bucket assignments")
+        let orphanCount = try await storage.chunkBucketRefCount(orphan.id)
+        let indexedCount = try await storage.chunkBucketRefCount(indexed.id)
+        #expect(orphanCount == 0, "orphan chunk must have 0 bucket ref count")
+        #expect(indexedCount >= 1, "indexed chunk must have at least 1 bucket ref count")
     }
 
     // MARK: - Helpers

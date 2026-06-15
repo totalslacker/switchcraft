@@ -473,6 +473,32 @@ public actor Indexer {
         pendingCount += m
     }
 
+    /// Remove any ledger rows for the given chunkID.
+    ///
+    /// Called immediately before `add()` when recovering a partial orphan
+    /// (a chunk rehydrated from storage with some existing bucket refs).
+    /// Rehydration writes the partial rows into the ledger; calling this
+    /// before `add()` clears them so the fresh `add()` can append a clean,
+    /// complete set of rows rather than duplicating them.
+    ///
+    /// For full orphans (chunkID absent from the ledger after rehydration)
+    /// this is a no-op. Includes the same flush-waiter gate as `add()` to
+    /// avoid racing a concurrent `performFlush()` mid-decode.
+    ///
+    /// `pendingCount` is NOT modified: the removed rows are always retained
+    /// or rehydrated rows (never pending), because the R2 pendingChunkIDs
+    /// guard prevents reaching this method for any chunk that is currently
+    /// pending. `pendingMin`/`pendingMax` are also left unchanged — a
+    /// slightly wider range causes no incorrect behaviour.
+    public func removeFromLedger(_ chunkID: Int64) async throws {
+        while flushInProgress {
+            _ = try await withCheckedThrowingContinuation { (c: CheckedContinuation<CompactionEvent?, any Swift.Error>) in
+                flushWaiters.append(c)
+            }
+        }
+        ledger.removeValue(forKey: chunkID)
+    }
+
     /// Drain any buffered embeddings into a new generation, cascading
     /// through higher levels as required by `IndexerConfig`. No-op when
     /// the buffer is empty.

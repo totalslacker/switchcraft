@@ -375,8 +375,8 @@ public actor SQLiteStorage: SwitchcraftStorage {
         }
     }
 
-    public func chunkHasBucketAssignments(_ chunkID: Int64) async throws -> Bool {
-        guard let u32 = UInt32(exactly: chunkID) else { return false }
+    public func chunkBucketRefCount(_ chunkID: Int64) async throws -> Int {
+        guard let u32 = UInt32(exactly: chunkID) else { return 0 }
         switch mode {
         case .closed:
             throw SQLiteError(code: 1, message: "storage is not open")
@@ -392,8 +392,9 @@ public actor SQLiteStorage: SwitchcraftStorage {
             while try rangeStmt.step() {
                 generationIDs.append(rangeStmt.columnInt64(0))
             }
-            if generationIDs.isEmpty { return false }
-            // Slow path: decode blobs.
+            if generationIDs.isEmpty { return 0 }
+            // Slow path: decode all blobs and accumulate total pair count.
+            var total = 0
             for genID in generationIDs {
                 let bucketStmt = try conn.prepare("""
                     SELECT indices FROM bucket WHERE generation_id = ?
@@ -402,12 +403,12 @@ public actor SQLiteStorage: SwitchcraftStorage {
                 while try bucketStmt.step() {
                     let blob = bucketStmt.columnBlob(0)
                     let pairs = try IndicesCodec.decode(blob)
-                    if pairs.contains(where: { $0.chunkID == u32 }) { return true }
+                    total += pairs.filter { $0.chunkID == u32 }.count
                 }
             }
-            return false
+            return total
         case .fileBacked(_, let reader):
-            return try await reader.chunkHasBucketAssignments(chunkID)
+            return try await reader.chunkBucketRefCount(chunkID)
         }
     }
 
