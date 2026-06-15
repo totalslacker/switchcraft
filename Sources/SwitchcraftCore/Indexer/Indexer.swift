@@ -74,6 +74,13 @@ public actor Indexer {
     private var pendingMaxChunkID: Int64?
     private var pendingCount: Int = 0
 
+    /// Accumulates the count of ledger rows removed by `removeFromLedger()`
+    /// since the last successful flush. The cascade walk in `performFlush()`
+    /// subtracts this from `pending` so that rehydrated rows cleared by the
+    /// R1 partial-orphan path don't inflate `total` and cause a false
+    /// `ledgerOutOfSync` (see ADR 029 amendment, issue #132).
+    private var removedFromLedgerCount: Int = 0
+
     /// True while the leader's `performFlush()` body is running. Concurrent
     /// `flush()` callers observe this and join `flushWaiters` instead of
     /// racing past the `pendingCount > 0` gate themselves. See `flush()`.
@@ -496,6 +503,7 @@ public actor Indexer {
                 flushWaiters.append(c)
             }
         }
+        removedFromLedgerCount += ledger[chunkID]?.count ?? 0
         ledger.removeValue(forKey: chunkID)
     }
 
@@ -581,13 +589,19 @@ public actor Indexer {
             fatalError("performFlush() called without pending data — invariant violated in flush()")
         }
         let pending = pendingCount
+        // Capture the count of rehydrated rows removed by removeFromLedger()
+        // since the last flush. The cascade walk subtracts these from `pending`
+        // so that the partial-orphan R1 path (which clears stale rehydrated
+        // rows and re-buffers them) doesn't cause `total` to overcount and
+        // produce a false ledgerOutOfSync (ADR 029 amendment, issue #132).
+        let capturedRemovedCount = removedFromLedgerCount
 
         let allGens = try await storage.generations()
 
         // 1. Cascade walk: pick the lowest level whose capacity holds
         // pending + the sum of embeddings already at that level (after
         // accumulating the lower levels merged in along the way).
-        var total = pending
+        var total = pending - capturedRemovedCount
         var targetLevel = 0
         let levelSums: [Int: Int] = Dictionary(grouping: allGens, by: { $0.level })
             .mapValues { $0.reduce(0) { $0 + $1.numEmbeddings } }
@@ -821,6 +835,7 @@ public actor Indexer {
         pendingMinChunkID = nil
         pendingMaxChunkID = nil
         pendingCount = 0
+        removedFromLedgerCount = 0
         let outputBytes = m * dims * 4
         indexerLogger.info("[Compact] finished: input_segments=\(finalInputSegments, privacy: .public) output_segments=\(1, privacy: .public) input_bytes=\(finalInputBytes, privacy: .public) output_bytes=\(outputBytes, privacy: .public) elapsed_ms=\(Int(Date().timeIntervalSince(compactStart) * 1000), privacy: .public)")
         return CompactionEvent(
@@ -853,6 +868,7 @@ public actor Indexer {
         pendingMinChunkID = nil
         pendingMaxChunkID = nil
         pendingCount = 0
+        removedFromLedgerCount = 0
     }
 
     // MARK: - Testing helpers
