@@ -186,3 +186,73 @@ it as "no assignment" would mask corruption and cause perpetual re-indexing.
 - `findOrphanedChunks()` is O(total_indexed_tokens) for any backend. It is a
   diagnostic API, not a hot path; a streaming alternative can be added in a
   future issue if corpus size warrants it.
+
+---
+
+## Amendment — issue #132: R1 path is now `add()`-safe end-to-end
+
+**Date:** 2026-06-15
+
+After PR #131 landed the `chunkBucketRefCount`-based R1 routing, calling
+`store.add()` for a partial orphan (0 < actualRefs < expectedTokenCount) after a
+process restart threw `Indexer.Error.ledgerOutOfSync`. This amendment documents
+the root cause and the fix.
+
+### Root cause
+
+After a process restart, `Indexer.init` rehydrates the in-memory ledger from
+existing bucket data. A partial orphan's generation has P bucket pairs
+(P < M = expectedTokenCount), so the ledger starts with P rows for that chunkID.
+
+When R1 fires:
+1. `indexer.removeFromLedger(chunkID)` removes the P rehydrated rows.
+2. `indexer.add(chunkID, M_embeddings)` adds M fresh rows; `pendingCount += M`.
+3. `performFlush()` cascade walk initialises `total = pendingCount = M`, then adds
+   `levelSums[0] = gen.numEmbeddings = P` → `total = M + P`.
+4. Ledger sweep yields `m = M` (only the M fresh rows remain).
+5. `m < total` with no surprise gens → `ledgerOutOfSync(ledgerRows: M, expected: M+P)`.
+
+The drift magnitude equals P — the rehydrated rows that `removeFromLedger` removed
+without informing the cascade walk.
+
+### Fix
+
+A new `private var removedFromLedgerCount: Int = 0` property accumulates the count
+of rows removed by `removeFromLedger()` since the last successful flush.
+`performFlush()` captures this value before the cascade walk and subtracts it from
+`pendingCount`:
+
+```swift
+var total = pending - capturedRemovedCount
+```
+
+This gives `total = M - P + levelSums[0] = M - P + P = M = m`. ✓
+
+`removedFromLedgerCount` is reset to 0 in step 12 (success path only) and in
+`clearIndex()`. On error it persists so that a retry flush uses the same correction.
+
+### Interaction with ADR 024 (step 3.5)
+
+[ADR 024](024-rehydration-conflict-autorecovery.md) step 3.5 (`rehydrateAutoRecover`)
+corrects stale `numEmbeddings` in storage to match the actual bucket pair count P
+before the ledger is populated. This ensures `gen.numEmbeddings = P` exactly, so
+`removedFromLedgerCount` equals the overcounting precisely. The fix is exact in
+`.autoRecover` mode (the production default). In `.throwError` mode, step 3.5 does
+not run; if a gen has stale `numEmbeddings ≠ P` (crash between gen insert and
+bucket inserts), residual drift may remain — a known, pre-existing limitation.
+
+### Relation to ADR 030
+
+[ADR 030](030-mid-operation-compaction-ledger-divergence.md) covers `m > total`
+(surprise gens at compaction boundaries). This amendment covers the orthogonal
+`m < total` case caused by R1 ledger removals. The two self-recovery mechanisms
+are additive and do not interfere.
+
+### Contract guarantee after this fix
+
+Calling `store.add(id:body:)` for all documents enumerated by
+`findOrphanedChunks()` — whether full orphans (`actualRefs == 0`) or partial
+orphans (`0 < actualRefs < expectedTokenCount`) — no longer throws
+`Indexer.Error.ledgerOutOfSync`, and does not increase the partial-chunk count.
+The `findOrphanedChunks()` → `store.add()` recovery pattern is now safe to run in
+a batch loop without per-document error handling for ledger drift.
