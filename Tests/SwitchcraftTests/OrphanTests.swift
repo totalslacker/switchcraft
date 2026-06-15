@@ -1,9 +1,11 @@
-// Tests for orphan chunk detection and recovery (issue #120).
+// Tests for orphan chunk detection and recovery (issues #120, #130).
 //
 // R4: a chunk inserted via upsertChunk() without indexer.add() is
 //     automatically recovered when store.add() is called with the same content.
 // R9: findOrphanedChunks() identifies orphans correctly and excludes
 //     properly-indexed chunks.
+// R6: a chunk with partial bucket assignments (0 < refs < expected) is
+//     detected by findOrphanedChunks() and recovered by re-adding the document.
 
 import Foundation
 import Testing
@@ -51,8 +53,8 @@ struct OrphanTests {
         // Verify the orphan has no bucket assignments before recovery.
         let chunk = try await storage.chunk(hash: hash)
         #expect(chunk != nil)
-        let hasBuckets = try await storage.chunkHasBucketAssignments(chunk!.id)
-        #expect(!hasBuckets, "orphan chunk must start with no bucket assignments")
+        let refCount = try await storage.chunkBucketRefCount(chunk!.id)
+        #expect(refCount == 0, "orphan chunk must start with no bucket assignments")
 
         // Call store.add() — the orphan detection path (R1) should fire.
         try await store.add(id: "orphan-doc", body: body)
@@ -154,6 +156,95 @@ struct OrphanTests {
         #expect(indexedChunk != nil)
         let foundIndexed = orphans.first(where: { $0.chunkID == indexedChunk!.id })
         #expect(foundIndexed == nil, "correctly indexed chunk must not appear in orphan list")
+
+        try await store.shutdown()
+    }
+
+    // MARK: - R6: partial-orphan recovery via add()
+
+    @Test("chunk with partial bucket assignments is recovered when store.add() is called with matching content")
+    func partialOrphanRecoveredOnAdd() async throws {
+        let dims = 32
+        let (store, storage) = try await Self.makeStoreWithStorage()
+
+        let body = "partial orphan test content"
+        // MockEmbedder splits on whitespace: 4 tokens.
+        let expectedTokenCount = body.split(whereSeparator: { $0.isWhitespace }).count
+
+        // 1. Index the document fully.
+        try await store.add(id: "partial-doc", body: body)
+        try await store.index()
+
+        // 2. Confirm fully indexed: no orphans.
+        let orphansBefore = try await store.findOrphanedChunks()
+        #expect(orphansBefore.isEmpty, "chunk must be fully indexed after first flush")
+
+        // 3. Retrieve chunk to get its ID.
+        let hash = SwitchcraftStore.contentHash(body)
+        let chunk = try await storage.chunk(hash: hash)
+        #expect(chunk != nil)
+        let chunkID = chunk!.id
+
+        // 4. Simulate partial indexing: delete all existing generations and
+        //    replace with one generation that has a single-pair bucket blob.
+        //    Use numEmbeddings=0 so the cascade walk's levelSums sees 0 for
+        //    this gen, keeping total == pending (= expectedTokenCount) on the
+        //    recovery flush and avoiding ledgerOutOfSync.
+        let existingGens = try await storage.generations()
+        for gen in existingGens {
+            try await storage.deleteGeneration(id: gen.id)
+        }
+        let partialGen = try await storage.insertGeneration(
+            GenerationRecord(
+                level: 0,
+                numEmbeddings: 0,
+                minChunkID: chunkID,
+                maxChunkID: chunkID,
+                created: Date()
+            )
+        )
+        let partialIndices = IndicesCodec.encode([
+            IndexPair(chunkID: UInt32(chunkID), tokenOffset: 0)
+        ])
+        // Center: a dummy dims-dimensional float vector (content irrelevant —
+        // the partial gen is merged and deleted on recovery flush).
+        let dummyCenter = Data(repeating: 0, count: dims * MemoryLayout<Float>.size)
+        _ = try await storage.insertBucket(
+            BucketRecord(
+                generationID: partialGen.id,
+                center: dummyCenter,
+                indices: partialIndices,
+                residuals: Data()
+            )
+        )
+
+        // 5. Verify findOrphanedChunks() detects the partial orphan.
+        let orphansPartial = try await store.findOrphanedChunks()
+        let partialOrphan = orphansPartial.first(where: { $0.chunkID == chunkID })
+        #expect(partialOrphan != nil, "partial orphan must be detected by findOrphanedChunks()")
+        if let po = partialOrphan {
+            #expect(po.bucketReferenceCount == 1,
+                    "partial orphan must have 1 bucket ref (from planted blob)")
+            #expect(po.expectedTokenCount == expectedTokenCount,
+                    "expectedTokenCount must equal the chunk's token count")
+            #expect(po.bucketReferenceCount < po.expectedTokenCount,
+                    "partial orphan must have fewer refs than expected")
+        }
+
+        // 6. Re-add the same document — the partial-recovery path (R1) must fire.
+        try await store.add(id: "partial-doc", body: body)
+
+        // 7. Flush: re-buffered embeddings are written to a new full generation.
+        try await store.index()
+
+        // 8. Verify fully indexed: no orphans.
+        let orphansAfter = try await store.findOrphanedChunks()
+        #expect(orphansAfter.isEmpty, "chunk must be fully indexed after recovery flush")
+
+        // 9. Verify bucket ref count equals expected token count.
+        let refCount = try await storage.chunkBucketRefCount(chunkID)
+        #expect(refCount == expectedTokenCount,
+                "bucket ref count must equal expected token count after recovery")
 
         try await store.shutdown()
     }

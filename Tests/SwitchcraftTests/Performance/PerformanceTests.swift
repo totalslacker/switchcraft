@@ -192,15 +192,16 @@ struct PerformanceTests {
                 "indexing throughput \(throughput) docs/s below 10 docs/s floor")
     }
 
-    // MARK: - R14: dedup-hit overhead of chunkHasBucketAssignments
+    // MARK: - R14: dedup-hit overhead of chunkBucketRefCount
 
-    /// Measures the per-call cost of the bucket-presence check introduced by
-    /// issue #120.  The check fires on every `add()` call whose content hash
-    /// matches an existing indexed chunk (the common dedup case).
+    /// Measures the per-call cost of the bucket-completeness check introduced by
+    /// issue #120 (updated to a count predicate in issue #130).  The check fires
+    /// on every `add()` call whose content hash matches an existing indexed chunk
+    /// (the common dedup case).
     ///
     /// Methodology: build a 200-doc corpus, flush to buckets, then re-add the
     /// same 200 bodies 5× each (1,000 calls total).  Every re-add hits the
-    /// R3 path (`chunkHasBucketAssignments` returns `true`, skip `indexer.add()`).
+    /// R3 path (`chunkBucketRefCount >= expectedTokenCount`, skip `indexer.add()`).
     ///
     /// Threshold: 100 ms for 1,000 dedup-hits (≤ 100 µs/call) — generous
     /// relative to InMemoryStorage's O(total_indexed_tokens) scan cost.

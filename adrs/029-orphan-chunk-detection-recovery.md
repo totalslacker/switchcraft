@@ -48,8 +48,8 @@ a three-way check before deciding whether to call `indexer.add()`:
 | Case | Condition | Action |
 |------|-----------|--------|
 | R2 — Pending | `pendingChunkIDs.contains(chunkID)` | Skip `indexer.add()` — already buffered in this store's lifetime, not yet flushed. Double-buffering the same chunkID violates the Indexer's single-reference invariant. |
-| R3 — Indexed | `storage.chunkHasBucketAssignments(chunkID) == true` | Skip `indexer.add()` — chunk is fully committed to the bucket index. |
-| R1 — Orphan | `chunkHasBucketAssignments == false` and not pending | Call `indexer.add()` with the freshly embedded vectors to re-buffer. Add to `pendingChunkIDs`. |
+| R3 — Indexed | `storage.chunkBucketRefCount(chunkID) >= existing.counts.reduce(0, +)` | Skip `indexer.add()` — chunk's committed bucket reference count equals its expected token count; fully indexed. |
+| R1 — Orphan or Partial | `actualRefs < expectedTokenCount` and not pending | Call `indexer.removeFromLedger(chunkID)` to clear any stale rehydrated rows, then call `indexer.add()` with the freshly embedded vectors to re-buffer. Add to `pendingChunkIDs`. Covers both `actualRefs == 0` (full orphan) and `0 < actualRefs < expectedTokenCount` (partial-indexing anomaly). |
 
 Recovery is **always-on**: no opt-in flag is needed. The only meaningful
 exception — the pending case — is already handled by R2.
@@ -91,9 +91,11 @@ without a second storage query.
 - `0 < bucketReferenceCount < expectedTokenCount` → partial-indexing anomaly.
 
 **Recovery:** re-add any document in `owningDocuments` through `store.add()`.
-`add()` detects the missing bucket assignments (R1) and re-buffers the
-embeddings; the next `store.search()` or `store.index()` call flushes them
-into the bucket index.
+`add()` detects incomplete indexing (R1: `actualRefs < expectedRefs`) for both
+full orphans (`actualRefs == 0`) and partial-indexing anomalies (`0 < actualRefs
+< expectedRefs`), clears any stale rehydrated ledger rows via
+`indexer.removeFromLedger()`, and re-buffers the embeddings; the next
+`store.search()` or `store.index()` call flushes them into the bucket index.
 
 ### (d) Always-on bucket-presence check — rationale
 
@@ -108,14 +110,17 @@ Alternatives considered:
    participant. Making it one would require significant Indexer API changes and
    cross-actor transaction semantics. Deferred.
 
-3. **Always-on bucket-presence check** (chosen): one storage call per dedup hit
-   on a chain of dedup hits. For the SQLite backend this is O(1) in the common
-   case (range check on `generation.min_chunk_id / max_chunk_id`), avoiding
-   BLOB decoding for genuinely-indexed chunks. For the in-memory backend it is
+3. **Always-on bucket-completeness check** (chosen): one storage call per dedup
+   hit on a chain of dedup hits. The check compares `chunkBucketRefCount()`
+   against `existing.counts.reduce(0, +)` to distinguish fully-indexed chunks
+   from partial-indexing anomalies and full orphans. For the SQLite backend the
+   fast-path range check (`generation.min_chunk_id / max_chunk_id`) eliminates
+   most BLOB decoding; the slow path decodes all blobs in matching generations
+   to accumulate the count. For the in-memory backend it is
    O(total_indexed_tokens) but InMemoryStorage is not a production path. The
    check is conservative: the default implementation in `SwitchcraftStorage`
-   returns `true` (assume indexed), so external conformers opt out of orphan
-   recovery rather than being forced to re-index on every `add()`.
+   returns `Int.max` (assume fully indexed), so external conformers opt out of
+   orphan recovery rather than being forced to re-index on every `add()`.
 
 ### (e) R2 guard — Store-side `pendingChunkIDs`
 
@@ -142,15 +147,16 @@ with the flush-waiter machinery; the responsibility split is natural since
 // Returns all chunk records. Default: [] (opt-out for external conformers).
 func allChunks() async throws -> [ChunkRecord]
 
-// Returns true if the chunk has any (chunkID, tokenOffset) pairs in bucket blobs.
-// Default: true (conservative — assume indexed; opt-out for external conformers).
-func chunkHasBucketAssignments(_ chunkID: Int64) async throws -> Bool
+// Returns the total (chunkID, tokenOffset) pair count for the chunk across all
+// committed bucket blobs. Default: Int.max (conservative — assume fully indexed;
+// opt-out for external conformers).
+func chunkBucketRefCount(_ chunkID: Int64) async throws -> Int
 ```
 
 Adding a required method to `SwitchcraftStorage` is source-breaking for
 external conformers. Both methods are supplied with safe defaults in a protocol
 extension: `allChunks()` returns `[]` (empty orphan scan) and
-`chunkHasBucketAssignments()` returns `true` (skip `indexer.add()` — orphan
+`chunkBucketRefCount()` returns `Int.max` (skip `indexer.add()` — orphan
 recovery is opt-out, not opt-in). This matches the precedent from
 `configureSearchDeadline` and `walCheckpoint`.
 
@@ -167,10 +173,14 @@ it as "no assignment" would mask corruption and cause perpetual re-indexing.
 - `findOrphanedChunks()` gives downstream consumers a stable API to enumerate
   existing orphans without reverse-engineering the `BucketRecord.indices` blob
   format.
-- The `chunkHasBucketAssignments()` call adds one storage round-trip per dedup
-  hit in `add()`. For the SQLite backend this is O(1) in the common case; for
-  InMemoryStorage it is O(total_indexed_tokens). A benchmark (R14) confirms
-  the overhead is below 100 µs/call on the InMemoryStorage path.
+- The `chunkBucketRefCount()` call adds one storage round-trip per dedup hit in
+  `add()`. For the SQLite backend it cannot short-circuit on first hit; it must
+  decode all blobs in matching generations to accumulate the count — O(k) blobs
+  where k ≈ 16√n centroids, compared to the previous O(1..k) short-circuit.
+  For InMemoryStorage it is O(total_indexed_tokens). A benchmark (R14) confirms
+  the overhead is below 100 µs/call on the InMemoryStorage path; the change is
+  on the dedup path only (one call per `add()` for existing chunks), not on the
+  search path.
 - External `SwitchcraftStorage` conformers continue to compile unmodified; they
   receive no orphan-recovery benefit until they implement the new methods.
 - `findOrphanedChunks()` is O(total_indexed_tokens) for any backend. It is a
