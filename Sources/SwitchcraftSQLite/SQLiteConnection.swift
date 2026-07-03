@@ -119,6 +119,12 @@ final class SQLiteConnection {
     var lastInsertRowID: Int64 {
         sqlite3_last_insert_rowid(handle)
     }
+
+    /// Number of rows changed by the most recently completed INSERT,
+    /// UPDATE, or DELETE statement on this connection.
+    var changes: Int {
+        Int(sqlite3_changes(handle))
+    }
 }
 
 /// Wraps a prepared statement. Resets bindings on each `bind(_:)`.

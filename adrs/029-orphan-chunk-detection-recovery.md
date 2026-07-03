@@ -256,3 +256,234 @@ orphans (`0 < actualRefs < expectedTokenCount`) — no longer throws
 `Indexer.Error.ledgerOutOfSync`, and does not increase the partial-chunk count.
 The `findOrphanedChunks()` → `store.add()` recovery pattern is now safe to run in
 a batch loop without per-document error handling for ledger drift.
+
+---
+
+## Amendment — issue #134: Vacuum / disk reclaim
+
+**Date:** 2026-07-03
+
+`findOrphanedChunks()` and its `add()`-based recovery path (§b–c above) handle
+chunks that have an owning document but are incompletely indexed. They are
+silent on the orthogonal case this amendment adds a fix for: chunks whose
+`hash` matches **no** `document.hash` at all — "abandoned" chunks, produced by
+natural re-indexing (content changes, old hash orphaned), by `store.remove(id:)`
+(which drops the document row but leaves the chunk and its bucket entries in
+place), or by bulk delete-then-readd workflows. These chunks can never appear
+in search results (no document points to them) but their tokens' Q4-encoded
+residuals remain in `bucket.residuals` BLOBs indefinitely, tying up disk. A
+production corpus reached ~8,200 abandoned chunks out of ~15,600 total chunk
+rows before this fix.
+
+### Contract
+
+```swift
+public func vacuum(maxBatch: Int? = nil) async throws -> VacuumResult
+
+public struct VacuumResult: Sendable, Equatable {
+    public let chunksRemoved: Int
+    public let bucketPairsRemoved: Int
+    public let approximateDiskReclaimed: Int64
+    public let generationsAffected: [Int64]
+    public let remainingCandidates: Int
+    public let checkpoint: CheckpointResult
+}
+```
+
+`vacuum()` flushes pending writes first (same contract as `walCheckpoint()`),
+computes `abandoned = allChunks().filter { !documentHashes().contains($0.hash) }`,
+processes at most `maxBatch` of them (all of them when `maxBatch` is `nil`),
+and returns. It is the **sole** public entry point for this operation — a
+narrower `removeAbandonedChunks(_ infos: [OrphanedChunkInfo])` form was
+considered and explicitly deferred (see "API shape" below).
+
+### Relationship to `findOrphanedChunks()`
+
+The two APIs share a detection-and-decode shape but apply opposite
+dispositions to disjoint sets of chunks:
+
+| | `findOrphanedChunks()` | `vacuum()` |
+|---|---|---|
+| Predicate | `bucketReferenceCount < expectedTokenCount` | `chunk.hash` not in any `document.hash` |
+| Targets | Incompletely-indexed chunks **with** an owning document | Chunks **without** any owning document |
+| Disposition | Recovery candidate — re-add via `store.add()` | Removal candidate — deleted outright |
+
+A chunk with an owning document is never removed by `vacuum()`, even if it is
+only partially indexed (requirement 13) — that is `findOrphanedChunks()`'s
+territory. Conversely, a fully-abandoned chunk is not a `findOrphanedChunks()`
+match unless it also happens to be under-indexed; `vacuum()` is the only path
+that removes it. Both APIs continue to operate independently and unchanged by
+each other's presence — `findOrphanedChunks()` needed no modification for this
+amendment.
+
+### Batch / looping semantics
+
+`vacuum(maxBatch: N)` processes at most `N` abandoned chunks in this call and
+returns — it does not internally loop through the full backlog.
+`VacuumResult.remainingCandidates` reports how many abandoned chunks this call
+left unprocessed (always `0` when `maxBatch` is `nil`). A consumer draining a
+large backlog calls `vacuum()` repeatedly until `remainingCandidates == 0`.
+Batches are taken by ascending chunk id for determinism, so repeated calls
+(including ones racing new abandonment) are idempotent: a chunk already deleted
+by a prior call is simply absent from the next call's candidate scan, and the
+end state of N bounded calls converges to the same result as one unbounded
+call (verified by `VacuumTests.vacuumBatchingAndLoopParity`).
+
+Rejected alternative: internal looping through the whole backlog in one call.
+This would make `vacuum()` an unbounded-duration operation the caller cannot
+interrupt or budget for — a bad fit for interactive workloads that need to
+yield between batches. Consumer-driven looping matches the batched
+orphan-recovery pattern this codebase already uses elsewhere.
+
+### Cascade-delete behavior
+
+If removing a chunk's `(chunkID, tokenOffset)` pairs leaves a bucket's
+`indices` blob with zero surviving pairs, that bucket row is deleted outright.
+If that leaves a generation with zero surviving buckets, the generation row is
+deleted too (cascade). Surviving generations (at least one bucket left) have
+`numEmbeddings` corrected to the post-removal pair count via a targeted
+`UPDATE`, not a full `replaceGeneration()` — this preserves the generation's
+id, matching the reasoning `updateGenerationEmbeddingCount` already documents
+for the ADR 024 rehydration-conflict path. `minChunkID`/`maxChunkID` are
+deliberately **not** narrowed on survivors, mirroring `Indexer.removeFromLedger()`'s
+existing rationale: a wider-than-necessary range is harmless, and narrowing it
+is unneeded complexity. `VacuumResult.generationsAffected` includes both
+partially-rewritten and fully-deleted generation ids.
+
+Half-cleanup (deleting empty buckets but leaving empty generations, or vice
+versa) was rejected as inconsistent: an empty container has zero query
+utility and only costs the search engine a lookup it can never satisfy.
+
+### New storage primitives
+
+Three new `SwitchcraftStorage` methods, all shipped with safe-default
+extensions per the ADR 029/033 precedent:
+
+```swift
+// Bulk set of document.hash values, for one-shot detection instead of one
+// storage round trip per chunk. Default: derived from documents(matching: .all).
+func documentHashes() async throws -> Set<String>
+
+// Atomically execute a pre-computed VacuumPlan (bucket updates/deletes,
+// generation deletes/count-updates, guarded chunk deletes). Returns the
+// number of chunk rows actually deleted. Default: no-op, returns 0.
+func applyVacuumPlan(_ plan: VacuumPlan) async throws -> Int
+
+// PRAGMA freelist_count × PRAGMA page_size for SQLite backends. Default: 0.
+func freeListByteCount() async throws -> Int64
+```
+
+`VacuumPlan` is a plain data type (chunk ids to delete, re-encoded bucket
+records to update, bucket/generation ids to delete outright, generation
+`numEmbeddings` corrections) built by a new pure `VacuumPlanBuilder` in the
+engine layer, mirroring `Indexer.rehydrateAutoRecover()`'s existing
+filter-and-re-encode shape for surviving bucket pairs. `applyVacuumPlan`
+executes the plan without any codec knowledge, keeping bucket-blob logic out
+of the storage layer per this package's design tenets. `VacuumPlanBuilder`
+range-prunes generations whose `[minChunkID, maxChunkID]` doesn't overlap the
+batch's abandoned-id range before ever fetching their buckets, turning the
+common case (abandoned ids clustered from a bulk delete) into O(chunks
+actually affected) rather than O(total indexed tokens) — the same fast-path
+principle `chunkBucketRefCount`'s SQLite range check already uses.
+
+The guarded chunk-row delete (`DELETE ... WHERE NOT EXISTS (SELECT 1 FROM
+document WHERE document.hash = chunk.hash)` in SQLite; an equivalent
+in-memory hash-membership check in `InMemoryStorage`) protects against a
+document racing back onto an abandoned chunk's hash between vacuum's
+detection scan and its write phase — the chunk row survives as a (now
+self-healing, via the existing `findOrphanedChunks()` → `add()` path)
+true-orphan rather than leaving a document pointing at a deleted row.
+`applyVacuumPlan` returns the actual deleted count so `VacuumResult.chunksRemoved`
+stays truthful even when the guard fires.
+
+### Ledger consistency — targeted invalidation, not full re-init
+
+Vacuum owns ledger consistency itself rather than depending on this ADR's
+own mid-add self-recovery (the R1 path, §b–c above) or ADR 030's
+mid-compaction self-recovery, both of which target different drift classes. A
+new `Indexer` method:
+
+```swift
+public func removeAbandonedFromLedger(_ chunkIDs: Set<Int64>) async throws
+```
+
+removes the ledger rows for exactly the chunk ids vacuum just deleted from
+storage, gated by the same `flushInProgress` waiter loop `add()` and
+`removeFromLedger()` already use. This was chosen over the
+originally-researched approach of reassigning `self.indexer` via a fresh
+`Indexer.init` to force full rehydration, because that approach reintroduces
+an ADR-030-class race: a concurrent `add()` landing between vacuum's storage
+commit and the indexer reassignment would buffer into the old, about-to-be-discarded
+`Indexer` actor and silently lose data, and a rehydration failure after the
+storage transaction had already committed would leave the store in a new,
+previously-impossible partial state. `removeAbandonedFromLedger()` never swaps
+any actor reference, eliminating both failure classes by construction, and
+costs O(batch size) rather than O(all generations).
+
+`removeAbandonedFromLedger()` deliberately does **not** touch
+`removedFromLedgerCount` (the counter `removeFromLedger()` increments for the
+R1 clear-and-refill path, per the issue #132 amendment above).
+`removeFromLedger()`'s counter compensates the cascade walk for rows that were
+cleared and are about to be refilled by an immediately-following `add()` —
+storage still expects the full pre-clear count until the refill lands.
+Vacuum's case is a **true delete**: it already decremented the corresponding
+`generation.numEmbeddings` in storage for these exact chunk ids before calling
+this method, so ledger and storage stay in lockstep with no compensation
+needed. Incrementing `removedFromLedgerCount` here would double-subtract on
+the next flush and desync it. This distinction is spelled out here so a
+future reader doesn't try to "fix" this into using the same counter.
+
+### Idempotency
+
+Calling `vacuum()` on a clean store, or after a prior call's
+`remainingCandidates` reached `0`, returns an all-zero `VacuumResult`
+(`chunksRemoved`, `bucketPairsRemoved`, `approximateDiskReclaimed`,
+`generationsAffected` all zero/empty) with no write I/O and no checkpoint —
+the empty-batch case short-circuits before `applyVacuumPlan`/`walCheckpoint`
+are ever called.
+
+### `approximateDiskReclaimed` measurement contract
+
+Measured as `(freelist_count_after − freelist_count_before) × page_size`,
+sampled via `PRAGMA freelist_count`/`PRAGMA page_size` immediately before and
+after the vacuum call's write phase, clamped to a minimum of `0`. This
+reflects space returned to SQLite's internal free-list for reuse by future
+inserts — it does **not** reflect a reduction in on-disk file size, since
+`DELETE` + `wal_checkpoint(TRUNCATE)` does not return pages to the OS; the
+file only shrinks after a full `PRAGMA vacuum`, which is out of scope for this
+operation (it can require up to 2× the database size in temporary disk and is
+incompatible with `maxBatch` batching). A consumer wanting an actual file-size
+reduction should run `PRAGMA vacuum` themselves after looping `vacuum()` to
+`remainingCandidates == 0`. Always `0` for non-SQLite backends. Verified by
+`VacuumTests.vacuumFreelistAndFileSizeContract`, which also asserts
+`PRAGMA page_count × page_size` (file size) is unchanged immediately after
+`vacuum()`.
+
+### API shape — `vacuum()` only
+
+A narrower `removeAbandonedChunks(_ infos: [OrphanedChunkInfo])` form was
+considered and rejected for this issue: `vacuum()` is functionally equivalent
+to `removeAbandonedChunks(findOrphanedChunks().filter { $0.owningDocuments.isEmpty })`,
+and no consumer had asked for chunk-level filtering (by age, by hash, etc.).
+Shipping only the higher-level wrapper keeps the surface minimal; a
+`keepPredicate` closure on `vacuum()` or a standalone `removeAbandonedChunks(_:)`
+remain backward-compatible additions for a future issue if that need
+materializes.
+
+### Concurrency contract
+
+`vacuum()` requires no concurrent `add()`/`index()` calls against the same
+store from the same process — same class of caveat `clear()` already carries
+(non-atomic across `indexer.clearIndex()` + `storage.clear()`), extended here
+to same-process concurrent `Task`s rather than just other processes. The
+guarded chunk delete bounds the worst case of a violation to a self-healing
+true-orphan rather than data loss or corruption; building full cross-actor
+synchronization for a maintenance operation the issue itself frames as
+batch/consumer-driven was judged out of proportion to the risk.
+
+### Out of scope
+
+Auto-vacuum during `add()` (unpredictable latency), re-clustering/compaction
+of remaining sparse buckets, cross-process coordination, and full SQLite
+`PRAGMA vacuum` (file-size compaction) are all explicitly out of scope for
+this operation — see the issue's Scope section for the full list.

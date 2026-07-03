@@ -275,6 +275,22 @@ public actor SQLiteStorage: SwitchcraftStorage {
         }
     }
 
+    public func documentHashes() async throws -> Set<String> {
+        switch mode {
+        case .closed:
+            throw SQLiteError(code: 1, message: "storage is not open")
+        case .inMemory(let conn):
+            let stmt = try conn.prepare("SELECT DISTINCT hash FROM document")
+            var result = Set<String>()
+            while try stmt.step() {
+                result.insert(stmt.columnText(0))
+            }
+            return result
+        case .fileBacked(_, let reader):
+            return try await reader.documentHashes()
+        }
+    }
+
     // MARK: - Chunks
 
     public func upsertChunk(_ record: ChunkRecord) async throws -> ChunkRecord {
@@ -621,6 +637,70 @@ public actor SQLiteStorage: SwitchcraftStorage {
             } catch {
                 try translateIfInterrupt(error)
             }
+        }
+    }
+
+    // MARK: - Vacuum
+
+    public func applyVacuumPlan(_ plan: VacuumPlan) async throws -> Int {
+        switch mode {
+        case .closed:
+            throw SQLiteError(code: 1, message: "storage is not open")
+        case .inMemory(let conn):
+            return try conn.transaction {
+                for bucket in plan.bucketUpdates {
+                    let stmt = try conn.prepare("UPDATE bucket SET indices = ?, residuals = ? WHERE id = ?")
+                    try stmt.bind([.blob(bucket.indices), .blob(bucket.residuals), .int(bucket.id)])
+                    try stmt.step()
+                }
+                for bucketID in plan.bucketIDsToDelete {
+                    let stmt = try conn.prepare("DELETE FROM bucket WHERE id = ?")
+                    try stmt.bind([.int(bucketID)])
+                    try stmt.step()
+                }
+                for genID in plan.generationIDsToDelete {
+                    let stmt = try conn.prepare("DELETE FROM generation WHERE id = ?")
+                    try stmt.bind([.int(genID)])
+                    try stmt.step()
+                }
+                for (genID, count) in plan.generationEmbeddingCountUpdates {
+                    let stmt = try conn.prepare("UPDATE generation SET num_embeddings = ? WHERE id = ?")
+                    try stmt.bind([.int(Int64(count)), .int(genID)])
+                    try stmt.step()
+                }
+                var deletedCount = 0
+                for chunkID in plan.chunkIDsToDelete {
+                    let stmt = try conn.prepare("""
+                        DELETE FROM chunk
+                        WHERE id = ? AND NOT EXISTS (
+                            SELECT 1 FROM document WHERE document.hash = chunk.hash
+                        )
+                        """)
+                    try stmt.bind([.int(chunkID)])
+                    try stmt.step()
+                    deletedCount += conn.changes
+                }
+                return deletedCount
+            }
+        case .fileBacked(let writer, _):
+            return try await writer.applyVacuumPlan(plan)
+        }
+    }
+
+    public func freeListByteCount() async throws -> Int64 {
+        switch mode {
+        case .closed:
+            throw SQLiteError(code: 1, message: "storage is not open")
+        case .inMemory(let conn):
+            let freelistStmt = try conn.prepare("PRAGMA freelist_count")
+            guard try freelistStmt.step() else { return 0 }
+            let freelistCount = freelistStmt.columnInt64(0)
+            let pageSizeStmt = try conn.prepare("PRAGMA page_size")
+            guard try pageSizeStmt.step() else { return 0 }
+            let pageSize = pageSizeStmt.columnInt64(0)
+            return freelistCount * pageSize
+        case .fileBacked(let writer, _):
+            return try await writer.freeListByteCount()
         }
     }
 

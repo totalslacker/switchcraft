@@ -84,6 +84,10 @@ public actor InMemoryStorage: SwitchcraftStorage {
         Set(documents.keys)
     }
 
+    public func documentHashes() async throws -> Set<String> {
+        Set(documents.values.map { $0.hash })
+    }
+
     // MARK: - Chunks
 
     public func upsertChunk(_ chunk: ChunkRecord) async throws -> ChunkRecord {
@@ -195,6 +199,61 @@ public actor InMemoryStorage: SwitchcraftStorage {
 
     public func buckets(forGeneration generationID: Int64) async throws -> [BucketRecord] {
         bucketsByGeneration[generationID] ?? []
+    }
+
+    // MARK: - Vacuum
+
+    public func applyVacuumPlan(_ plan: VacuumPlan) async throws -> Int {
+        // Bucket updates: re-encoded indices/residuals for buckets that keep
+        // at least one surviving pair.
+        for updated in plan.bucketUpdates {
+            guard var buckets = bucketsByGeneration[updated.generationID],
+                  let idx = buckets.firstIndex(where: { $0.id == updated.id })
+            else { continue }
+            buckets[idx] = updated
+            bucketsByGeneration[updated.generationID] = buckets
+        }
+
+        // Bucket deletes: buckets left with zero surviving pairs whose
+        // generation is not itself being fully deleted.
+        if !plan.bucketIDsToDelete.isEmpty {
+            for (genID, buckets) in bucketsByGeneration {
+                let filtered = buckets.filter { !plan.bucketIDsToDelete.contains($0.id) }
+                if filtered.count != buckets.count {
+                    bucketsByGeneration[genID] = filtered
+                }
+            }
+        }
+
+        // Generation deletes cascade to their buckets.
+        for genID in plan.generationIDsToDelete {
+            generations.removeValue(forKey: genID)
+            bucketsByGeneration.removeValue(forKey: genID)
+        }
+
+        // Surviving generations' numEmbeddings corrections.
+        for (genID, count) in plan.generationEmbeddingCountUpdates {
+            generations[genID]?.numEmbeddings = count
+        }
+
+        // Guarded chunk deletes: only delete if no document currently
+        // references the chunk's hash (protects against a concurrent
+        // re-add racing the vacuum call).
+        let hashesInUse = Set(documents.values.map { $0.hash })
+        var deletedCount = 0
+        for chunkID in plan.chunkIDsToDelete {
+            guard let chunk = chunksByID[chunkID] else { continue }
+            guard !hashesInUse.contains(chunk.hash) else { continue }
+            chunksByID.removeValue(forKey: chunkID)
+            chunksByHash.removeValue(forKey: chunk.hash)
+            deletedCount += 1
+        }
+
+        if !plan.bucketUpdates.isEmpty || !plan.bucketIDsToDelete.isEmpty || !plan.generationIDsToDelete.isEmpty {
+            indexedChunkIDsCache = nil
+        }
+
+        return deletedCount
     }
 
     // MARK: - Full-text Search

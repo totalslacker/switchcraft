@@ -271,6 +271,66 @@ actor SQLiteWriterActor {
         }
     }
 
+    // MARK: - Vacuum
+
+    /// Atomically apply a `VacuumPlan`: update/delete bucket rows, delete
+    /// emptied generation rows, correct surviving generations'
+    /// `numEmbeddings`, then delete the plan's abandoned chunk rows
+    /// (guarded — a chunk is only deleted if no document row currently
+    /// references its hash). Returns the number of chunk rows actually
+    /// deleted.
+    func applyVacuumPlan(_ plan: VacuumPlan) throws -> Int {
+        let conn = try requireConnection()
+        return try conn.transaction {
+            for bucket in plan.bucketUpdates {
+                let stmt = try conn.prepare("UPDATE bucket SET indices = ?, residuals = ? WHERE id = ?")
+                try stmt.bind([.blob(bucket.indices), .blob(bucket.residuals), .int(bucket.id)])
+                try stmt.step()
+            }
+            for bucketID in plan.bucketIDsToDelete {
+                let stmt = try conn.prepare("DELETE FROM bucket WHERE id = ?")
+                try stmt.bind([.int(bucketID)])
+                try stmt.step()
+            }
+            for genID in plan.generationIDsToDelete {
+                let stmt = try conn.prepare("DELETE FROM generation WHERE id = ?")
+                try stmt.bind([.int(genID)])
+                try stmt.step()
+            }
+            for (genID, count) in plan.generationEmbeddingCountUpdates {
+                let stmt = try conn.prepare("UPDATE generation SET num_embeddings = ? WHERE id = ?")
+                try stmt.bind([.int(Int64(count)), .int(genID)])
+                try stmt.step()
+            }
+            var deletedCount = 0
+            for chunkID in plan.chunkIDsToDelete {
+                let stmt = try conn.prepare("""
+                    DELETE FROM chunk
+                    WHERE id = ? AND NOT EXISTS (
+                        SELECT 1 FROM document WHERE document.hash = chunk.hash
+                    )
+                    """)
+                try stmt.bind([.int(chunkID)])
+                try stmt.step()
+                deletedCount += conn.changes
+            }
+            return deletedCount
+        }
+    }
+
+    /// `PRAGMA freelist_count × PRAGMA page_size`, read via `prepare()` +
+    /// `step()` (not `execute()`, which discards the result row).
+    func freeListByteCount() throws -> Int64 {
+        let conn = try requireConnection()
+        let freelistStmt = try conn.prepare("PRAGMA freelist_count")
+        guard try freelistStmt.step() else { return 0 }
+        let freelistCount = freelistStmt.columnInt64(0)
+        let pageSizeStmt = try conn.prepare("PRAGMA page_size")
+        guard try pageSizeStmt.step() else { return 0 }
+        let pageSize = pageSizeStmt.columnInt64(0)
+        return freelistCount * pageSize
+    }
+
     // MARK: - Buckets
 
     func insertBucket(_ bucket: BucketRecord) throws -> BucketRecord {

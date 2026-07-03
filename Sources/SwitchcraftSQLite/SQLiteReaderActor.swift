@@ -96,6 +96,16 @@ actor SQLiteReaderActor {
         return result
     }
 
+    func documentHashes() throws -> Set<String> {
+        let conn = try requireConnection()
+        let stmt = try conn.prepare("SELECT DISTINCT hash FROM document")
+        var result = Set<String>()
+        while try stmt.step() {
+            result.insert(stmt.columnText(0))
+        }
+        return result
+    }
+
     // MARK: - Chunks
 
     func chunk(hash: String) throws -> ChunkRecord? {
