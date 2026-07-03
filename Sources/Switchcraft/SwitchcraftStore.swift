@@ -348,6 +348,137 @@ public actor SwitchcraftStore {
         return orphans
     }
 
+    /// Remove chunks that have no owning document ("abandoned" chunks) and
+    /// reclaim the disk they occupy.
+    ///
+    /// A chunk becomes abandoned through natural re-indexing (a page's
+    /// content changes, producing a new hash; the old chunk is left
+    /// behind), through `remove(id:)` (which deletes the document row but
+    /// leaves the chunk and its bucket entries in place), or through bulk
+    /// delete-then-readd workflows (e.g. URL canonicalization passes).
+    /// Unlike `findOrphanedChunks()` — which targets chunks with
+    /// insufficient bucket assignments but a still-existing owning
+    /// document, and are recovery candidates — `vacuum()` targets chunks
+    /// whose `hash` does not appear as any `document.hash`, which are
+    /// removal candidates. A chunk with an owning document is never
+    /// removed, even if it is only partially indexed (see
+    /// `findOrphanedChunks()` for that recovery path).
+    ///
+    /// ## Batch semantics
+    ///
+    /// `vacuum(maxBatch: N)` processes at most `N` abandoned chunks and
+    /// returns — it does not internally loop to process the full backlog.
+    /// `vacuum(maxBatch: nil)` processes every abandoned chunk currently
+    /// known. `VacuumResult.remainingCandidates` reports how many
+    /// abandoned chunks this call left unprocessed; call `vacuum()` again
+    /// (repeatedly, if needed) until it reaches `0` to drain a large
+    /// backlog. Repeated calls are idempotent: a chunk already deleted by
+    /// a prior call is simply absent from the next call's candidate scan.
+    ///
+    /// ## Cascade deletion
+    ///
+    /// If removing a chunk's bucket entries leaves a bucket with zero
+    /// surviving `(chunkID, tokenOffset)` pairs, that bucket row is
+    /// deleted. If deleting a bucket leaves its generation with zero
+    /// buckets, the generation row is deleted too. Surviving generations
+    /// have their `numEmbeddings` corrected to match the post-removal
+    /// bucket state. `VacuumResult.generationsAffected` includes both
+    /// partially-rewritten and fully-deleted generation ids.
+    ///
+    /// ## Ledger consistency
+    ///
+    /// Before this method returns, the in-memory `Indexer` ledger is
+    /// updated to match the post-vacuum committed storage state — vacuum
+    /// owns this itself rather than relying on the mid-add/mid-compaction
+    /// self-recovery mechanisms from ADR 029/030, which target different
+    /// drift classes. A subsequent `add()`, `index()`, or `search()` call
+    /// will not throw `Indexer.Error.ledgerOutOfSync` as a result of a
+    /// prior `vacuum()` call.
+    ///
+    /// ## Concurrency contract
+    ///
+    /// `vacuum()` flushes pending writes first (mirroring
+    /// `walCheckpoint()`'s contract), so a chunk added-then-immediately
+    /// document-deleted before its own flush is never misclassified as
+    /// abandoned. Do not call `add()`/`index()` concurrently with
+    /// `vacuum()` from the same process: a document re-add racing between
+    /// vacuum's detection scan and its write phase could match a candidate
+    /// chunk. The chunk-row delete is guarded against this (a raced re-add
+    /// cannot leave a document pointing at a deleted chunk row — the
+    /// worst-case outcome is the chunk surviving as a fresh true-orphan,
+    /// self-healing via the existing `findOrphanedChunks()` → `add()`
+    /// recovery path), but bucket-blob rewrites are not re-validated after
+    /// the scan, so avoid concurrent same-process writers as a rule.
+    ///
+    /// - Parameter maxBatch: maximum number of abandoned chunks to process
+    ///   in this call. `nil` (the default) processes all currently-known
+    ///   abandoned chunks.
+    /// - Returns: counts of what this call removed/updated, plus
+    ///   `remainingCandidates` for backlog-draining loops.
+    /// - Throws: `SwitchcraftStoreError.alreadyShutDown`; storage errors;
+    ///   `IndicesCodec.Error` if a bucket blob is corrupt.
+    public func vacuum(maxBatch: Int? = nil) async throws -> VacuumResult {
+        try ensureRunning()
+        try await flushAndClearPending()
+
+        let allChunkRecords = try await storage.allChunks()
+        guard !allChunkRecords.isEmpty else {
+            return VacuumResult(
+                chunksRemoved: 0, bucketPairsRemoved: 0, approximateDiskReclaimed: 0,
+                generationsAffected: [], remainingCandidates: 0, checkpoint: .complete
+            )
+        }
+
+        let docHashes = try await storage.documentHashes()
+        let abandonedChunks = allChunkRecords
+            .filter { !docHashes.contains($0.hash) }
+            .sorted { $0.id < $1.id }
+
+        guard !abandonedChunks.isEmpty else {
+            return VacuumResult(
+                chunksRemoved: 0, bucketPairsRemoved: 0, approximateDiskReclaimed: 0,
+                generationsAffected: [], remainingCandidates: 0, checkpoint: .complete
+            )
+        }
+
+        let effectiveBatchSize = maxBatch.map { max(0, $0) } ?? abandonedChunks.count
+        let batch = Array(abandonedChunks.prefix(effectiveBatchSize))
+        let remainingCandidates = abandonedChunks.count - batch.count
+
+        guard !batch.isEmpty else {
+            return VacuumResult(
+                chunksRemoved: 0, bucketPairsRemoved: 0, approximateDiskReclaimed: 0,
+                generationsAffected: [], remainingCandidates: remainingCandidates, checkpoint: .complete
+            )
+        }
+
+        let batchChunkIDs = Set(batch.map(\.id))
+        let gens = try await storage.generations()
+        let planResult = try await VacuumPlanBuilder.buildPlan(
+            abandonedChunkIDs: batchChunkIDs,
+            generations: gens,
+            fetchBuckets: { [storage] genID in try await storage.buckets(forGeneration: genID) }
+        )
+
+        let preBytes = try await storage.freeListByteCount()
+        let deletedCount = try await storage.applyVacuumPlan(planResult.plan)
+        let postBytes = try await storage.freeListByteCount()
+        let reclaimed = max(0, postBytes - preBytes)
+
+        try await indexer.removeAbandonedFromLedger(batchChunkIDs)
+
+        let checkpoint = try await storage.walCheckpoint()
+
+        return VacuumResult(
+            chunksRemoved: deletedCount,
+            bucketPairsRemoved: planResult.bucketPairsRemoved,
+            approximateDiskReclaimed: reclaimed,
+            generationsAffected: planResult.generationsAffected.sorted(),
+            remainingCandidates: remainingCandidates,
+            checkpoint: checkpoint
+        )
+    }
+
     /// Wipe all documents, chunks, and LSM generations. The backing
     /// storage file is left in place (tables are emptied).
     ///

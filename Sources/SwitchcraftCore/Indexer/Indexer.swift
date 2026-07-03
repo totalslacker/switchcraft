@@ -507,6 +507,35 @@ public actor Indexer {
         ledger.removeValue(forKey: chunkID)
     }
 
+    /// Remove ledger rows for chunk ids that `SwitchcraftStore.vacuum()`
+    /// just deleted from storage.
+    ///
+    /// Unlike `removeFromLedger()` (used by the R1 orphan-recovery path to
+    /// clear stale rows immediately before re-buffering fresh ones via
+    /// `add()`), this is a **true delete**: the chunk ids are gone from
+    /// storage for good, not about to be re-added. `removedFromLedgerCount`
+    /// is deliberately **not** incremented here — that counter exists to
+    /// compensate `performFlush()`'s cascade-walk total for rows that were
+    /// cleared-and-about-to-be-refilled (see ADR 029 amendment, issue
+    /// #132); vacuum already decremented the corresponding
+    /// `generation.numEmbeddings` in storage for these exact chunk ids
+    /// before calling this method, so the ledger and storage stay in
+    /// lockstep with no compensation needed. Incrementing it here would
+    /// double-subtract and desync a later flush.
+    ///
+    /// Includes the same flush-waiter gate as `add()`/`removeFromLedger()`
+    /// to avoid racing a concurrent `performFlush()` mid-decode.
+    public func removeAbandonedFromLedger(_ chunkIDs: Set<Int64>) async throws {
+        while flushInProgress {
+            _ = try await withCheckedThrowingContinuation { (c: CheckedContinuation<CompactionEvent?, any Swift.Error>) in
+                flushWaiters.append(c)
+            }
+        }
+        for chunkID in chunkIDs {
+            ledger.removeValue(forKey: chunkID)
+        }
+    }
+
     /// Drain any buffered embeddings into a new generation, cascading
     /// through higher levels as required by `IndexerConfig`. No-op when
     /// the buffer is empty.

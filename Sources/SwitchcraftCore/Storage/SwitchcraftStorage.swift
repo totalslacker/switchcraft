@@ -99,6 +99,18 @@ public protocol SwitchcraftStorage: Sendable {
     /// - Throws: `IndicesCodec.Error` if a bucket blob is corrupt.
     func chunkBucketRefCount(_ chunkID: Int64) async throws -> Int
 
+    /// Return the set of all `document.hash` values present in the store.
+    ///
+    /// Used by `SwitchcraftStore.vacuum()` to compute the abandoned-chunk
+    /// candidate set (`chunk.hash` values with no owning document) via one
+    /// set-difference instead of one storage round trip per chunk. The
+    /// default implementation derives the set from `documents(matching:
+    /// .all)`, which is correct but materializes every full
+    /// `DocumentRecord` (including `body`); a backend that can run
+    /// `SELECT DISTINCT hash FROM document` should override this method
+    /// for production-scale corpora.
+    func documentHashes() async throws -> Set<String>
+
     // MARK: - Generations
 
     /// Insert a generation record. The provided `id` is ignored; the backend
@@ -158,6 +170,40 @@ public protocol SwitchcraftStorage: Sendable {
     /// Return all buckets for the given generation, in insertion order.
     func buckets(forGeneration generationID: Int64) async throws -> [BucketRecord]
 
+    // MARK: - Vacuum
+
+    /// Atomically apply a pre-computed `VacuumPlan`: update or delete
+    /// bucket rows, delete emptied generation rows, update surviving
+    /// generations' `numEmbeddings`, and delete the plan's abandoned
+    /// chunk rows.
+    ///
+    /// A chunk-row delete is guarded — a chunk is only actually deleted
+    /// if no document row currently references its hash — so a
+    /// concurrent `add()` racing between `SwitchcraftStore.vacuum()`'s
+    /// detection scan and this call cannot leave a document pointing at
+    /// a deleted chunk row. Returns the number of chunk rows *actually*
+    /// deleted, which may be less than `plan.chunkIDsToDelete.count` if
+    /// the guard fired for some chunks.
+    ///
+    /// The entire operation must execute in a single atomic transaction;
+    /// on any error the transaction is rolled back and storage state is
+    /// unchanged.
+    ///
+    /// Default implementation is a no-op that returns `0` — a safe
+    /// opt-out for external conformers, matching the ADR 029/033
+    /// default-extension pattern.
+    func applyVacuumPlan(_ plan: VacuumPlan) async throws -> Int
+
+    /// Approximate bytes currently sitting on the backend's internal
+    /// free-list, sampled as `PRAGMA freelist_count × PRAGMA page_size`
+    /// for SQLite backends.
+    ///
+    /// Used by `SwitchcraftStore.vacuum()` to compute
+    /// `VacuumResult.approximateDiskReclaimed` as a before/after delta
+    /// around the vacuum write phase. Meaningful only for SQLite-backed
+    /// connections; the default implementation returns `0`.
+    func freeListByteCount() async throws -> Int64
+
     // MARK: - Full-text Search
 
     /// Run a BM25-style full-text query over document bodies. Backends MAY
@@ -202,4 +248,9 @@ extension SwitchcraftStorage {
     public func walCheckpoint() async throws -> CheckpointResult { .complete }
     public func allChunks() async throws -> [ChunkRecord] { [] }
     public func chunkBucketRefCount(_ chunkID: Int64) async throws -> Int { Int.max }
+    public func documentHashes() async throws -> Set<String> {
+        Set(try await documents(matching: .all).map { $0.hash })
+    }
+    public func applyVacuumPlan(_ plan: VacuumPlan) async throws -> Int { 0 }
+    public func freeListByteCount() async throws -> Int64 { 0 }
 }

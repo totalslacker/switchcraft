@@ -55,6 +55,10 @@ public enum StorageConformance {
         try await runAllChunks(storage)
         try await runChunkBucketRefCount(storage)
 
+        try await runDocumentHashes(storage)
+        try await runApplyVacuumPlan(storage)
+        try await runFreeListByteCount(storage)
+
         try await storage.close()
     }
 
@@ -547,6 +551,157 @@ public enum StorageConformance {
         let indexedCount = try await storage.chunkBucketRefCount(indexed.id)
         #expect(orphanCount == 0, "orphan chunk must have 0 bucket ref count")
         #expect(indexedCount >= 1, "indexed chunk must have at least 1 bucket ref count")
+    }
+
+    // MARK: - documentHashes / applyVacuumPlan / freeListByteCount
+
+    static func runDocumentHashes(_ storage: any SwitchcraftStorage) async throws {
+        try await storage.clear()
+        #expect(try await storage.documentHashes().isEmpty)
+
+        try await storage.upsertDocument(makeDocument(uuid: "dh-a", body: "x"))
+        try await storage.upsertDocument(makeDocument(uuid: "dh-b", body: "y"))
+        let hashes = try await storage.documentHashes()
+        #expect(hashes == ["hash-dh-a", "hash-dh-b"])
+
+        try await storage.deleteDocument(uuid: "dh-a")
+        let afterDelete = try await storage.documentHashes()
+        #expect(afterDelete == ["hash-dh-b"])
+    }
+
+    static func runApplyVacuumPlan(_ storage: any SwitchcraftStorage) async throws {
+        try await storage.clear()
+
+        // Insert chunks first to get real backend-assigned ids, matching
+        // the pattern already used by runChunkBucketRefCount.
+        let chunkA = try await storage.upsertChunk(
+            ChunkRecord(hash: "vac-a", model: "m", embeddings: Data(), counts: [1])
+        )
+        let chunkB = try await storage.upsertChunk(
+            ChunkRecord(hash: "vac-b", model: "m", embeddings: Data(), counts: [1])
+        )
+        let chunkC = try await storage.upsertChunk(
+            ChunkRecord(hash: "vac-c", model: "m", embeddings: Data(), counts: [1])
+        )
+        let chunkD = try await storage.upsertChunk(
+            ChunkRecord(hash: "vac-d", model: "m", embeddings: Data(), counts: [1])
+        )
+        let chunkE = try await storage.upsertChunk(
+            ChunkRecord(hash: "vac-e", model: "m", embeddings: Data(), counts: [1])
+        )
+
+        // Only chunkE keeps an owning document; the rest are abandoned.
+        try await storage.upsertDocument(
+            DocumentRecord(uuid: "vac-owner", date: Date(), hash: "vac-e", body: "x", lens: [1])
+        )
+
+        let dims = 4
+        func onePairBucket(generationID: Int64, chunkID: Int64) -> BucketRecord {
+            BucketRecord(
+                generationID: generationID,
+                center: Data(repeating: 0, count: dims * 4),
+                indices: IndicesCodec.encode([IndexPair(chunkID: UInt32(chunkID), tokenOffset: 0)]),
+                residuals: Q4Codec.encodeResiduals([Float](repeating: 0, count: dims))
+            )
+        }
+        func twoPairBucket(generationID: Int64, chunkID1: Int64, chunkID2: Int64) -> BucketRecord {
+            BucketRecord(
+                generationID: generationID,
+                center: Data(repeating: 0, count: dims * 4),
+                indices: IndicesCodec.encode([
+                    IndexPair(chunkID: UInt32(chunkID1), tokenOffset: 0),
+                    IndexPair(chunkID: UInt32(chunkID2), tokenOffset: 0),
+                ]),
+                residuals: Q4Codec.encodeResiduals([Float](repeating: 0, count: dims * 2))
+            )
+        }
+
+        // Generation A: one bucket holding chunkA (to remove) and chunkE
+        // (survives) — bucket update, generation survives with corrected count.
+        let genA = try await storage.insertGeneration(
+            GenerationRecord(level: 0, numEmbeddings: 2, minChunkID: min(chunkA.id, chunkE.id), maxChunkID: max(chunkA.id, chunkE.id), created: Date())
+        )
+        let bucketA = try await storage.insertBucket(
+            twoPairBucket(generationID: genA.id, chunkID1: chunkA.id, chunkID2: chunkE.id)
+        )
+
+        // Generation B: two buckets — bucketB1 holds only chunkB (to remove,
+        // bucket becomes empty and is deleted outright); bucketB2 holds
+        // chunkD (survives) — generation survives with one bucket gone.
+        let genB = try await storage.insertGeneration(
+            GenerationRecord(level: 0, numEmbeddings: 2, minChunkID: min(chunkB.id, chunkD.id), maxChunkID: max(chunkB.id, chunkD.id), created: Date())
+        )
+        let bucketB1 = try await storage.insertBucket(onePairBucket(generationID: genB.id, chunkID: chunkB.id))
+        let bucketB2 = try await storage.insertBucket(onePairBucket(generationID: genB.id, chunkID: chunkD.id))
+
+        // Generation C: single bucket holding only chunkC (to remove) — the
+        // whole generation is emptied and must be deleted wholesale.
+        let genC = try await storage.insertGeneration(
+            GenerationRecord(level: 0, numEmbeddings: 1, minChunkID: chunkC.id, maxChunkID: chunkC.id, created: Date())
+        )
+        let bucketC = try await storage.insertBucket(onePairBucket(generationID: genC.id, chunkID: chunkC.id))
+
+        var updatedBucketA = bucketA
+        updatedBucketA.indices = IndicesCodec.encode([IndexPair(chunkID: UInt32(chunkE.id), tokenOffset: 0)])
+        updatedBucketA.residuals = Q4Codec.encodeResiduals([Float](repeating: 0, count: dims))
+
+        // chunkD is included in the delete set as the guarded case: a
+        // document referencing its hash is inserted below (simulating a
+        // race between vacuum's detection scan and this call), so the
+        // guarded delete must skip it.
+        let plan = VacuumPlan(
+            chunkIDsToDelete: [chunkA.id, chunkB.id, chunkC.id, chunkD.id],
+            bucketUpdates: [updatedBucketA],
+            bucketIDsToDelete: [bucketB1.id],
+            generationIDsToDelete: [genC.id],
+            generationEmbeddingCountUpdates: [genA.id: 1, genB.id: 1]
+        )
+
+        // Simulate a race: a document was (re-)added referencing chunkD's
+        // hash after vacuum's detection scan ran but before this call.
+        try await storage.upsertDocument(
+            DocumentRecord(uuid: "vac-raced-owner", date: Date(), hash: "vac-d", body: "y", lens: [1])
+        )
+
+        let deletedCount = try await storage.applyVacuumPlan(plan)
+
+        // chunkA, chunkB, chunkC deleted; chunkD survives (guard fired).
+        #expect(deletedCount == 3, "exactly chunkA/B/C should be deleted; chunkD is guarded by its raced document")
+        #expect(try await storage.chunk(id: chunkA.id) == nil)
+        #expect(try await storage.chunk(id: chunkB.id) == nil)
+        #expect(try await storage.chunk(id: chunkC.id) == nil)
+        #expect(try await storage.chunk(id: chunkD.id) != nil, "chunkD must survive: a document now references its hash")
+        #expect(try await storage.chunk(id: chunkE.id) != nil)
+
+        // Generation A survives with one bucket, updated pair count.
+        let gensAfter = try await storage.generations()
+        let genAAfter = gensAfter.first { $0.id == genA.id }
+        #expect(genAAfter != nil)
+        #expect(genAAfter?.numEmbeddings == 1)
+        let bucketsA = try await storage.buckets(forGeneration: genA.id)
+        #expect(bucketsA.count == 1)
+        let survivingPairsA = try IndicesCodec.decode(bucketsA[0].indices)
+        #expect(survivingPairsA.map { Int64($0.chunkID) } == [chunkE.id])
+
+        // Generation B survives with only bucketB2 (bucketB1 deleted outright).
+        let genBAfter = gensAfter.first { $0.id == genB.id }
+        #expect(genBAfter != nil)
+        #expect(genBAfter?.numEmbeddings == 1)
+        let bucketsB = try await storage.buckets(forGeneration: genB.id)
+        #expect(bucketsB.map(\.id) == [bucketB2.id])
+
+        // Generation C fully deleted (its only bucket is gone with it).
+        #expect(!gensAfter.map(\.id).contains(genC.id))
+        let bucketsC = try await storage.buckets(forGeneration: genC.id)
+        #expect(bucketsC.isEmpty)
+        _ = bucketC // silence unused-variable warning; existence already asserted via bucketsC above.
+    }
+
+    static func runFreeListByteCount(_ storage: any SwitchcraftStorage) async throws {
+        try await storage.clear()
+        // Smoke test: must not throw, must be non-negative for any backend.
+        let count = try await storage.freeListByteCount()
+        #expect(count >= 0)
     }
 
     // MARK: - Helpers
