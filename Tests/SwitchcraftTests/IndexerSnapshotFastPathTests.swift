@@ -1,0 +1,216 @@
+// SPDX-License-Identifier: Apache-2.0
+import Foundation
+import Testing
+@testable import SwitchcraftCore
+
+/// Tests for the ledger-snapshot startup fast path (issue #136 / ADR 034).
+///
+/// Covers the four scenarios from the acceptance criteria:
+///  - clean-shutdown reproducer (fast path taken, `recoveredConflictCount == 0`)
+///  - crash-safety fallback (no/absent snapshot → full rehydration walk)
+///  - fingerprint-mismatch fallback (storage mutated out-of-band → detected)
+///  - corrupt-payload fallback (fingerprint matches, payload undecodable)
+@Suite("Indexer Snapshot Fast Path")
+struct IndexerSnapshotFastPathTests {
+
+    static let dims = 4
+
+    /// Deterministic unit-norm row seeded by `(chunk, token)` so two runs
+    /// produce identical embeddings.
+    static func row(chunk: Int64, token: Int) -> [Float] {
+        var v = [Float](repeating: 0, count: dims)
+        var s = UInt64(chunk) &* 2_654_435_761 &+ UInt64(token) &* 40_503
+        for j in 0..<dims {
+            s = s &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+            v[j] = Float(s >> 33) / Float(UInt32.max) - 0.5
+        }
+        let norm = sqrt(v.reduce(0) { $0 + $1 * $1 })
+        if norm > 0 { for j in 0..<dims { v[j] /= norm } }
+        return v
+    }
+
+    /// Add `chunkCount` chunks (2 tokens each) and flush. Returns the storage
+    /// and the indexer's post-flush ledger contents for equality checks.
+    static func populateAndFlush(
+        chunkCount: Int,
+        config: IndexerConfig = .testing()
+    ) async throws -> (storage: InMemoryStorage, ledger: [Int64: [[Float]]]) {
+        let storage = InMemoryStorage()
+        try await storage.open()
+        let indexer = try await Indexer(storage: storage, config: config)
+        for c in 1...chunkCount {
+            let chunkID = Int64(c)
+            var flat = [Float]()
+            for t in 0..<2 { flat.append(contentsOf: row(chunk: chunkID, token: t)) }
+            try await indexer.add(chunkID: chunkID, embeddings: flat, dims: dims)
+        }
+        _ = try await indexer.flush()
+        let ledger = await indexer.ledgerContents
+        return (storage, ledger)
+    }
+
+    // MARK: - 1. Clean-shutdown reproducer
+
+    @Test("clean shutdown: second init takes the snapshot fast path with recoveredConflictCount == 0")
+    func cleanShutdownFastPath() async throws {
+        let (storage, originalLedger) = try await Self.populateAndFlush(chunkCount: 6)
+
+        // A snapshot must have been written by flush().
+        #expect(try await storage.loadLedgerSnapshot() != nil)
+
+        // Re-init over the same storage (simulating a fresh process).
+        let reopened = try await Indexer(storage: storage, config: .testing())
+
+        #expect(await reopened.didUseSnapshotFastPath == true)
+        #expect(await reopened.recoveredConflictCount == 0)
+
+        // The fast path reconstructs the EXACT in-memory ledger (snapshot stores
+        // full-precision floats), unlike the Q4-lossy full-walk reconstruction.
+        let reloaded = await reopened.ledgerContents
+        #expect(reloaded == originalLedger)
+
+        // Invalidate-on-load: the on-disk snapshot must be cleared after the load.
+        #expect(try await storage.loadLedgerSnapshot() == nil)
+    }
+
+    @Test("invalidate-on-load: a second re-init after the fast path falls back (no snapshot left)")
+    func invalidateOnLoadForcesFallbackNextTime() async throws {
+        let (storage, _) = try await Self.populateAndFlush(chunkCount: 5)
+
+        // First re-init consumes + clears the snapshot via the fast path.
+        let first = try await Indexer(storage: storage, config: .testing())
+        #expect(await first.didUseSnapshotFastPath == true)
+
+        // Second re-init finds no snapshot (simulating a crash before the next
+        // flush/shutdown could rewrite it) and must fall back to the full walk.
+        let second = try await Indexer(storage: storage, config: .testing())
+        #expect(await second.didUseSnapshotFastPath == false)
+        // Full-walk rehydration still reconstructs every chunk.
+        let ledger = await second.ledgerContents
+        #expect(ledger.count == 5)
+    }
+
+    // MARK: - 2. Crash-safety fallback (no snapshot)
+
+    @Test("crash safety: data present but no snapshot → full rehydration walk")
+    func noSnapshotFallsBackToFullWalk() async throws {
+        let (storage, _) = try await Self.populateAndFlush(chunkCount: 6)
+
+        // Simulate a crash: the snapshot was never written / was lost.
+        try await storage.clearLedgerSnapshot()
+
+        let reopened = try await Indexer(storage: storage, config: .testing())
+        #expect(await reopened.didUseSnapshotFastPath == false)
+        let ledger = await reopened.ledgerContents
+        #expect(ledger.count == 6)
+    }
+
+    @Test("crash safety: unclean shutdown with a 2-gen conflict recovers via full walk")
+    func conflictWithoutSnapshotRecovers() async throws {
+        // Hand-build a 2-generation conflict (same chunkID in two active gens)
+        // with NO snapshot — exactly the crash-mid-compaction case ADR 024
+        // guards. The fast path must be skipped and the conflict recovered.
+        let storage = InMemoryStorage()
+        try await storage.open()
+        let sharedChunkID: Int64 = 10
+        let now = Date()
+        let zero = [Float](repeating: 0, count: Self.dims)
+
+        let gen1 = try await storage.insertGeneration(GenerationRecord(
+            level: 2, numEmbeddings: 1, minChunkID: sharedChunkID, maxChunkID: sharedChunkID, created: now
+        ))
+        _ = try await storage.insertBucket(BucketRecord(
+            generationID: gen1.id,
+            center: Indexer.encodeFloat32LE([1, 0, 0, 0]),
+            indices: IndicesCodec.encode([IndexPair(chunkID: UInt32(sharedChunkID), tokenOffset: 0)]),
+            residuals: Q4Codec.encodeResiduals(zero)
+        ))
+        let gen2 = try await storage.insertGeneration(GenerationRecord(
+            level: 0, numEmbeddings: 1, minChunkID: sharedChunkID, maxChunkID: sharedChunkID, created: now
+        ))
+        _ = try await storage.insertBucket(BucketRecord(
+            generationID: gen2.id,
+            center: Indexer.encodeFloat32LE([0, 1, 0, 0]),
+            indices: IndicesCodec.encode([IndexPair(chunkID: UInt32(sharedChunkID), tokenOffset: 0)]),
+            residuals: Q4Codec.encodeResiduals(zero)
+        ))
+
+        #expect(try await storage.loadLedgerSnapshot() == nil)
+
+        let indexer = try await Indexer(
+            storage: storage,
+            config: .testing(rehydrationConflictBehavior: .autoRecover)
+        )
+        #expect(await indexer.didUseSnapshotFastPath == false)
+        #expect(await indexer.recoveredConflictCount == 1)
+    }
+
+    // MARK: - 3. Fingerprint-mismatch fallback
+
+    @Test("fingerprint mismatch: storage mutated out-of-band → fast path skipped")
+    func fingerprintMismatchFallsBack() async throws {
+        let (storage, _) = try await Self.populateAndFlush(chunkCount: 6)
+        #expect(try await storage.loadLedgerSnapshot() != nil)
+
+        // Mutate storage via a path that bypasses the ledger: inserting a chunk
+        // changes chunkCount, which is part of the fingerprint (mirrors the
+        // real out-of-band mutation vacuum() performs). The snapshot is now
+        // stale relative to storage.
+        _ = try await storage.upsertChunk(
+            ChunkRecord(hash: "out-of-band", model: "m", embeddings: Data(), counts: [1])
+        )
+
+        let reopened = try await Indexer(storage: storage, config: .testing())
+        #expect(await reopened.didUseSnapshotFastPath == false)
+        // Fell back to full rehydration, which still reconstructs every chunk.
+        let ledger = await reopened.ledgerContents
+        #expect(ledger.count == 6)
+        // Stale snapshot must have been cleared during the mismatch handling.
+        #expect(try await storage.loadLedgerSnapshot() == nil)
+    }
+
+    // MARK: - 4. Corrupt-payload fallback
+
+    @Test("corrupt payload: fingerprint matches but payload is undecodable → fast path skipped")
+    func corruptPayloadFallsBack() async throws {
+        let (storage, _) = try await Self.populateAndFlush(chunkCount: 6)
+
+        // Overwrite the snapshot with a record whose fingerprint matches current
+        // storage but whose payload is truncated/garbage.
+        let gens = try await storage.generations()
+        let chunkCount = try await storage.chunkCount()
+        let fp = LedgerSnapshotFingerprint.compute(chunkCount: chunkCount, generations: gens)
+        let corrupt = LedgerSnapshotRecord(
+            dims: Self.dims,
+            chunkCount: fp.chunkCount,
+            maxChunkID: fp.maxChunkID,
+            totalEmbeddings: fp.totalEmbeddings,
+            maxGenerationID: fp.maxGenerationID,
+            generationCount: fp.generationCount,
+            // Claims a large chunk count in its 4-byte header but has no body.
+            payload: Data([0xFF, 0xFF, 0xFF, 0x7F])
+        )
+        try await storage.saveLedgerSnapshot(corrupt)
+
+        // init must not throw — the decode failure is swallowed and the walk runs.
+        let reopened = try await Indexer(storage: storage, config: .testing())
+        #expect(await reopened.didUseSnapshotFastPath == false)
+        let ledger = await reopened.ledgerContents
+        #expect(ledger.count == 6)
+        // The corrupt snapshot must have been cleared on the failed load attempt.
+        #expect(try await storage.loadLedgerSnapshot() == nil)
+    }
+
+    // MARK: - Empty index
+
+    @Test("empty index: no generations → no fast path, no snapshot written")
+    func emptyIndexNoSnapshot() async throws {
+        let storage = InMemoryStorage()
+        try await storage.open()
+        let indexer = try await Indexer(storage: storage, config: .testing())
+        // No adds, no flush — an empty flush is a no-op and writes no snapshot.
+        _ = try await indexer.flush()
+        #expect(await indexer.didUseSnapshotFastPath == false)
+        #expect(try await storage.loadLedgerSnapshot() == nil)
+    }
+}
