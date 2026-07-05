@@ -59,6 +59,8 @@ public enum StorageConformance {
         try await runApplyVacuumPlan(storage)
         try await runFreeListByteCount(storage)
 
+        try await runSnapshotLifecycle(storage)
+
         try await storage.close()
     }
 
@@ -702,6 +704,65 @@ public enum StorageConformance {
         // Smoke test: must not throw, must be non-negative for any backend.
         let count = try await storage.freeListByteCount()
         #expect(count >= 0)
+    }
+
+    // MARK: - Ledger snapshot lifecycle (issue #136 / ADR 034)
+
+    static func runSnapshotLifecycle(_ storage: any SwitchcraftStorage) async throws {
+        try await storage.clear()
+
+        // Empty store: no snapshot present.
+        #expect(try await storage.loadLedgerSnapshot() == nil)
+
+        // Save → load round-trips every field byte-for-byte.
+        let payload = Data([0x01, 0x02, 0x03, 0xFF, 0x00, 0x42])
+        let snapshot = LedgerSnapshotRecord(
+            dims: 128,
+            chunkCount: 7,
+            maxChunkID: 9_001,
+            totalEmbeddings: 123_456,
+            maxGenerationID: 42,
+            generationCount: 3,
+            payload: payload
+        )
+        try await storage.saveLedgerSnapshot(snapshot)
+        let loaded = try await storage.loadLedgerSnapshot()
+        #expect(loaded == snapshot)
+
+        // Save again overwrites the single slot (does not accumulate).
+        let payload2 = Data([0xAA, 0xBB])
+        let snapshot2 = LedgerSnapshotRecord(
+            dims: 64,
+            chunkCount: 1,
+            maxChunkID: 1,
+            totalEmbeddings: 5,
+            maxGenerationID: 1,
+            generationCount: 1,
+            payload: payload2
+        )
+        try await storage.saveLedgerSnapshot(snapshot2)
+        #expect(try await storage.loadLedgerSnapshot() == snapshot2)
+
+        // An empty payload is a valid snapshot (empty-ledger case).
+        let emptyPayloadSnapshot = LedgerSnapshotRecord(
+            dims: 2, chunkCount: 0, maxChunkID: 0, totalEmbeddings: 0,
+            maxGenerationID: 0, generationCount: 0, payload: Data()
+        )
+        try await storage.saveLedgerSnapshot(emptyPayloadSnapshot)
+        #expect(try await storage.loadLedgerSnapshot() == emptyPayloadSnapshot)
+
+        // Clear removes it; load returns nil.
+        try await storage.clearLedgerSnapshot()
+        #expect(try await storage.loadLedgerSnapshot() == nil)
+
+        // Clearing again is a no-op (must not throw).
+        try await storage.clearLedgerSnapshot()
+
+        // storage.clear() also wipes any persisted snapshot.
+        try await storage.saveLedgerSnapshot(snapshot)
+        #expect(try await storage.loadLedgerSnapshot() != nil)
+        try await storage.clear()
+        #expect(try await storage.loadLedgerSnapshot() == nil)
     }
 
     // MARK: - Helpers
