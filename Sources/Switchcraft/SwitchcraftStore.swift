@@ -666,6 +666,15 @@ public actor SwitchcraftStore {
         // throw `alreadyShutDown` instead of racing through gates.
         isShutDown = true
         try await flushAndClearPending()
+        // Persist a final ledger snapshot so the next launch can take the
+        // fast startup path instead of a full rehydration walk (issue #136 /
+        // ADR 034). Runs unconditionally — even after a read-only/idle session
+        // where flushAndClearPending() was a no-op — because a snapshot loaded
+        // and invalidated at startup must be rewritten before shutdown or the
+        // next startup silently regresses to a full walk. Ordered before the
+        // WAL checkpoint below so the snapshot write is covered by the same
+        // wal_checkpoint(TRUNCATE) (ADR 033 ordering constraint).
+        try await indexer.persistSnapshot()
         // Checkpoint the WAL before closing so that the next launch finds
         // a clean database file. Skipped on error — a partial WAL is still
         // better than a half-checkpointed file, and `close()` handles final
