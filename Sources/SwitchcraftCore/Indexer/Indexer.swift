@@ -130,12 +130,72 @@ public actor Indexer {
         let gens = try await storage.generations()
         guard !gens.isEmpty else { return }
 
+        // Fast path (issue #136 / ADR 034): if a ledger snapshot is present
+        // and a cheap fingerprint confirms storage hasn't changed since it was
+        // written, load it directly instead of running the O(all embeddings)
+        // rehydration walk. Any failure at any step (absent, stale, corrupt)
+        // falls through to the full walk below — the crash-recovery safety net
+        // is untouched. `recoveredConflictCount` stays 0 on this path: the
+        // snapshot represents already-conflict-free state, so there is nothing
+        // to recover.
+        if try await loadFromSnapshotIfValid(gens: gens) {
+            return
+        }
+
         switch config.rehydrationConflictBehavior {
         case .throwError:
             try await rehydrateThrowError(gens: gens)
         case .autoRecover:
             try await rehydrateAutoRecover(gens: gens)
         }
+    }
+
+    /// Attempt the snapshot fast path. Returns `true` if the ledger was
+    /// populated from a valid, fingerprint-matching snapshot (and the caller
+    /// should skip the full rehydration walk); `false` if no usable snapshot
+    /// exists and the caller must fall back.
+    ///
+    /// On a successful load the on-disk snapshot is cleared immediately
+    /// (invalidate-on-load, ADR 034): if the process crashes after loading but
+    /// before the next successful flush/shutdown, the next startup must fall
+    /// back to the full walk rather than trust a snapshot that is now stale
+    /// relative to that crash. A fresh snapshot is written again at the next
+    /// flush or clean shutdown.
+    private func loadFromSnapshotIfValid(gens: [GenerationRecord]) async throws -> Bool {
+        guard let record = try await storage.loadLedgerSnapshot() else {
+            return false
+        }
+
+        // Cheap staleness/corruption check: compare the snapshot's captured
+        // fingerprint against freshly-computed storage state.
+        let chunkCount = try await storage.chunkCount()
+        let current = LedgerSnapshotFingerprint.compute(chunkCount: chunkCount, generations: gens)
+        guard LedgerSnapshotFingerprint.of(record) == current else {
+            // Stale snapshot (storage mutated out-of-band, e.g. via vacuum()).
+            // Clear it so we don't re-check a known-bad snapshot next time, and
+            // fall back to the full walk.
+            try? await storage.clearLedgerSnapshot()
+            return false
+        }
+
+        // Decode the payload. A corrupt/truncated blob throws — treat it as an
+        // unusable snapshot and fall back rather than propagating out of init.
+        let decoded: [Int64: [[Float]]]
+        do {
+            decoded = try LedgerSnapshotCodec.decode(record.payload, dims: record.dims)
+        } catch {
+            indexerLogger.warning("Ledger snapshot payload failed to decode (\(String(describing: error), privacy: .public)); falling back to full rehydration")
+            try? await storage.clearLedgerSnapshot()
+            return false
+        }
+
+        // Success: adopt the snapshot state and invalidate the on-disk copy.
+        ledger = decoded
+        dims = record.dims
+        recoveredConflictCount = 0
+        didUseSnapshotFastPath = true
+        try await storage.clearLedgerSnapshot()
+        return true
     }
 
     /// `.throwError` rehydration path — unchanged from the original implementation.
@@ -599,11 +659,87 @@ public actor Indexer {
             for w in waiters { w.resume(throwing: error) }
             throw error
         }
+        // Write a fresh ledger snapshot now that the flush has committed
+        // (issue #136 / ADR 034). We are still the leader (flushInProgress is
+        // true), so no concurrent add()/removeFromLedger() can mutate the
+        // ledger mid-encode. Best-effort: a snapshot write failure must NOT
+        // fail the flush — the compaction already committed, and the snapshot
+        // is a pure startup optimization backstopped by full rehydration.
+        do {
+            try await writeLedgerSnapshot()
+        } catch {
+            indexerLogger.warning("post-flush ledger snapshot write failed (\(String(describing: error), privacy: .public)); next startup will fall back to full rehydration")
+        }
         let waiters = flushWaiters
         flushWaiters.removeAll()
         flushInProgress = false
         for w in waiters { w.resume(returning: nil) }
         return event
+    }
+
+    /// Persist the current in-memory ledger as an on-disk snapshot,
+    /// unconditionally (issue #136 / ADR 034).
+    ///
+    /// Called by `SwitchcraftStore.shutdown()` after `flushAndClearPending()`
+    /// and before `walCheckpoint()`. Unlike the post-flush write inside
+    /// `flush()`, this runs even when nothing was pending — `flush()`'s
+    /// `pendingCount == 0` fast path means an idle/read-only session never
+    /// reaches `performFlush()`, so a snapshot loaded-and-cleared at startup
+    /// would otherwise never be rewritten, silently regressing the next
+    /// startup to a full walk.
+    ///
+    /// Becomes the flush leader for the duration so concurrent
+    /// `add()`/`removeFromLedger()` calls (which gate on `flushInProgress`)
+    /// cannot mutate the ledger mid-encode, mirroring `flush()`'s
+    /// leader/waiter drain.
+    public func persistSnapshot() async throws {
+        while flushInProgress {
+            _ = try await withCheckedThrowingContinuation { (c: CheckedContinuation<CompactionEvent?, any Swift.Error>) in
+                flushWaiters.append(c)
+            }
+        }
+        flushInProgress = true
+        do {
+            try await writeLedgerSnapshot()
+        } catch {
+            let waiters = flushWaiters
+            flushWaiters.removeAll()
+            flushInProgress = false
+            for w in waiters { w.resume(throwing: error) }
+            throw error
+        }
+        let waiters = flushWaiters
+        flushWaiters.removeAll()
+        flushInProgress = false
+        for w in waiters { w.resume(returning: nil) }
+    }
+
+    /// Encode the current ledger + a fresh storage fingerprint into a
+    /// `LedgerSnapshotRecord` and persist it (overwriting any prior snapshot).
+    ///
+    /// Must only be called while holding the flush leader gate
+    /// (`flushInProgress == true`) so the ledger is stable across its `await`
+    /// points. If `dims` has never been locked in (empty index), there is
+    /// nothing meaningful to snapshot — any stale snapshot is cleared instead.
+    private func writeLedgerSnapshot() async throws {
+        guard let dims = self.dims else {
+            try await storage.clearLedgerSnapshot()
+            return
+        }
+        let gens = try await storage.generations()
+        let chunkCount = try await storage.chunkCount()
+        let fingerprint = LedgerSnapshotFingerprint.compute(chunkCount: chunkCount, generations: gens)
+        let payload = LedgerSnapshotCodec.encode(ledger, dims: dims)
+        let record = LedgerSnapshotRecord(
+            dims: dims,
+            chunkCount: fingerprint.chunkCount,
+            maxChunkID: fingerprint.maxChunkID,
+            totalEmbeddings: fingerprint.totalEmbeddings,
+            maxGenerationID: fingerprint.maxGenerationID,
+            generationCount: fingerprint.generationCount,
+            payload: payload
+        )
+        try await storage.saveLedgerSnapshot(record)
     }
 
     /// Body of the flush operation. Must only be invoked by `flush()`,
@@ -892,6 +1028,10 @@ public actor Indexer {
         for g in gens {
             try await storage.deleteGeneration(id: g.id)
         }
+        // Drop any persisted ledger snapshot too (issue #136): a stale one is
+        // caught safely by the fingerprint check on next init, but leaving a
+        // potentially large orphaned blob on disk is poor hygiene.
+        try await storage.clearLedgerSnapshot()
         ledger.removeAll()
         dims = nil
         pendingMinChunkID = nil
@@ -902,9 +1042,18 @@ public actor Indexer {
 
     // MARK: - Testing helpers
 
-    /// Returns a snapshot of the current ledger (chunkID → per-token embeddings).
-    /// Internal, not part of the public API. Accessible from `@testable import SwitchcraftCore`.
-    var ledgerSnapshot: [Int64: [[Float]]] { ledger }
+    /// Returns a live copy of the current ledger (chunkID → per-token
+    /// embeddings). Internal, not part of the public API. Accessible from
+    /// `@testable import SwitchcraftCore`. Renamed from `ledgerSnapshot`
+    /// (issue #136) to disambiguate from the persisted `LedgerSnapshotRecord`
+    /// fast-path feature — this is an in-memory copy for test assertions, not
+    /// the on-disk snapshot.
+    var ledgerContents: [Int64: [[Float]]] { ledger }
+
+    /// True when `init` populated the ledger from a persisted snapshot
+    /// (fast path) rather than running the full rehydration walk. Test-only
+    /// signal for the reproducer/fallback tests (issue #136).
+    private(set) var didUseSnapshotFastPath: Bool = false
 
     // MARK: - Helpers
 
