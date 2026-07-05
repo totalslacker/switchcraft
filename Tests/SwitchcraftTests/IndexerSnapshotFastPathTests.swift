@@ -201,6 +201,33 @@ struct IndexerSnapshotFastPathTests {
         #expect(try await storage.loadLedgerSnapshot() == nil)
     }
 
+    // MARK: - Write-time consistency guard
+
+    @Test("write guard: ledger inconsistent with storage → no snapshot persisted at persistSnapshot")
+    func inconsistentLedgerSkipsSnapshotWrite() async throws {
+        let (storage, _) = try await Self.populateAndFlush(chunkCount: 6)
+        // A valid snapshot exists after the flush.
+        #expect(try await storage.loadLedgerSnapshot() != nil)
+
+        // Reopen so the indexer holds the full (consistent) ledger.
+        let indexer = try await Indexer(storage: storage, config: .testing())
+        #expect(await indexer.didUseSnapshotFastPath == true)
+
+        // Mutate storage out-of-band so the committed embedding count no longer
+        // matches the in-memory ledger (simulates a crash-left partial state
+        // rewritten directly behind the indexer's back).
+        let gens = try await storage.generations()
+        for g in gens {
+            try await storage.updateGenerationEmbeddingCount(id: g.id, count: 0)
+        }
+
+        // persistSnapshot() must detect the divergence and refuse to write,
+        // clearing any prior snapshot instead.
+        try await indexer.persistSnapshot()
+        #expect(try await storage.loadLedgerSnapshot() == nil,
+                "an inconsistent ledger must not be persisted as a snapshot")
+    }
+
     // MARK: - Empty index
 
     @Test("empty index: no generations → no fast path, no snapshot written")
