@@ -68,6 +68,14 @@ public actor SwitchcraftStore {
     // is re-added with matching content (R2 of issue #120).
     private var pendingChunkIDs: Set<Int64> = []
 
+    /// Test-only: whether the indexer populated its ledger from a persisted
+    /// snapshot (fast path) at construction, rather than a full rehydration
+    /// walk. Internal, exposed via `@testable import Switchcraft` for the
+    /// snapshot fast-path reproducer (issue #136).
+    var indexerUsedSnapshotFastPath: Bool {
+        get async { await indexer.didUseSnapshotFastPath }
+    }
+
     // MARK: - Init
 
     /// Build a store over any `SwitchcraftStorage`.

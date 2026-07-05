@@ -1051,9 +1051,12 @@ public actor Indexer {
     var ledgerContents: [Int64: [[Float]]] { ledger }
 
     /// True when `init` populated the ledger from a persisted snapshot
-    /// (fast path) rather than running the full rehydration walk. Test-only
-    /// signal for the reproducer/fallback tests (issue #136).
-    private(set) var didUseSnapshotFastPath: Bool = false
+    /// (fast path) rather than running the full rehydration walk. Diagnostic
+    /// signal for the snapshot fast-path reproducer/fallback tests and for
+    /// consumers that want to observe which startup path was taken (issue
+    /// #136). Public so it is reachable across module boundaries (e.g. from
+    /// `SwitchcraftStore` in the `Switchcraft` module).
+    public private(set) var didUseSnapshotFastPath: Bool = false
 
     // MARK: - Helpers
 
