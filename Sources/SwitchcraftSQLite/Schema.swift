@@ -87,6 +87,25 @@ enum Schema {
 
         "CREATE INDEX IF NOT EXISTS bucket_generation_idx ON bucket(generation_id)",
 
+        // Single-row ledger snapshot slot (issue #136 / ADR 034). The
+        // `CHECK (id = 1)` constraint enforces at most one snapshot; save is an
+        // UPSERT on id=1. Created unconditionally on every open via
+        // `CREATE TABLE IF NOT EXISTS`, so existing databases pick it up lazily
+        // without a `PRAGMA user_version` bump (only the V0→V1 title migration,
+        // which altered an existing table, needed conditional migration logic).
+        """
+        CREATE TABLE IF NOT EXISTS ledger_snapshot (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            dims INTEGER NOT NULL,
+            chunk_count INTEGER NOT NULL,
+            max_chunk_id INTEGER NOT NULL,
+            total_embeddings INTEGER NOT NULL,
+            max_generation_id INTEGER NOT NULL,
+            generation_count INTEGER NOT NULL,
+            payload BLOB NOT NULL
+        )
+        """,
+
         // Search calls `documents(forChunkHash:)` once per selected chunk
         // to bridge ADR 005's `(chunkID, tokenOffset)` bucket pairs back
         // to documents. Without this index that becomes a full table scan

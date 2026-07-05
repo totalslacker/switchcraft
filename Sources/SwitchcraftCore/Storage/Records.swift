@@ -130,6 +130,58 @@ public struct BucketRecord: Sendable, Hashable {
     }
 }
 
+/// A persisted point-in-time snapshot of the indexer's in-memory ledger.
+///
+/// Written at points where the ledger is known-consistent with storage
+/// (after a successful `performFlush()` commit, and at the end of a clean
+/// `SwitchcraftStore.shutdown()`), this lets `Indexer.init` skip the
+/// O(all embeddings) rehydration walk on the next clean-shutdown startup.
+///
+/// The `payload` blob encodes the full `[Int64: [[Float]]]` ledger (see
+/// `LedgerSnapshotCodec`). The five fingerprint fields (`chunkCount`,
+/// `maxChunkID`, `totalEmbeddings`, `maxGenerationID`, `generationCount`)
+/// are a cheap staleness check computed from storage metadata that is
+/// already available without decoding buckets — if any of them disagree
+/// with freshly-computed storage state at the next `init`, the snapshot is
+/// treated as stale and the full rehydration walk runs instead. This is a
+/// fast staleness/corruption check, not a cryptographic integrity
+/// guarantee; correctness is backstopped by the full-walk fallback. See
+/// ADR 034.
+public struct LedgerSnapshotRecord: Sendable, Hashable {
+    /// Vector dimensionality locked in by the ledger at snapshot time.
+    public var dims: Int
+    /// `storage.chunkCount()` at snapshot time.
+    public var chunkCount: Int
+    /// `max(gen.maxChunkID)` across all generations at snapshot time.
+    public var maxChunkID: Int64
+    /// Sum of `gen.numEmbeddings` across all generations at snapshot time.
+    public var totalEmbeddings: Int
+    /// `max(gen.id)` across all generations at snapshot time.
+    public var maxGenerationID: Int64
+    /// Number of generations at snapshot time.
+    public var generationCount: Int
+    /// The encoded ledger payload (see `LedgerSnapshotCodec.encode`).
+    public var payload: Data
+
+    public init(
+        dims: Int,
+        chunkCount: Int,
+        maxChunkID: Int64,
+        totalEmbeddings: Int,
+        maxGenerationID: Int64,
+        generationCount: Int,
+        payload: Data
+    ) {
+        self.dims = dims
+        self.chunkCount = chunkCount
+        self.maxChunkID = maxChunkID
+        self.totalEmbeddings = totalEmbeddings
+        self.maxGenerationID = maxGenerationID
+        self.generationCount = generationCount
+        self.payload = payload
+    }
+}
+
 /// A scored full-text search hit returned by a storage backend.
 public struct FullTextHit: Sendable, Hashable {
     public var uuid: String

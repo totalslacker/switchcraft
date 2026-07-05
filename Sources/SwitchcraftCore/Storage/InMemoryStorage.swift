@@ -26,6 +26,10 @@ public actor InMemoryStorage: SwitchcraftStorage {
     private var nextGenerationID: Int64 = 1
     private var nextBucketID: Int64 = 1
 
+    /// The single persisted ledger snapshot slot (see ADR 034). nil when no
+    /// snapshot is stored.
+    private var ledgerSnapshotRecord: LedgerSnapshotRecord?
+
     private let ftsTitleWeight: Float
 
     public init(ftsTitleWeight: Float = 3.0) {
@@ -49,9 +53,24 @@ public actor InMemoryStorage: SwitchcraftStorage {
         generations.removeAll()
         bucketsByGeneration.removeAll()
         indexedChunkIDsCache = [:]
+        ledgerSnapshotRecord = nil
         nextChunkID = 1
         nextGenerationID = 1
         nextBucketID = 1
+    }
+
+    // MARK: - Ledger snapshot
+
+    public func saveLedgerSnapshot(_ snapshot: LedgerSnapshotRecord) async throws {
+        ledgerSnapshotRecord = snapshot
+    }
+
+    public func loadLedgerSnapshot() async throws -> LedgerSnapshotRecord? {
+        ledgerSnapshotRecord
+    }
+
+    public func clearLedgerSnapshot() async throws {
+        ledgerSnapshotRecord = nil
     }
 
     // MARK: - Documents

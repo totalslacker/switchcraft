@@ -122,10 +122,68 @@ public actor SQLiteStorage: SwitchcraftStorage {
                 try conn.execute("DELETE FROM generation")
                 try conn.execute("DELETE FROM chunk")
                 try conn.execute("DELETE FROM document")
+                try conn.execute("DELETE FROM ledger_snapshot")
                 try conn.execute("DELETE FROM sqlite_sequence")
             }
         case .fileBacked(let writer, _):
             try await writer.clear()
+        }
+    }
+
+    // MARK: - Ledger snapshot
+
+    public func saveLedgerSnapshot(_ snapshot: LedgerSnapshotRecord) async throws {
+        switch mode {
+        case .closed:
+            throw SQLiteError(code: 1, message: "storage is not open")
+        case .inMemory(let conn):
+            let stmt = try conn.prepare("""
+                INSERT INTO ledger_snapshot
+                    (id, dims, chunk_count, max_chunk_id, total_embeddings, max_generation_id, generation_count, payload)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    dims = excluded.dims,
+                    chunk_count = excluded.chunk_count,
+                    max_chunk_id = excluded.max_chunk_id,
+                    total_embeddings = excluded.total_embeddings,
+                    max_generation_id = excluded.max_generation_id,
+                    generation_count = excluded.generation_count,
+                    payload = excluded.payload
+                """)
+            try stmt.bind([
+                .int(Int64(snapshot.dims)),
+                .int(Int64(snapshot.chunkCount)),
+                .int(snapshot.maxChunkID),
+                .int(Int64(snapshot.totalEmbeddings)),
+                .int(snapshot.maxGenerationID),
+                .int(Int64(snapshot.generationCount)),
+                .blob(snapshot.payload),
+            ])
+            try stmt.step()
+        case .fileBacked(let writer, _):
+            try await writer.saveLedgerSnapshot(snapshot)
+        }
+    }
+
+    public func loadLedgerSnapshot() async throws -> LedgerSnapshotRecord? {
+        switch mode {
+        case .closed:
+            throw SQLiteError(code: 1, message: "storage is not open")
+        case .inMemory(let conn):
+            return try SQLiteWriterActor.loadLedgerSnapshot(conn)
+        case .fileBacked(let writer, _):
+            return try await writer.loadLedgerSnapshot()
+        }
+    }
+
+    public func clearLedgerSnapshot() async throws {
+        switch mode {
+        case .closed:
+            throw SQLiteError(code: 1, message: "storage is not open")
+        case .inMemory(let conn):
+            try conn.execute("DELETE FROM ledger_snapshot")
+        case .fileBacked(let writer, _):
+            try await writer.clearLedgerSnapshot()
         }
     }
 

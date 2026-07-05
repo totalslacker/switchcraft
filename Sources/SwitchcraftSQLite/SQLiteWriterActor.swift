@@ -351,6 +351,65 @@ actor SQLiteWriterActor {
         return inserted
     }
 
+    // MARK: - Ledger snapshot
+
+    func saveLedgerSnapshot(_ snapshot: LedgerSnapshotRecord) throws {
+        let conn = try requireConnection()
+        let stmt = try conn.prepare("""
+            INSERT INTO ledger_snapshot
+                (id, dims, chunk_count, max_chunk_id, total_embeddings, max_generation_id, generation_count, payload)
+            VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                dims = excluded.dims,
+                chunk_count = excluded.chunk_count,
+                max_chunk_id = excluded.max_chunk_id,
+                total_embeddings = excluded.total_embeddings,
+                max_generation_id = excluded.max_generation_id,
+                generation_count = excluded.generation_count,
+                payload = excluded.payload
+            """)
+        try stmt.bind([
+            .int(Int64(snapshot.dims)),
+            .int(Int64(snapshot.chunkCount)),
+            .int(snapshot.maxChunkID),
+            .int(Int64(snapshot.totalEmbeddings)),
+            .int(snapshot.maxGenerationID),
+            .int(Int64(snapshot.generationCount)),
+            .blob(snapshot.payload),
+        ])
+        try stmt.step()
+    }
+
+    func loadLedgerSnapshot() throws -> LedgerSnapshotRecord? {
+        let conn = try requireConnection()
+        return try Self.loadLedgerSnapshot(conn)
+    }
+
+    func clearLedgerSnapshot() throws {
+        let conn = try requireConnection()
+        try conn.execute("DELETE FROM ledger_snapshot")
+    }
+
+    /// Shared SELECT used by both the writer actor and the in-memory
+    /// single-connection path in `SQLiteStorage`.
+    static func loadLedgerSnapshot(_ conn: SQLiteConnection) throws -> LedgerSnapshotRecord? {
+        let stmt = try conn.prepare("""
+            SELECT dims, chunk_count, max_chunk_id, total_embeddings, max_generation_id, generation_count, payload
+            FROM ledger_snapshot
+            WHERE id = 1
+            """)
+        guard try stmt.step() else { return nil }
+        return LedgerSnapshotRecord(
+            dims: Int(stmt.columnInt64(0)),
+            chunkCount: Int(stmt.columnInt64(1)),
+            maxChunkID: stmt.columnInt64(2),
+            totalEmbeddings: Int(stmt.columnInt64(3)),
+            maxGenerationID: stmt.columnInt64(4),
+            generationCount: Int(stmt.columnInt64(5)),
+            payload: stmt.columnBlob(6)
+        )
+    }
+
     // MARK: - Clear
 
     func clear() throws {
@@ -360,6 +419,7 @@ actor SQLiteWriterActor {
             try conn.execute("DELETE FROM generation")
             try conn.execute("DELETE FROM chunk")
             try conn.execute("DELETE FROM document")
+            try conn.execute("DELETE FROM ledger_snapshot")
             try conn.execute("DELETE FROM sqlite_sequence")
         }
     }
