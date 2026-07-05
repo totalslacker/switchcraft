@@ -729,6 +729,25 @@ public actor Indexer {
         let gens = try await storage.generations()
         let chunkCount = try await storage.chunkCount()
         let fingerprint = LedgerSnapshotFingerprint.compute(chunkCount: chunkCount, generations: gens)
+
+        // Consistency guard (issue #136 / ADR 034). A snapshot is only valid at
+        // points where the in-memory ledger is known-consistent with committed
+        // storage. By the LSM invariant every ledger row belongs to exactly one
+        // active generation, so the total ledger row count must equal
+        // sum(gen.numEmbeddings). If they diverge, the ledger has been mutated
+        // out-of-band relative to storage (e.g. storage rewritten directly
+        // behind the Indexer's back, as when a crash leaves a partial-orphan
+        // generation) — persisting a snapshot now would bake in a stale ledger
+        // whose fingerprint falsely matches storage. Refuse to write, and clear
+        // any prior snapshot so the next startup falls back to the full
+        // rehydration walk (the crash-recovery safety net, unchanged).
+        let ledgerRowCount = ledger.values.reduce(0) { $0 + $1.count }
+        guard ledgerRowCount == fingerprint.totalEmbeddings else {
+            indexerLogger.warning("Skipping ledger snapshot write: ledger rows (\(ledgerRowCount, privacy: .public)) != storage embeddings (\(fingerprint.totalEmbeddings, privacy: .public)); next startup will use full rehydration")
+            try await storage.clearLedgerSnapshot()
+            return
+        }
+
         let payload = LedgerSnapshotCodec.encode(ledger, dims: dims)
         let record = LedgerSnapshotRecord(
             dims: dims,
