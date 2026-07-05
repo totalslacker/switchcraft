@@ -241,3 +241,69 @@ struct IndexerSnapshotFastPathTests {
         #expect(try await storage.loadLedgerSnapshot() == nil)
     }
 }
+
+/// `true` when compiled with optimisations (`swift test -c release`); mirrors
+/// `PerformanceTests.isReleaseBuild`. The wall-clock comparison below is too
+/// noisy to defend under a debug build.
+private let isReleaseBuild: Bool = {
+    var debug = false
+    assert({ debug = true; return true }())
+    return !debug
+}()
+
+/// Release-gated wall-clock evidence that the snapshot fast path is
+/// measurably faster than the full rehydration walk (issue #136 acceptance
+/// criterion 7). The correctness of "which path was taken" is asserted by the
+/// boolean-flag tests above; this suite only documents the speedup and asserts
+/// the loose, non-flaky invariant that the fast path is not slower.
+@Suite("Indexer Snapshot Fast Path Speedup", .serialized,
+       .enabled(if: isReleaseBuild,
+                "Snapshot speedup is release-only (run with `swift test -c release`)"))
+struct IndexerSnapshotSpeedupTests {
+
+    @Test("fast-path init is measurably faster than the full rehydration walk")
+    func fastPathBeatsFullWalk() async throws {
+        let dims = 64
+        let chunkCount = 3_000
+        let tokensPerChunk = 4
+
+        // Build a corpus large enough that the full walk (bucket decode + Q4
+        // dequant of every embedding) does real work.
+        let storage = InMemoryStorage()
+        try await storage.open()
+        let builder = try await Indexer(storage: storage, config: .testing(l0Capacity: 4, lsmFanout: 4))
+        for c in 1...chunkCount {
+            var flat = [Float](repeating: 0, count: tokensPerChunk * dims)
+            var s = UInt64(c) &* 2_654_435_761 &+ 17
+            for i in 0..<flat.count {
+                s = s &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+                flat[i] = Float(s >> 40) / Float(1 << 24) - 0.5
+            }
+            try await builder.add(chunkID: Int64(c), embeddings: flat, dims: dims)
+        }
+        _ = try await builder.flush()
+        // A valid snapshot now exists.
+        #expect(try await storage.loadLedgerSnapshot() != nil)
+
+        // Measure the fast path (snapshot present). This consumes + clears it.
+        let fastStart = Date()
+        let fast = try await Indexer(storage: storage, config: .testing(l0Capacity: 4, lsmFanout: 4))
+        let fastElapsed = Date().timeIntervalSince(fastStart)
+        #expect(await fast.didUseSnapshotFastPath == true)
+
+        // Measure the full walk (snapshot now absent after invalidate-on-load).
+        #expect(try await storage.loadLedgerSnapshot() == nil)
+        let fullStart = Date()
+        let full = try await Indexer(storage: storage, config: .testing(l0Capacity: 4, lsmFanout: 4))
+        let fullElapsed = Date().timeIntervalSince(fullStart)
+        #expect(await full.didUseSnapshotFastPath == false)
+
+        let ratio = fullElapsed / max(fastElapsed, 1e-9)
+        print("[PerfTest] snapshot fast-path=\(String(format: "%.4f", fastElapsed))s full-walk=\(String(format: "%.4f", fullElapsed))s speedup=\(String(format: "%.2f", ratio))×")
+
+        // Loose, non-flaky invariant: the fast path must not be slower than the
+        // full walk. The `print` above documents the actual speedup.
+        #expect(fastElapsed <= fullElapsed,
+                "snapshot fast path (\(fastElapsed)s) should not be slower than the full walk (\(fullElapsed)s)")
+    }
+}
