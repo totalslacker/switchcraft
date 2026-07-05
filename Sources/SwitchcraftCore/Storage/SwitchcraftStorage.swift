@@ -241,6 +241,38 @@ public protocol SwitchcraftStorage: Sendable {
     /// Called during graceful shutdown to ensure the database file is in a
     /// clean state before process exit.
     func walCheckpoint() async throws -> CheckpointResult
+
+    // MARK: - Ledger snapshot (optional, fast-path startup)
+
+    /// Persist a single ledger snapshot, replacing any previously stored one.
+    ///
+    /// Called by `Indexer` at points where the in-memory ledger is known to
+    /// be consistent with storage (after a successful `performFlush()` commit,
+    /// and at the end of a clean `SwitchcraftStore.shutdown()`), so that the
+    /// next `Indexer.init` can skip the full rehydration walk. Backends store
+    /// exactly one snapshot slot; a second save overwrites the first.
+    ///
+    /// The default implementation is a no-op — a backend that does not
+    /// implement this simply never gets the startup fast path and always
+    /// falls back to full rehydration. Never incorrect, just slower. See
+    /// ADR 034.
+    func saveLedgerSnapshot(_ snapshot: LedgerSnapshotRecord) async throws
+
+    /// Load the persisted ledger snapshot, or `nil` if none is stored.
+    ///
+    /// Called once at `Indexer.init`. The default implementation returns
+    /// `nil`, so backends without snapshot support always fall back to the
+    /// full rehydration walk.
+    func loadLedgerSnapshot() async throws -> LedgerSnapshotRecord?
+
+    /// Clear the persisted ledger snapshot. No-op if none is stored.
+    ///
+    /// Called immediately after a successful fast-path load (invalidate-on-
+    /// load, ADR 034) so that a crash after load but before the next
+    /// successful flush/shutdown correctly falls back to full rehydration on
+    /// the following startup. Also called when the whole index is cleared.
+    /// The default implementation is a no-op.
+    func clearLedgerSnapshot() async throws
 }
 
 extension SwitchcraftStorage {
@@ -253,4 +285,7 @@ extension SwitchcraftStorage {
     }
     public func applyVacuumPlan(_ plan: VacuumPlan) async throws -> Int { 0 }
     public func freeListByteCount() async throws -> Int64 { 0 }
+    public func saveLedgerSnapshot(_ snapshot: LedgerSnapshotRecord) async throws {}
+    public func loadLedgerSnapshot() async throws -> LedgerSnapshotRecord? { nil }
+    public func clearLedgerSnapshot() async throws {}
 }
