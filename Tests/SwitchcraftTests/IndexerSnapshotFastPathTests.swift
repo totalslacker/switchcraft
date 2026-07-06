@@ -64,8 +64,15 @@ struct IndexerSnapshotFastPathTests {
         #expect(await reopened.didUseSnapshotFastPath == true)
         #expect(await reopened.recoveredConflictCount == 0)
 
-        // The fast path reconstructs the EXACT in-memory ledger (snapshot stores
-        // full-precision floats), unlike the Q4-lossy full-walk reconstruction.
+        // The fast path reconstructs the exact in-memory ledger. Both sides of
+        // this comparison already resolve through the same Q4-lossy path
+        // (issue #137 / ADR 035): `originalLedger` was captured via
+        // `ledgerContents()` right after flush, when this corpus's tokens are
+        // already `.bucketRef` (materialized on demand by `ledgerContents()`
+        // itself), and `reloaded` resolves the snapshot's own bucket-refs the
+        // same way — so this assertion is "same bucket data resolves
+        // identically," not "snapshot floats are more precise than a Q4 walk"
+        // (ADR 034's original claim, corrected by ADR 035 §6).
         let reloaded = try await reopened.ledgerContents()
         #expect(reloaded == originalLedger)
 
@@ -198,6 +205,61 @@ struct IndexerSnapshotFastPathTests {
         let ledger = try await reopened.ledgerContents()
         #expect(ledger.count == 6)
         // The corrupt snapshot must have been cleared on the failed load attempt.
+        #expect(try await storage.loadLedgerSnapshot() == nil)
+    }
+
+    @Test("v1 (pre-issue-#137) snapshot payload falls back to full rehydration, not misparsed")
+    func v1FormatSnapshotFallsBack() async throws {
+        let (storage, originalLedger) = try await Self.populateAndFlush(chunkCount: 6)
+
+        // Reconstruct the exact v1 payload layout (issue #136): no magic, no
+        // version byte, no per-token tag — just chunkCount, then per chunk
+        // chunkID + tokenCount + tokenCount*dims Float32LE, straight from the
+        // ledger captured right after flush.
+        var v1 = Data()
+        func appendU32(_ v: UInt32) {
+            v1.append(UInt8(v & 0xFF)); v1.append(UInt8((v >> 8) & 0xFF))
+            v1.append(UInt8((v >> 16) & 0xFF)); v1.append(UInt8((v >> 24) & 0xFF))
+        }
+        func appendI64(_ v: Int64) {
+            let bits = UInt64(bitPattern: v)
+            for shift in stride(from: 0, through: 56, by: 8) {
+                v1.append(UInt8((bits >> UInt64(shift)) & 0xFF))
+            }
+        }
+        let sortedChunkIDs = originalLedger.keys.sorted()
+        appendU32(UInt32(sortedChunkIDs.count))
+        for chunkID in sortedChunkIDs {
+            let rows = originalLedger[chunkID]!
+            appendI64(chunkID)
+            appendU32(UInt32(rows.count))
+            for row in rows {
+                for v in row { appendU32(v.bitPattern) }
+            }
+        }
+
+        let gens = try await storage.generations()
+        let chunkCount = try await storage.chunkCount()
+        let fp = LedgerSnapshotFingerprint.compute(chunkCount: chunkCount, generations: gens)
+        let v1Record = LedgerSnapshotRecord(
+            dims: Self.dims,
+            chunkCount: fp.chunkCount,
+            maxChunkID: fp.maxChunkID,
+            totalEmbeddings: fp.totalEmbeddings,
+            maxGenerationID: fp.maxGenerationID,
+            generationCount: fp.generationCount,
+            payload: v1
+        )
+        try await storage.saveLedgerSnapshot(v1Record)
+
+        // init must not throw — the version-mismatch decode failure is
+        // swallowed (same as any other corrupt/unusable snapshot) and the
+        // full rehydration walk runs instead, producing the correct ledger.
+        let reopened = try await Indexer(storage: storage, config: .testing())
+        #expect(await reopened.didUseSnapshotFastPath == false)
+        let ledger = try await reopened.ledgerContents()
+        #expect(ledger == originalLedger)
+        // The unusable v1 snapshot must have been cleared on the failed load.
         #expect(try await storage.loadLedgerSnapshot() == nil)
     }
 
