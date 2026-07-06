@@ -51,7 +51,7 @@
 //     (see `releaseAbsoluteTimeCeiling` below for the measured basis this
 //     was picked from). This is what users actually experience. The
 //     Release ratio is still logged for observability but is intentionally
-//     NOT asserted — see ADR 035 §8 for why chasing a higher Release ratio
+//     NOT asserted — see ADR 036 §8 for why chasing a higher Release ratio
 //     would be optimizing the wrong metric.
 //
 // # How to run
@@ -254,7 +254,7 @@ struct LazyLedgerBenchmarkTests {
         // doesn't compress it); Release asserts absolute wall-clock instead,
         // since that's what users experience and the ratio metric shrinks in
         // Release for reasons unrelated to whether the optimization worked
-        // (see the file-header comment and ADR 035 §8).
+        // (see the file-header comment and ADR 036 §8).
 #if DEBUG
         #expect(timeRatio >= 50,
                 "Debug rehydrate time should improve by >= 50x; measured \(String(format: "%.1f", timeRatio))x (pre=\(preElapsed)s, post=\(postElapsed)s)")
