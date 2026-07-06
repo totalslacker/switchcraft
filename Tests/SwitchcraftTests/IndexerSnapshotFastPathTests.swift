@@ -328,9 +328,20 @@ struct IndexerSnapshotSpeedupTests {
         let dims = 64
         let chunkCount = 3_000
         let tokensPerChunk = 4
+        let trials = 7
 
-        // Build a corpus large enough that the full walk (bucket decode + Q4
-        // dequant of every embedding) does real work.
+        // Build a corpus large enough that the full walk does real work.
+        // Note (issue #137 / ADR 035): the full walk itself is now a cheap
+        // O(pairs) integrity walk (no per-token Q4 dequant — that eager
+        // reconstruction was removed), so its absolute cost — and therefore
+        // its margin versus the snapshot fast path, which is also O(pairs) —
+        // is much smaller than when this test was written for ADR 034. A
+        // single-shot wall-clock comparison is thin enough now to be flipped
+        // by scheduler contention when this suite runs alongside the rest of
+        // the package's tests, so this measures min-of-`trials` for each
+        // phase instead of one sample: scheduler/GC jitter only ever adds
+        // delay, never subtracts it, so the minimum across repeated trials
+        // is the most contention-resistant estimate of the true cost.
         let storage = InMemoryStorage()
         try await storage.open()
         let builder = try await Indexer(storage: storage, config: .testing(l0Capacity: 4, lsmFanout: 4))
@@ -347,21 +358,33 @@ struct IndexerSnapshotSpeedupTests {
         // A valid snapshot now exists.
         #expect(try await storage.loadLedgerSnapshot() != nil)
 
-        // Measure the fast path (snapshot present). This consumes + clears it.
-        let fastStart = Date()
-        let fast = try await Indexer(storage: storage, config: .testing(l0Capacity: 4, lsmFanout: 4))
-        let fastElapsed = Date().timeIntervalSince(fastStart)
-        #expect(await fast.didUseSnapshotFastPath == true)
+        var fastSamples: [TimeInterval] = []
+        var fullSamples: [TimeInterval] = []
+        for _ in 0..<trials {
+            // `persistSnapshot()` re-encodes `builder`'s (unchanged) ledger
+            // and re-arms the on-disk snapshot, since the previous trial's
+            // fast-path load consumed + cleared it (invalidate-on-load).
+            try await builder.persistSnapshot()
+            #expect(try await storage.loadLedgerSnapshot() != nil)
 
-        // Measure the full walk (snapshot now absent after invalidate-on-load).
-        #expect(try await storage.loadLedgerSnapshot() == nil)
-        let fullStart = Date()
-        let full = try await Indexer(storage: storage, config: .testing(l0Capacity: 4, lsmFanout: 4))
-        let fullElapsed = Date().timeIntervalSince(fullStart)
-        #expect(await full.didUseSnapshotFastPath == false)
+            let fastStart = Date()
+            let fast = try await Indexer(storage: storage, config: .testing(l0Capacity: 4, lsmFanout: 4))
+            fastSamples.append(Date().timeIntervalSince(fastStart))
+            #expect(await fast.didUseSnapshotFastPath == true)
 
+            // Snapshot now absent after invalidate-on-load — this init takes
+            // the full walk.
+            #expect(try await storage.loadLedgerSnapshot() == nil)
+            let fullStart = Date()
+            let full = try await Indexer(storage: storage, config: .testing(l0Capacity: 4, lsmFanout: 4))
+            fullSamples.append(Date().timeIntervalSince(fullStart))
+            #expect(await full.didUseSnapshotFastPath == false)
+        }
+
+        let fastElapsed = fastSamples.min()!
+        let fullElapsed = fullSamples.min()!
         let ratio = fullElapsed / max(fastElapsed, 1e-9)
-        print("[PerfTest] snapshot fast-path=\(String(format: "%.4f", fastElapsed))s full-walk=\(String(format: "%.4f", fullElapsed))s speedup=\(String(format: "%.2f", ratio))×")
+        print("[PerfTest] snapshot fast-path(min of \(trials))=\(String(format: "%.4f", fastElapsed))s full-walk(min of \(trials))=\(String(format: "%.4f", fullElapsed))s speedup=\(String(format: "%.2f", ratio))×")
 
         // Loose, non-flaky invariant: the fast path must not be slower than the
         // full walk. The `print` above documents the actual speedup.
