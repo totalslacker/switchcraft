@@ -40,3 +40,4 @@ ADRs document significant design decisions for Switchcraft. Each file follows th
 - [032 — CompactionEvent callback API](032-compaction-event-callback-api.md)
 - [033 — WAL checkpoint contract: `CheckpointResult`, flush-first `walCheckpoint()`, and `shutdown()` partial logging](033-wal-checkpoint-contract.md)
 - [034 — Ledger snapshot fast path: skipping the full rehydration walk on clean-shutdown startups](034-ledger-snapshot-fast-path.md)
+- [035 — Search latency: parallel bucket decode + query-token dedup](035-search-latency-parallel-decode-and-query-dedup.md)
