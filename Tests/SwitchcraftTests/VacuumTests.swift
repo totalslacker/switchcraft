@@ -356,6 +356,147 @@ struct VacuumTests {
         try await store.shutdown()
     }
 
+    // MARK: - AC1/AC2 (issue #142): shared-bucket compaction must preserve
+    // live chunks' `.bucketRef` ledger pointers
+
+    /// Directly hand-plants a single bucket containing `pairs` (in that
+    /// exact order) with `residualRows[i]` as pair `i`'s residual row, then
+    /// constructs an `Indexer` over the resulting storage — mirroring the
+    /// `LazyLedgerMaterializationTests`/`vacuumNeverRemovesPartialOrphansWithOwningDocuments`
+    /// pattern of driving `Indexer` + `VacuumPlanBuilder` directly against
+    /// synthetic fixtures, since k-means cluster assignment isn't
+    /// controllable from the public `SwitchcraftStore` API and both AC1/AC2
+    /// require an exact, deliberate bucket layout.
+    private static func plantSharedBucket(
+        dims: Int, pairs: [IndexPair], residualRows: [[Float]]
+    ) async throws -> (storage: any SwitchcraftStorage, decodedResiduals: [Float]) {
+        let storage = InMemoryStorage()
+        try await storage.open()
+
+        let chunkIDs = pairs.map { Int64($0.chunkID) }
+        let gen = try await storage.insertGeneration(
+            GenerationRecord(
+                level: 0, numEmbeddings: pairs.count,
+                minChunkID: chunkIDs.min()!, maxChunkID: chunkIDs.max()!, created: Date()
+            )
+        )
+        let residualsEncoded = Q4Codec.encodeResiduals(residualRows.flatMap { $0 })
+        _ = try await storage.insertBucket(
+            BucketRecord(
+                generationID: gen.id,
+                center: Indexer.encodeFloat32LE([Float](repeating: 0, count: dims)),
+                indices: IndicesCodec.encode(pairs),
+                residuals: residualsEncoded
+            )
+        )
+        // Golden reference: decode the exact bytes just written, matching
+        // LazyLedgerMaterializationTests' pattern — Q4 is lossy, so the
+        // golden value must come from the same decode path the ledger
+        // itself uses, not from the pre-quantization input floats.
+        return (storage, Q4Codec.decodeResiduals(residualsEncoded))
+    }
+
+    @Test("shared-bucket reproducer: a live chunk's .bucketRef resolves to its exact pre-vacuum embedding after vacuum compacts a bucket it shares with an abandoned chunk (AC1)")
+    func sharedBucketLiveChunkResolvesAfterVacuum() async throws {
+        let dims = 4
+        let abandonedChunkID: Int64 = 100
+        let liveChunkID: Int64 = 1
+
+        // Two pairs in one bucket: abandoned first, live second. After
+        // vacuum removes the abandoned pair, the live pair's offset shifts
+        // from 1 (still in-range for the pre-compaction 2-pair bucket) to
+        // 0 — pre-fix, the live chunk's stale ledger ref would still say
+        // offset 1, which is out of range for the post-compaction 1-pair
+        // bucket, throwing `bucketRefUnresolvable`.
+        let pairs = [
+            IndexPair(chunkID: UInt32(abandonedChunkID), tokenOffset: 0),
+            IndexPair(chunkID: UInt32(liveChunkID), tokenOffset: 0),
+        ]
+        let residualRows: [[Float]] = [
+            [0.05, -0.05, 0.1, -0.1],
+            [0.2, -0.2, 0.15, -0.15],
+        ]
+        let (storage, decodedResiduals) = try await Self.plantSharedBucket(
+            dims: dims, pairs: pairs, residualRows: residualRows
+        )
+        let goldenLive = Array(decodedResiduals[dims..<(2 * dims)])
+
+        let config = IndexerConfig.testing(rehydrationConflictBehavior: .throwError)
+        let indexer = try await Indexer(storage: storage, config: config)
+
+        let gens = try await storage.generations()
+        let planResult = try await VacuumPlanBuilder.buildPlan(
+            abandonedChunkIDs: [abandonedChunkID],
+            generations: gens,
+            fetchBuckets: { genID in try await storage.buckets(forGeneration: genID) }
+        )
+        _ = try await storage.applyVacuumPlan(planResult.plan)
+        try await indexer.applyVacuumLedgerUpdates(
+            abandonedChunkIDs: [abandonedChunkID], remaps: planResult.bucketRefRemaps
+        )
+
+        let ledgerContents = try await indexer.ledgerContents()
+        let liveRows = try #require(ledgerContents[liveChunkID], "live chunk must resolve, not throw bucketRefUnresolvable")
+        #expect(liveRows == [goldenLive], "live chunk must resolve to the exact same embedding it referenced before vacuum ran")
+        #expect(ledgerContents[abandonedChunkID] == nil, "abandoned chunk must be gone from the ledger")
+    }
+
+    @Test("adversarial silent-wrong-value regression: a live chunk's remapped .bucketRef never resolves to a different chunk's embedding after vacuum compacts a shared bucket (AC2)")
+    func sharedBucketAdversarialWrongValueNeverResolves() async throws {
+        let dims = 4
+        let abandonedChunkID: Int64 = 100
+        let live1ChunkID: Int64 = 1
+        let live2ChunkID: Int64 = 2
+
+        // Three pairs in one bucket: abandoned, live1, live2. After vacuum
+        // removes the abandoned pair, live1 shifts from offset 1 -> 0 and
+        // live2 shifts from offset 2 -> 1. Pre-fix, live1's stale ref
+        // (still pointing at offset 1) would resolve to what is now
+        // live2's row — an in-range, silently wrong embedding, never a
+        // thrown error. This is the load-bearing adversarial case (AC2):
+        // the fixture is built so a coincidentally-passing fix is ruled
+        // out by asserting inequality with the known-wrong value, not just
+        // equality with the correct one.
+        let pairs = [
+            IndexPair(chunkID: UInt32(abandonedChunkID), tokenOffset: 0),
+            IndexPair(chunkID: UInt32(live1ChunkID), tokenOffset: 0),
+            IndexPair(chunkID: UInt32(live2ChunkID), tokenOffset: 0),
+        ]
+        let residualRows: [[Float]] = [
+            [0.05, -0.05, 0.1, -0.1],
+            [0.2, -0.2, 0.15, -0.15],
+            [-0.22, 0.22, -0.18, 0.18],
+        ]
+        let (storage, decodedResiduals) = try await Self.plantSharedBucket(
+            dims: dims, pairs: pairs, residualRows: residualRows
+        )
+        let goldenLive1 = Array(decodedResiduals[dims..<(2 * dims)])
+        let goldenLive2 = Array(decodedResiduals[(2 * dims)..<(3 * dims)])
+        #expect(goldenLive1 != goldenLive2, "fixture rows must be distinguishable or the adversarial assertion below proves nothing")
+
+        let config = IndexerConfig.testing(rehydrationConflictBehavior: .throwError)
+        let indexer = try await Indexer(storage: storage, config: config)
+
+        let gens = try await storage.generations()
+        let planResult = try await VacuumPlanBuilder.buildPlan(
+            abandonedChunkIDs: [abandonedChunkID],
+            generations: gens,
+            fetchBuckets: { genID in try await storage.buckets(forGeneration: genID) }
+        )
+        _ = try await storage.applyVacuumPlan(planResult.plan)
+        try await indexer.applyVacuumLedgerUpdates(
+            abandonedChunkIDs: [abandonedChunkID], remaps: planResult.bucketRefRemaps
+        )
+
+        let ledgerContents = try await indexer.ledgerContents()
+        let live1Rows = try #require(ledgerContents[live1ChunkID])
+        let live2Rows = try #require(ledgerContents[live2ChunkID])
+
+        #expect(live1Rows == [goldenLive1], "live1 must resolve to its own embedding")
+        #expect(live1Rows != [goldenLive2], "live1 must not silently resolve to live2's embedding (the pre-fix bug)")
+        #expect(live2Rows == [goldenLive2], "live2 must resolve to its own embedding")
+    }
+
     // MARK: - 16(g)/(h): SQLite-only PRAGMA measurement contract
 
     @Test("approximateDiskReclaimed tracks the freelist_count delta, and file size (page_count) is unchanged immediately after vacuum()")
@@ -477,6 +618,97 @@ struct VacuumTests {
         let perChunkMicros = Double(elapsed.components.seconds) * 1_000_000
             / Double(max(totalRemoved, 1))
         _ = perChunkMicros // see stage report for the recorded figure
+
+        try await store.shutdown()
+    }
+
+    // MARK: - AC3 (issue #142): sustained shared-bucket workload
+
+    /// Unlike AC1/AC2 (which hand-plant an exact bucket layout to prove the
+    /// remap mechanism directly), this drives the real end-to-end
+    /// `SwitchcraftStore.vacuum()` orchestration path repeatedly, since
+    /// sustained-cycle draining is about that real path staying consistent
+    /// over many iterations, not about a single deterministic bucket
+    /// layout. A small `l0Capacity`/`lsmFanout` forces frequent cascades,
+    /// merging each cohort's chunks together with more-recently-added
+    /// still-live chunks' — since buckets are k-means clusters, not
+    /// chunkID-range partitions, this reliably produces buckets shared
+    /// across live and abandoned chunks without needing to control k-means
+    /// assignment directly.
+    ///
+    /// Critically, a stale/corrupt ledger `.bucketRef` left behind by a
+    /// buggy vacuum is only ever *resolved* (and so only ever surfaces,
+    /// via `Indexer.resolveBucketRefRow`) the next time a cascade merges
+    /// that specific chunk's generation back in — `SwitchcraftStorage`-level
+    /// counts (`chunksRemoved`/`remainingCandidates`) and `search()` (which
+    /// reads bucket blobs directly, bypassing the ledger entirely) can't
+    /// observe it. So each cycle forces one more such cascade — a batch
+    /// large enough to merge every still-live generation back together —
+    /// immediately after vacuum(), guaranteeing every surviving chunk's
+    /// bucket-ref gets re-resolved while its cohort neighbors are still
+    /// fresh from being vacuumed. Reproduces the issue's observed symptom
+    /// ("18 of 20 abandoned chunks stuck", `bucketRefUnresolvable` thrown
+    /// from `resolveBucketRefRow`) as a converged-to-zero regression: every
+    /// cycle's `vacuum()` must fully drain the cohort it just abandoned,
+    /// and the forced cascade immediately after must not throw.
+    @Test("sustained workload: 20+ vacuum cycles against a corpus with buckets shared across live and abandoned chunks each fully drain, with no bucketRefUnresolvable and no ledgerOutOfSync (AC3)")
+    func vacuumSustainedSharedBucketWorkloadFullyDrains() async throws {
+        let config = StoreConfig(indexer: IndexerConfig(l0Capacity: 4, lsmFanout: 2))
+        let (store, _) = try await Self.makeStore(.inMemory, config: config)
+
+        let cycles = 25
+        let cohortSize = 4
+        var cohorts: [[String]] = []
+
+        for cycle in 0..<cycles {
+            let ids = (0..<cohortSize).map { "shared-cycle\(cycle)-doc\($0)" }
+            for (j, id) in ids.enumerated() {
+                try await store.add(id: id, body: "shared bucket workload cycle \(cycle) variant \(j) document content padding words")
+            }
+            try await store.index()
+            cohorts.append(ids)
+
+            // Abandon a cohort from a few cycles back — by now, later
+            // cascades have very likely merged its chunks' buckets
+            // together with still-live chunks' from more recent cohorts.
+            if cycle >= 3 {
+                let toAbandon = cohorts[cycle - 3]
+                for id in toAbandon {
+                    try await store.remove(id: id)
+                }
+                let result = try await store.vacuum()
+                #expect(result.chunksRemoved == cohortSize, "cycle \(cycle) must fully drain its just-abandoned cohort in one call")
+                #expect(result.remainingCandidates == 0, "no abandoned chunk may be left stuck across cycles (the issue's observed symptom)")
+
+                // Force a cascade wide enough to merge every still-live
+                // generation back together, so every surviving chunk's
+                // (possibly just-remapped) bucket-ref gets re-resolved
+                // right away rather than staying dormant at a high LSM
+                // level where this bug would otherwise hide indefinitely.
+                for k in 0..<20 {
+                    try await store.add(id: "cascade-force-\(cycle)-\(k)", body: "cascade force cycle \(cycle) item \(k) padding words here")
+                }
+                try await store.index()
+            }
+        }
+
+        // Drain the final cohorts not yet abandoned by the loop above,
+        // leaving the store fully vacuumed.
+        for ids in cohorts.suffix(3) {
+            for id in ids {
+                try await store.remove(id: id)
+            }
+        }
+        let finalResult = try await store.vacuum()
+        #expect(finalResult.remainingCandidates == 0)
+
+        // No ledgerOutOfSync / no lingering corruption: a fresh
+        // add()/index()/search() cycle must still work after 20+
+        // shared-bucket vacuum cycles.
+        try await store.add(id: "post-sustained-shared-doc", body: "post sustained shared bucket vacuum content")
+        try await store.index()
+        let hits = try await store.search(query: "post sustained shared bucket vacuum", topK: 5)
+        #expect(hits.contains { $0.uuid == "post-sustained-shared-doc" })
 
         try await store.shutdown()
     }

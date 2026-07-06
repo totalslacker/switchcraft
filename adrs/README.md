@@ -41,3 +41,5 @@ ADRs document significant design decisions for Switchcraft. Each file follows th
 - [033 — WAL checkpoint contract: `CheckpointResult`, flush-first `walCheckpoint()`, and `shutdown()` partial logging](033-wal-checkpoint-contract.md)
 - [034 — Ledger snapshot fast path: skipping the full rehydration walk on clean-shutdown startups](034-ledger-snapshot-fast-path.md)
 - [035 — Search latency: parallel bucket decode + query-token dedup](035-search-latency-parallel-decode-and-query-dedup.md)
+- [036 — Lazy ledger materialization: bucket-ref tokens instead of eager `[Float]`](036-lazy-ledger-bucket-ref-materialization.md)
+- [037 — Vacuum preserves live chunks' `.bucketRef`s via compaction-time remap](037-vacuum-bucket-ref-remap.md)

@@ -11,17 +11,51 @@ import Foundation
 /// and buckets.
 public enum VacuumPlanBuilder {
 
+    /// One live chunk's `.bucketRef` ledger token that must be repointed at
+    /// its surviving pair's new offset after a bucket is compacted.
+    ///
+    /// Computed in the same per-bucket loop that builds the compacted
+    /// `indices`/`residuals` blobs (see `buildPlan`), from the same
+    /// `survivingPairs` accumulation — never re-derived from a separate
+    /// decode — so the remap can never desync from the bytes actually
+    /// written to storage (issue #142).
+    public struct BucketRefRemap: Sendable, Equatable {
+        public let chunkID: Int64
+        public let tokenOffset: UInt32
+        public let genID: Int64
+        public let bucketID: Int64
+        public let newPairOffset: Int
+
+        public init(chunkID: Int64, tokenOffset: UInt32, genID: Int64, bucketID: Int64, newPairOffset: Int) {
+            self.chunkID = chunkID
+            self.tokenOffset = tokenOffset
+            self.genID = genID
+            self.bucketID = bucketID
+            self.newPairOffset = newPairOffset
+        }
+    }
+
     /// Result of building a vacuum plan: the plan itself plus the metrics
     /// `SwitchcraftStore.vacuum()` folds into `VacuumResult`.
     public struct Result: Sendable {
         public let plan: VacuumPlan
         public let bucketPairsRemoved: Int
         public let generationsAffected: Set<Int64>
+        /// Every surviving pair's new `.bucketRef` offset, for every bucket
+        /// this plan touches (`bucketUpdates`). A bucket queued for deletion
+        /// (`bucketIDsToDelete`/`generationIDsToDelete`) never contributes a
+        /// remap, since by construction it has zero surviving pairs — no
+        /// live ledger ref can point there. See issue #142.
+        public let bucketRefRemaps: [BucketRefRemap]
 
-        public init(plan: VacuumPlan, bucketPairsRemoved: Int, generationsAffected: Set<Int64>) {
+        public init(
+            plan: VacuumPlan, bucketPairsRemoved: Int, generationsAffected: Set<Int64>,
+            bucketRefRemaps: [BucketRefRemap] = []
+        ) {
             self.plan = plan
             self.bucketPairsRemoved = bucketPairsRemoved
             self.generationsAffected = generationsAffected
+            self.bucketRefRemaps = bucketRefRemaps
         }
     }
 
@@ -64,6 +98,7 @@ public enum VacuumPlanBuilder {
         var generationEmbeddingCountUpdates: [Int64: Int] = [:]
         var generationsAffected: Set<Int64> = []
         var totalPairsRemoved = 0
+        var bucketRefRemaps: [BucketRefRemap] = []
 
         for gen in generations {
             // Range-prune: this generation cannot contain any abandoned
@@ -97,6 +132,13 @@ public enum VacuumPlanBuilder {
                         pairsRemovedInGen += 1
                         continue
                     }
+                    // Every surviving pair gets a remap entry, whether or
+                    // not its offset actually shifted — cheaper to always
+                    // emit than to track "did this shift" (issue #142).
+                    bucketRefRemaps.append(BucketRefRemap(
+                        chunkID: Int64(pair.chunkID), tokenOffset: pair.tokenOffset,
+                        genID: gen.id, bucketID: bucket.id, newPairOffset: survivingPairs.count
+                    ))
                     survivingPairs.append(pair)
                     let base = i * dims
                     survivingResiduals.append(contentsOf: residuals[base..<(base + dims)])
@@ -136,6 +178,9 @@ public enum VacuumPlanBuilder {
             generationIDsToDelete: generationIDsToDelete,
             generationEmbeddingCountUpdates: generationEmbeddingCountUpdates
         )
-        return Result(plan: plan, bucketPairsRemoved: totalPairsRemoved, generationsAffected: generationsAffected)
+        return Result(
+            plan: plan, bucketPairsRemoved: totalPairsRemoved, generationsAffected: generationsAffected,
+            bucketRefRemaps: bucketRefRemaps
+        )
     }
 }
