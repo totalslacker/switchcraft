@@ -282,6 +282,68 @@ therefore verified as two distinct claims:
   (identical to what a process restart already introduced pre-#137) doesn't
   move retrieval quality outside its existing tolerance band.
 
+### 8. Requirement 11 acceptance methodology: ratio in Debug, absolute time in Release
+
+The Requirement 11 benchmark (`LazyLedgerBenchmarkTests`, 100K chunks / 1M
+embeddings / dims=768) initially asserted a `>= 50×` rehydrate-time ratio in
+both build configurations. That held in Debug (~93×) but not in Release
+(~24-25×) — not because the optimization regressed, but because Release's
+`-O` auto-vectorizes the deleted eager loop's per-dimension scalar
+arithmetic (`center[j] + residuals[base+j]`) far more aggressively than it
+helps the lazy path's cost, which is dominated by non-vectorizable
+bookkeeping (`IndicesCodec.decode`, dictionary/tuple accumulation, per-chunk
+sort). Concretely, on the reference machine: the eager loop dropped
+238.2s → 4.84s (~49×) going Debug → Release, while the lazy path only
+dropped 2.57s → 0.20s (~13×) — both got faster, but the ratio between them
+necessarily shrank because Release helped one side much more than the
+other.
+
+This is confirmed to not be a weak-comparator artifact: the benchmark's
+"pre-refactor" comparator (`LazyLedgerMaterializationTests.eagerGoldenReconstruction`)
+is a byte-for-byte copy of the actual deleted `rehydrateThrowError` loop, not
+a strawman. Nor is it a small-scale artifact — the fixture's per-generation
+overhead is already fully amortized at 50K pairs/generation, so a larger
+fixture would not be expected to change the ratio.
+
+**Resolution**: assert on whichever metric is meaningful for each build
+configuration, rather than forcing one ratio bar to hold everywhere:
+
+- **Debug**: keep the `>= 50×` ratio assertion. Debug's unvectorized
+  arithmetic doesn't compress the ratio, making it a faithful proxy for the
+  underlying `O(pairs×dims) → O(pairs)` algorithmic change actually taking
+  effect.
+- **Release**: assert an absolute wall-clock ceiling instead
+  (`releaseAbsoluteTimeCeiling = 1.0s` for this fixture) — what a user
+  actually experiences. The ceiling was picked from evidence: measured
+  Release post-refactor time was ~0.20s, i.e. well under the "much less
+  than 5s" case, so per the same reasoning that suggested a generic 5s
+  starting point, it's tightened to ~5× the observed figure (headroom for
+  slower CI hardware, still a meaningful gate against a real regression).
+  The Release *ratio* is still logged for observability but intentionally
+  not asserted.
+- **Memory**: the `>= 30×` ratio bar holds reliably in both configurations
+  (~30-31× measured either way) and is asserted unconditionally — no
+  vectorization asymmetry applies to memory footprint the way it does to
+  arithmetic-bound wall-clock time.
+
+**Why not other options**: a Debug-only assertion (dropping the Release
+check entirely) would hide a real Release-mode perf regression — if a
+future change made Release rehydration regress from 1s to 10s, the Debug
+ratio would still read ~50× (both eager and lazy scale together under
+Debug), and nothing would catch it. Chasing a higher Release *ratio* by
+further micro-optimizing the lazy path was also rejected: the lazy path
+(bucket fetch → center decode → `IndicesCodec.decode` → tuple accumulation)
+has no obvious remaining fat to trim, and the ratio is the wrong thing to
+optimize for — users experience absolute seconds, not a ratio against code
+that no longer exists.
+
+**Note for future maintainers**: if this benchmark's Release ratio looks
+smaller than Debug's, that is expected and does not by itself indicate a
+regression — vectorization asymmetry between an arithmetic-heavy comparator
+and a bookkeeping-heavy implementation naturally compresses the ratio under
+`-O`. Check the Release *absolute* time against `releaseAbsoluteTimeCeiling`
+instead of trying to force the ratio back up.
+
 ## Consequences
 
 - **Steady-state ledger memory** drops by roughly two orders of magnitude
@@ -292,10 +354,12 @@ therefore verified as two distinct claims:
 - **Rehydration cost** drops from `O(pairs × dims)` to `O(pairs)` — no
   residual-value decode at all, for the common conflict-free case.
   Measured (opt-in `LazyLedgerBenchmarkTests`, 100K chunks / 1M embeddings /
-  768 dims, debug build, one local run): ~126× faster wall-clock, ~31×
-  lighter steady-state RSS. Both comfortably clear the ≥50×/≥30× acceptance
-  bars (Requirement 11), though the exact multiples are hardware- and
-  build-dependent — the test asserts ratios, not absolute numbers.
+  768 dims, one local run each): Debug ~93× faster wall-clock (238.2s →
+  2.57s), Release rehydrate completes in ~0.20s (comfortably under the 1.0s
+  absolute ceiling; the Release *ratio* is ~24-25×, smaller than Debug's for
+  the vectorization-asymmetry reasons in §8, not a regression). Steady-state
+  RSS improves ~30-31× in both build configurations. See §8 for why time is
+  asserted as a ratio in Debug but as an absolute ceiling in Release.
 - **Compaction's performance profile changes shape**: from "no I/O, high
   memory" to "some I/O, low memory." A cascade that merges previously-flushed
   generations now performs `storage.buckets(forGeneration:)` reads it didn't

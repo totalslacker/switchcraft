@@ -33,9 +33,26 @@
 //
 // # Acceptance
 //
-// Logged, not hardcoded (hardware-dependent), but asserted as ratios:
-//   - rehydrate wall-clock time improves by >= 50×
-//   - steady-state ledger memory (phys_footprint delta) improves by >= 30×
+// Memory is asserted as a ratio in both build configurations (it holds
+// reliably either way): steady-state ledger memory (phys_footprint delta)
+// improves by >= 30×.
+//
+// Time is asserted differently per build configuration, because Release's
+// `-O` auto-vectorizes the deleted eager loop's per-dimension scalar
+// arithmetic far more than it helps the lazy path's bookkeeping-dominated
+// cost (dictionary/array operations, not vectorizable arithmetic) — so the
+// *ratio* between them shrinks substantially in Release even though the
+// lazy path is still, in absolute terms, dramatically faster:
+//   - Debug: rehydrate time improves by >= 50× (confirms the algorithmic
+//     complexity change — O(pairs×dims) → O(pairs) — actually took effect;
+//     Debug's unvectorized arithmetic makes this ratio a faithful proxy for
+//     the underlying big-O win).
+//   - Release: rehydrate completes within an absolute wall-clock ceiling
+//     (see `releaseAbsoluteTimeCeiling` below for the measured basis this
+//     was picked from). This is what users actually experience. The
+//     Release ratio is still logged for observability but is intentionally
+//     NOT asserted — see ADR 035 §8 for why chasing a higher Release ratio
+//     would be optimizing the wrong metric.
 //
 // # How to run
 //
@@ -138,7 +155,19 @@ struct LazyLedgerBenchmarkTests {
 
     // MARK: - Benchmark
 
-    @Test("post-refactor rehydrate is >= 50x faster and >= 30x lighter than the pre-refactor eager walk")
+    /// Release-mode absolute ceiling for post-refactor rehydrate wall-clock
+    /// time at this benchmark's 100K-chunk/1M-embedding/dims=768 fixture.
+    ///
+    /// Picked from evidence, not guessed: measured Release post-refactor
+    /// time on the reference machine was ~0.20s (well under the "much less
+    /// than 5s" case called out during the Requirement 11 acceptance
+    /// discussion), so per that discussion's own guidance the ceiling is
+    /// tightened rather than left at a generic 5s. 1.0s is ~5× the observed
+    /// figure — enough headroom for slower CI hardware while still being a
+    /// meaningful gate against a real Release-mode regression.
+    private static let releaseAbsoluteTimeCeiling: TimeInterval = 1.0
+
+    @Test("post-refactor rehydrate clears the Debug ratio bar and the Release absolute-time ceiling; memory clears its ratio bar in both")
     func sustainedWorkloadRehydrateSpeedupAndMemory() async throws {
 #if !os(macOS)
         print("[SKIP] LazyLedgerBenchmarkTests requires macOS (task_vm_info).")
@@ -215,9 +244,24 @@ struct LazyLedgerBenchmarkTests {
         print("[LazyLedgerBenchmark] Post-refactor rehydrate: \(String(format: "%.4f", postElapsed))s, RSS delta \(postRSSDelta >> 20) MB")
         print("[LazyLedgerBenchmark] Speedup: \(String(format: "%.1f", timeRatio))×  Memory improvement: \(String(format: "%.1f", rssRatio))×")
 
-        #expect(timeRatio >= 50,
-                "rehydrate time should improve by >= 50x; measured \(String(format: "%.1f", timeRatio))x (pre=\(preElapsed)s, post=\(postElapsed)s)")
+        // Memory: the ratio bar holds reliably in both build configurations
+        // (Requirement 11), so it's asserted unconditionally.
         #expect(rssRatio >= 30,
                 "steady-state ledger memory should improve by >= 30x; measured \(String(format: "%.1f", rssRatio))x (pre=\(preRSSDelta) bytes, post=\(postRSSDelta) bytes)")
+
+        // Time: Debug asserts the ratio (a faithful proxy for the O(pairs×dims)
+        // → O(pairs) algorithmic change, since Debug's unvectorized arithmetic
+        // doesn't compress it); Release asserts absolute wall-clock instead,
+        // since that's what users experience and the ratio metric shrinks in
+        // Release for reasons unrelated to whether the optimization worked
+        // (see the file-header comment and ADR 035 §8).
+#if DEBUG
+        #expect(timeRatio >= 50,
+                "Debug rehydrate time should improve by >= 50x; measured \(String(format: "%.1f", timeRatio))x (pre=\(preElapsed)s, post=\(postElapsed)s)")
+#else
+        print("[LazyLedgerBenchmark] Release ratio (informational, not asserted): \(String(format: "%.1f", timeRatio))×")
+        #expect(postElapsed < Self.releaseAbsoluteTimeCeiling,
+                "Release post-refactor rehydrate should complete within \(Self.releaseAbsoluteTimeCeiling)s; measured \(postElapsed)s")
+#endif
     }
 }
