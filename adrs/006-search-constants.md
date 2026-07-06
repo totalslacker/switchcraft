@@ -97,12 +97,65 @@ contributing no evidence for that token are dropped from the result.
 ## (f) Determinism
 
 `cblas_sgemm` is deterministic for a fixed input layout and serial
-evaluation order. The engine never introduces parallelism (no
-`TaskGroup`, no `cblas_set_num_threads` overrides) so identical inputs
-and storage state produce bit-identical `[SearchHit]` output. Final
-ordering uses the total order `(-score, uuid)` ascending, so ties are
-broken deterministically without relying on sort stability (Swift's
-`Array.sort` is not guaranteed stable).
+evaluation order. Final ordering uses the total order `(-score, uuid)`
+ascending, so ties are broken deterministically without relying on
+sort stability (Swift's `Array.sort` is not guaranteed stable).
+
+**Amended by ADR 035** (issue #140): the default search path
+(`SearchEngine.searchOptimized`, since ADR 035) *does* introduce
+`TaskGroup`-based parallelism for the bucket-decode step — the
+original "no `TaskGroup`" language above no longer holds for that
+path. The bit-identical output guarantee is preserved, not loosened,
+via a specific construction:
+
+- Each `TaskGroup` child task decodes a contiguous, disjoint slice of
+  the (already query-order-independent) deduplicated bucket set
+  `selected` and touches no actor-isolated mutable state — only local
+  `Data`/`[Float]` buffers and the immutable `BucketRecord` values in
+  its slice.
+- Child results are written into an array indexed by the child's
+  chunk position (not by completion order) and concatenated back in
+  that fixed order once every child has returned.
+- `cblas_sgemm` itself is still invoked exactly once per phase (once
+  per LSM generation for centroid scoring, once for final candidate
+  scoring) with the same fixed argument order as before — parallelism
+  is confined to the decode step between those two matmuls, which
+  contains no floating-point reduction (`center + residual` is an
+  elementwise add, not a sum-reduction, so operation grouping doesn't
+  matter).
+
+Because decode-chunk assignment depends only on `selected`'s length
+(itself a deterministic function of the query and storage state, not
+of wall-clock scheduling), output is bit-identical across repeated
+runs of the same query against the same storage state, matching the
+pre-#140 guarantee. `SearchDeterminismTests` asserts this directly:
+repeated identical `search()` calls produce byte-identical
+`[SearchHit]`.
+
+Query-token dedup (ADR 035, applying ADR 028's proof that repeated
+query tokens are a no-op under MEAN aggregation, in the collapse
+direction) is a **separate** transformation with a separate
+guarantee: `searchOptimized` and `searchLegacy` produce the same
+ranked document order and scores within a tight tolerance, but not
+necessarily bit-identical scores, when the query has duplicate
+tokens. `searchOptimized` computes a duplicated token's contribution
+as `v * Float(duplicateCount)`; `searchLegacy` computes it as
+`duplicateCount` separate floating-point additions interleaved with
+other tokens' contributions in the original per-token loop. Both
+compute the same real number, but IEEE-754 addition is not
+associative, so the two summation orders can round to adjacent
+floats (observed: ~1e-7 relative, i.e. one ULP at this magnitude) —
+the same class of arithmetic-reordering tolerance already accepted
+elsewhere in this ADR for BLAS reduction order and in the NFCorpus /
+facts-corpus parity suites (±0.01–0.025). `SearchDeterminismTests`
+verifies both properties: bit-identical output for duplicate-free
+queries, and same-ranking / tolerance-bounded scores for queries with
+duplicated tokens.
+
+The legacy path (`SearchEngine.searchLegacy`, reachable via
+`SearchConfig.legacySequentialSearch = true`) is unchanged: still
+fully sequential, no `TaskGroup`, no query-token dedup — retained as
+a benchmark-only "before" baseline, not for production use.
 
 ## (g) Bucket-byte vs ranking-level parity
 

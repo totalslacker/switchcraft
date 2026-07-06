@@ -94,7 +94,7 @@ public actor Indexer {
     /// materialized `[Float]` (memtable rows not yet flushed — there is no
     /// bucket to reference yet) or a lightweight reference into a bucket
     /// already committed to storage. `dims` is not stored per-token since
-    /// it's already locked in at the `Indexer` level. See ADR 035.
+    /// it's already locked in at the `Indexer` level. See ADR 036.
     enum LedgerToken: Sendable, Equatable {
         case materialized([Float])
         /// `pairOffset` is the token's index into the bucket's decoded

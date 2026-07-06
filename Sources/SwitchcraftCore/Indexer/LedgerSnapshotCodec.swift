@@ -87,7 +87,7 @@ public struct LedgerSnapshotFingerprint: Sendable, Hashable {
 /// mixed representation the ledger had at encode time — no precision loss
 /// beyond whatever the ledger already carried (materialized rows stay
 /// full-precision; bucket-refs stay lossy-only-on-eventual-materialization,
-/// same as the live ledger). See ADR 034 (amended) and ADR 035.
+/// same as the live ledger). See ADR 034 (amended) and ADR 036.
 ///
 /// Layout (all integers little-endian):
 ///   - `UInt32`  magic (`0xFFFF_FFFF` — see `unsupportedVersion` below)

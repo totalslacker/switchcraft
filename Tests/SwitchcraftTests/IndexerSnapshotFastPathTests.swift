@@ -66,13 +66,13 @@ struct IndexerSnapshotFastPathTests {
 
         // The fast path reconstructs the exact in-memory ledger. Both sides of
         // this comparison already resolve through the same Q4-lossy path
-        // (issue #137 / ADR 035): `originalLedger` was captured via
+        // (issue #137 / ADR 036): `originalLedger` was captured via
         // `ledgerContents()` right after flush, when this corpus's tokens are
         // already `.bucketRef` (materialized on demand by `ledgerContents()`
         // itself), and `reloaded` resolves the snapshot's own bucket-refs the
         // same way — so this assertion is "same bucket data resolves
         // identically," not "snapshot floats are more precise than a Q4 walk"
-        // (ADR 034's original claim, corrected by ADR 035 §6).
+        // (ADR 034's original claim, corrected by ADR 036 §6).
         let reloaded = try await reopened.ledgerContents()
         #expect(reloaded == originalLedger)
 
@@ -331,7 +331,7 @@ struct IndexerSnapshotSpeedupTests {
         let trials = 7
 
         // Build a corpus large enough that the full walk does real work.
-        // Note (issue #137 / ADR 035): the full walk itself is now a cheap
+        // Note (issue #137 / ADR 036): the full walk itself is now a cheap
         // O(pairs) integrity walk (no per-token Q4 dequant — that eager
         // reconstruction was removed), so its absolute cost — and therefore
         // its margin versus the snapshot fast path, which is also O(pairs) —

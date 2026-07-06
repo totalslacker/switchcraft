@@ -1,4 +1,4 @@
-# ADR 035 — Lazy Ledger Materialization: Bucket-Ref Tokens Instead of Eager `[Float]`
+# ADR 036 — Lazy Ledger Materialization: Bucket-Ref Tokens Instead of Eager `[Float]`
 
 ## Status
 

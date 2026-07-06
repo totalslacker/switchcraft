@@ -89,6 +89,28 @@ public actor SearchEngine {
         topK: Int,
         filter: StorageFilter = .all
     ) async throws -> [SearchHit] {
+        if config.legacySequentialSearch {
+            return try await searchLegacy(
+                queryEmbeddings: queryEmbeddings, dims: dims, topK: topK, filter: filter
+            )
+        }
+        return try await searchOptimized(
+            queryEmbeddings: queryEmbeddings, dims: dims, topK: topK, filter: filter
+        )
+    }
+
+    /// Pre-#140 reference implementation: fully sequential centroid scan
+    /// and bucket decode, no query-token deduplication. Kept as a
+    /// benchmark-only comparison path (see `SearchConfig.legacySequentialSearch`
+    /// and ADR 035) and as an equivalence oracle in `SearchDeterminismTests`.
+    /// Do not add new features here — this path is frozen by construction
+    /// so it stays a faithful "before" baseline.
+    private func searchLegacy(
+        queryEmbeddings: [Float],
+        dims: Int,
+        topK: Int,
+        filter: StorageFilter
+    ) async throws -> [SearchHit] {
         guard dims > 0, dims % 2 == 0 else { throw Error.invalidDims(dims) }
         guard queryEmbeddings.count % dims == 0 else {
             throw Error.ragged(count: queryEmbeddings.count, dims: dims)
@@ -248,8 +270,8 @@ public actor SearchEngine {
                 if perDocMax[doc.uuid] == nil {
                     var seeded = [Float](repeating: 0, count: n)
                     for q in 0..<n {
-                        let m = missing[q]
-                        seeded[q] = m == -.infinity ? -.infinity : m
+                        let missingVal = missing[q]
+                        seeded[q] = missingVal == -.infinity ? -.infinity : missingVal
                     }
                     perDocMax[doc.uuid] = seeded
                 }
@@ -280,6 +302,255 @@ public actor SearchEngine {
                 let v = perToken[q]
                 if v == -.infinity { anyMissing = true; break }
                 sum += v
+            }
+            if anyMissing { continue }
+            let score = sum * scaler
+            if score < config.threshold { continue }
+            hits.append(SearchHit(uuid: uuid, score: score))
+        }
+
+        // 7. Deterministic ordering by (-score, uuid) ascending. The
+        //    comparator defines a total order, so determinism does not
+        //    depend on Swift's sort being stable.
+        hits.sort { lhs, rhs in
+            if lhs.score != rhs.score { return lhs.score > rhs.score }
+            return lhs.uuid < rhs.uuid
+        }
+        if hits.count > topK {
+            return Array(hits.prefix(topK))
+        }
+        return hits
+    }
+
+    /// Default (post-#140) implementation. Behaviourally identical to
+    /// `searchLegacy` — same selection rule, same MEAN aggregation, same
+    /// `(-score, uuid)` total order — but:
+    ///
+    ///  1. Query tokens that are bit-exact duplicates of an earlier token
+    ///     are collapsed to a single representative before centroid
+    ///     selection and scoring; the representative's contribution is
+    ///     multiplied by its duplicate count when computing the mean.
+    ///     Provably a no-op transformation (ADR 028 already establishes
+    ///     that repeated query tokens are a no-op under MEAN aggregation;
+    ///     this is that fact applied in the collapse direction).
+    ///  2. Decoding the deduplicated candidate bucket set (`center +
+    ///     residual` reconstruction, the dominant per-search cost per
+    ///     issue #140's own profiling) is parallelised across
+    ///     `TaskGroup` child tasks that touch no actor-isolated state,
+    ///     with each child's output written into an order-preserving
+    ///     slot so concatenation reproduces the exact sequential byte
+    ///     order — preserving ADR 006(f)'s bit-identical output
+    ///     guarantee. See ADR 035 for the full design and measurements.
+    private func searchOptimized(
+        queryEmbeddings: [Float],
+        dims: Int,
+        topK: Int,
+        filter: StorageFilter
+    ) async throws -> [SearchHit] {
+        guard dims > 0, dims % 2 == 0 else { throw Error.invalidDims(dims) }
+        guard queryEmbeddings.count % dims == 0 else {
+            throw Error.ragged(count: queryEmbeddings.count, dims: dims)
+        }
+        let n = queryEmbeddings.count / dims
+        guard n > 0, topK > 0 else { return [] }
+
+        // 0. Query-token dedup: collapse bit-exact-equal rows to a single
+        //    representative, preserving first-occurrence order. `m <= n`
+        //    unique rows drive every downstream computation; `duplicateCount[u]`
+        //    is folded back in at the final mean-aggregation step so the
+        //    output is identical to processing all `n` rows individually.
+        var uniqueRowsFlat = [Float]()
+        uniqueRowsFlat.reserveCapacity(queryEmbeddings.count)
+        var duplicateCount = [Int]()
+        var seen: [[Float]: Int] = [:]
+        seen.reserveCapacity(n)
+        for q in 0..<n {
+            let start = q * dims
+            let row = Array(queryEmbeddings[start..<(start + dims)])
+            if let u = seen[row] {
+                duplicateCount[u] += 1
+            } else {
+                let u = duplicateCount.count
+                seen[row] = u
+                uniqueRowsFlat.append(contentsOf: row)
+                duplicateCount.append(1)
+            }
+        }
+        let m = duplicateCount.count
+
+        // 1. Per-unique-query-token centroid scan, accumulating selection
+        //    decisions and the missing baseline.
+        var missing = [Float](repeating: -.infinity, count: m)
+        // Selected (generationID, bucket) records, deduplicated.
+        var selected: [BucketRecord] = []
+        var seenBuckets = Set<Int64>()
+
+        let generations = try await storage.generations()
+        for gen in generations {
+            try Task.checkCancellation()
+            let buckets = try await storage.buckets(forGeneration: gen.id)
+            if buckets.isEmpty { continue }
+
+            // Build the centroid matrix and the per-bucket token count.
+            var centersFlat = [Float]()
+            centersFlat.reserveCapacity(buckets.count * dims)
+            var bucketTokenCounts = [Int]()
+            bucketTokenCounts.reserveCapacity(buckets.count)
+            for bucket in buckets {
+                let center = try Self.decodeCenter(bucket.center, dims: dims)
+                centersFlat.append(contentsOf: center)
+                let tokens = bucket.residuals.count / (dims / 2)
+                bucketTokenCounts.append(tokens)
+            }
+
+            // sims: m × numCentroids, row-major.
+            let numCentroids = buckets.count
+            let sims = Self.matmulQueryTimesRowMajorTranspose(
+                queryEmbeddings: uniqueRowsFlat,
+                n: m,
+                rows: centersFlat,
+                rowCount: numCentroids,
+                dims: dims
+            )
+
+            // 2. Per unique query token: top-k with cumulative-token budget.
+            for u in 0..<m {
+                let row = u * numCentroids
+                // Sort indices by descending similarity, breaking ties
+                // by ascending centroid index. The total order makes
+                // the result deterministic regardless of sort stability.
+                var order = Array(0..<numCentroids)
+                order.sort { a, b in
+                    let sa = sims[row + a]
+                    let sb = sims[row + b]
+                    if sa != sb { return sa > sb }
+                    return a < b
+                }
+
+                let limit = min(config.k, numCentroids)
+                var cumsum = 0
+                var crossed = false
+                for j in 0..<limit {
+                    let idx = order[j]
+                    let bucketID = buckets[idx].id
+                    if seenBuckets.insert(bucketID).inserted {
+                        selected.append(buckets[idx])
+                    }
+                    cumsum += bucketTokenCounts[idx]
+                    if cumsum >= config.tPrime {
+                        crossed = true
+                        break
+                    }
+                }
+                if !crossed && limit > 0 {
+                    let kthScore = sims[row + order[limit - 1]]
+                    if kthScore > missing[u] {
+                        missing[u] = kthScore
+                    }
+                }
+            }
+        }
+
+        // No candidate buckets at all → no hits. (missing[u] is still
+        // -inf so the threshold filter would drop everything anyway.)
+        if selected.isEmpty { return [] }
+
+        try Task.checkCancellation()
+
+        // 3. Decode every selected bucket and reconstruct candidate token
+        //    embeddings as centre + residual, in parallel chunks that
+        //    concatenate back in original order (deterministic output).
+        let (candidatesFlat, candidateChunkIDs) = try await Self.decodeSelectedBuckets(
+            selected, dims: dims
+        )
+
+        try Task.checkCancellation()
+
+        let candidateCount = candidateChunkIDs.count
+        if candidateCount == 0 { return [] }
+
+        // 4. Score: candidate × uniqueQueryᵀ → (candidateCount × m).
+        //    Equivalent to `query · candidateᵀ` transposed; we lay out
+        //    candidate-major so per-candidate rows are contiguous when
+        //    we group them by document below.
+        let scores = Self.matmulQueryTimesRowMajorTranspose(
+            queryEmbeddings: candidatesFlat,
+            n: candidateCount,
+            rows: uniqueRowsFlat,
+            rowCount: m,
+            dims: dims
+        )
+
+        // 5. Group candidates by chunkID, then resolve to documents.
+        //    Per-document per-unique-q-token max, seeded with missing[u].
+        var perDocMax: [String: [Float]] = [:]
+        var chunkIDsToResolve: [UInt32] = []
+        var chunkOffsets: [UInt32: [Int]] = [:]
+        for i in 0..<candidateCount {
+            chunkOffsets[candidateChunkIDs[i], default: []].append(i)
+        }
+        chunkIDsToResolve = Array(chunkOffsets.keys)
+        // Sorted for deterministic iteration order over chunk groups.
+        chunkIDsToResolve.sort()
+
+        for chunkID in chunkIDsToResolve {
+            let candidateRows = chunkOffsets[chunkID]!
+            guard let chunk = try await storage.chunk(id: Int64(chunkID)) else {
+                continue
+            }
+            let docs = try await storage.documents(forChunkHash: chunk.hash)
+            if docs.isEmpty { continue }
+
+            // Per-unique-q-token max across the candidate tokens of this chunk.
+            var chunkMax = [Float](repeating: -.infinity, count: m)
+            for row in candidateRows {
+                let base = row * m
+                for u in 0..<m {
+                    let s = scores[base + u]
+                    if s > chunkMax[u] { chunkMax[u] = s }
+                }
+            }
+
+            for doc in docs {
+                if !filter.matches(doc) { continue }
+                if perDocMax[doc.uuid] == nil {
+                    var seeded = [Float](repeating: 0, count: m)
+                    for u in 0..<m {
+                        let missingVal = missing[u]
+                        seeded[u] = missingVal == -.infinity ? -.infinity : missingVal
+                    }
+                    perDocMax[doc.uuid] = seeded
+                }
+                // Update the per-document max in place via the
+                // dictionary's subscript modify accessor — avoids
+                // copying the [Float] buffer per chunk per document.
+                for u in 0..<m {
+                    if chunkMax[u] > perDocMax[doc.uuid]![u] {
+                        perDocMax[doc.uuid]![u] = chunkMax[u]
+                    }
+                }
+            }
+        }
+
+        if perDocMax.isEmpty { return [] }
+
+        // 6. Aggregate per-unique-q-token maxima → mean over the original
+        //    `n` query tokens → SearchHit. Each unique token's maximum is
+        //    weighted by its duplicate count so the sum is identical to
+        //    summing all `n` original (non-deduplicated) token maxima.
+        let scaler = 1.0 / Float(n)
+        var hits: [SearchHit] = []
+        hits.reserveCapacity(perDocMax.count)
+        for (uuid, perToken) in perDocMax {
+            // If any unique token had no evidence at all (-inf both in
+            // candidates and in missing), the document is dropped — its
+            // score is undefined.
+            var sum: Float = 0
+            var anyMissing = false
+            for u in 0..<m {
+                let v = perToken[u]
+                if v == -.infinity { anyMissing = true; break }
+                sum += v * Float(duplicateCount[u])
             }
             if anyMissing { continue }
             let score = sum * scaler
@@ -544,6 +815,103 @@ public actor SearchEngine {
             throw Error.centerSizeMismatch(bytes: data.count, expected: expected)
         }
         return Indexer.decodeFloat32LE(data)
+    }
+
+    /// Decode one contiguous slice of `selected` buckets into flat
+    /// candidate token embeddings (`center + residual`, vDSP-added) and
+    /// their owning chunk IDs. Pure function of its inputs — touches no
+    /// actor state — so it is safe to run inside a `TaskGroup` child task.
+    private static func decodeBucketChunk(
+        _ buckets: ArraySlice<BucketRecord>, dims: Int
+    ) throws -> (flat: [Float], chunkIDs: [UInt32]) {
+        var candidatesFlat = [Float]()
+        var candidateChunkIDs = [UInt32]()
+        for bucket in buckets {
+            let center = try Self.decodeCenter(bucket.center, dims: dims)
+            let pairs = try IndicesCodec.decode(bucket.indices)
+            let residuals = Q4Codec.decodeResiduals(bucket.residuals)
+            guard residuals.count == pairs.count * dims else {
+                throw Error.bucketSizeMismatch(
+                    pairs: pairs.count,
+                    residualBytes: bucket.residuals.count,
+                    dims: dims
+                )
+            }
+            let base = candidatesFlat.count
+            candidatesFlat.append(contentsOf: repeatElement(0, count: pairs.count * dims))
+            candidateChunkIDs.reserveCapacity(candidateChunkIDs.count + pairs.count)
+            center.withUnsafeBufferPointer { centerPtr in
+                residuals.withUnsafeBufferPointer { residualPtr in
+                    candidatesFlat.withUnsafeMutableBufferPointer { outPtr in
+                        for i in 0..<pairs.count {
+                            let residualOff = i * dims
+                            let outOff = base + residualOff
+                            vDSP_vadd(
+                                centerPtr.baseAddress!, 1,
+                                residualPtr.baseAddress! + residualOff, 1,
+                                outPtr.baseAddress! + outOff, 1,
+                                vDSP_Length(dims)
+                            )
+                        }
+                    }
+                }
+            }
+            for pair in pairs {
+                candidateChunkIDs.append(pair.chunkID)
+            }
+        }
+        return (candidatesFlat, candidateChunkIDs)
+    }
+
+    /// Decode every bucket in `selected` and reconstruct candidate token
+    /// embeddings as `centre + residual`, splitting the (deduplicated)
+    /// bucket set into contiguous chunks decoded concurrently via
+    /// `TaskGroup`. Chunk results are concatenated back in their original
+    /// `selected`-order (not completion order), so the output is
+    /// byte-identical to a fully sequential decode — see ADR 006(f) and
+    /// ADR 035. Small bucket sets skip the `TaskGroup` entirely; the
+    /// per-task dispatch overhead isn't worth it below the threshold.
+    static func decodeSelectedBuckets(
+        _ selected: [BucketRecord], dims: Int
+    ) async throws -> (flat: [Float], chunkIDs: [UInt32]) {
+        let sequentialThreshold = 64
+        if selected.count <= sequentialThreshold {
+            return try decodeBucketChunk(selected[...], dims: dims)
+        }
+
+        let processorCount = max(1, ProcessInfo.processInfo.activeProcessorCount)
+        let chunkCount = min(processorCount, selected.count)
+        let chunkSize = (selected.count + chunkCount - 1) / chunkCount
+        let ranges: [Range<Int>] = stride(from: 0, to: selected.count, by: chunkSize).map { start in
+            start..<min(start + chunkSize, selected.count)
+        }
+
+        var decodedByIndex = [(flat: [Float], chunkIDs: [UInt32])?](repeating: nil, count: ranges.count)
+        try await withThrowingTaskGroup(of: (Int, (flat: [Float], chunkIDs: [UInt32])).self) { group in
+            for (idx, range) in ranges.enumerated() {
+                let slice = selected[range]
+                group.addTask {
+                    try Task.checkCancellation()
+                    let decoded = try Self.decodeBucketChunk(slice, dims: dims)
+                    return (idx, decoded)
+                }
+            }
+            for try await (idx, decoded) in group {
+                decodedByIndex[idx] = decoded
+            }
+        }
+
+        var totalTokens = 0
+        for decoded in decodedByIndex { totalTokens += decoded!.chunkIDs.count }
+        var flat = [Float]()
+        flat.reserveCapacity(totalTokens * dims)
+        var chunkIDs = [UInt32]()
+        chunkIDs.reserveCapacity(totalTokens)
+        for decoded in decodedByIndex {
+            flat.append(contentsOf: decoded!.flat)
+            chunkIDs.append(contentsOf: decoded!.chunkIDs)
+        }
+        return (flat, chunkIDs)
     }
 
     /// Compute `query × rowsᵀ` as an `(n × rowCount)` row-major matrix.

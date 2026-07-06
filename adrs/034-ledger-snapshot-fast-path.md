@@ -78,11 +78,11 @@ Float32 bit patterns), chunks in ascending chunkID order. Decoding reconstructs 
 same per-chunk token ordering. This bit-for-bit parity is required, or NFCorpus
 retrieval results would silently drift.
 >
-> **Amended by ADR 035 (issue #137):** the paragraph above described the
+> **Amended by ADR 036 (issue #137):** the paragraph above described the
 > original (v1) payload, which stored every row as a full-precision float —
 > at the time, this made the snapshot *more* faithful than full-walk
 > rehydration (which always went through Q4-lossy `center + residual`
-> reconstruction). Once ADR 035 restructured the ledger itself to hold
+> reconstruction). Once ADR 036 restructured the ledger itself to hold
 > lazy bucket-refs for any already-flushed row, that claim no longer holds:
 > the payload format was bumped to v2 (a per-token tag distinguishing
 > materialized floats from bucket-refs), so a `.bucketRef` row in a
@@ -90,7 +90,7 @@ retrieval results would silently drift.
 > whenever it's eventually materialized. Both paths are now consistently
 > Q4-lossy for any previously-flushed row; only not-yet-flushed
 > (`.materialized`) rows are ever full-precision, identically on both
-> paths. See ADR 035 §6 for the full rationale and the v1→v2 compatibility
+> paths. See ADR 036 §6 for the full rationale and the v1→v2 compatibility
 > handling (a v1 snapshot from before that upgrade is rejected via a
 > magic/version header and falls back to full rehydration, rather than
 > being misparsed).
