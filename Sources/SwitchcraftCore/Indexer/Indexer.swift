@@ -4,6 +4,29 @@ import os
 
 private let indexerLogger = Logger(subsystem: "com.switchcraft.core", category: "Indexer")
 
+extension Indexer.Error: Equatable {
+    /// Hand-written rather than derived: `bucketRefUnresolvable.cause` is a
+    /// diagnostic-only `String?` capturing an underlying `Swift.Error`'s
+    /// description. Comparing it would make test assertions like
+    /// `#expect(throws: Indexer.Error.bucketRefUnresolvable(...))` brittle to
+    /// incidental wording rather than the error's actual identity
+    /// (`chunkID`/`bucketID`), so `cause` is excluded from equality.
+    public static func == (lhs: Indexer.Error, rhs: Indexer.Error) -> Bool {
+        switch (lhs, rhs) {
+        case let (.ledgerOutOfSync(l1, l2), .ledgerOutOfSync(r1, r2)):
+            return l1 == r1 && l2 == r2
+        case let (.rehydrationConflict(l), .rehydrationConflict(r)):
+            return l == r
+        case let (.rehydrationBucketCorrupt(l), .rehydrationBucketCorrupt(r)):
+            return l == r
+        case let (.bucketRefUnresolvable(lc, lb, _), .bucketRefUnresolvable(rc, rb, _)):
+            return lc == rc && lb == rb
+        default:
+            return false
+        }
+    }
+}
+
 /// LSM-tree token-embedding index over any `SwitchcraftStorage`.
 ///
 /// `add` buffers per-token embeddings for one chunk. `flush` runs
@@ -34,7 +57,7 @@ private let indexerLogger = Logger(subsystem: "com.switchcraft.core", category: 
 public actor Indexer {
 
     /// Errors thrown by `Indexer`.
-    public enum Error: Swift.Error, Sendable, Equatable {
+    public enum Error: Swift.Error, Sendable {
         /// The cascade walk computed a row count that does not match the
         /// number of embeddings the in-memory ledger holds for the chunk
         /// range being merged.
@@ -48,8 +71,18 @@ public actor Indexer {
         /// cannot be safely reconstructed. Possible causes: the center
         /// blob is empty, residuals length does not equal
         /// `pairs.count * dims`, or two buckets disagree on the
-        /// embedding dimension (which must be fixed per database).
+        /// embedding dimension (which must be fixed per database). Thrown
+        /// by the cheap init-time integrity walk (issue #137 Requirement
+        /// 13): header/codec/size checks only, no residual-value decode.
         case rehydrationBucketCorrupt(generationID: Int64)
+        /// On-demand materialization of a `.bucketRef` token failed at
+        /// compaction time despite the init-time integrity walk having
+        /// passed for that bucket — e.g. a transient disk read error or a
+        /// bit-flip surfacing only when the residual contents are actually
+        /// decoded. Compaction fails hard on this error; there is no
+        /// silent-skip path, since a partial training set would silently
+        /// produce subtly wrong k-means output (issue #137 Requirement 14).
+        case bucketRefUnresolvable(chunkID: Int64, bucketID: Int64, cause: String?)
     }
 
     // MARK: - State
@@ -57,9 +90,25 @@ public actor Indexer {
     private let storage: any SwitchcraftStorage
     public let config: IndexerConfig
 
+    /// One token embedding as stored in the ledger: either the fully
+    /// materialized `[Float]` (memtable rows not yet flushed — there is no
+    /// bucket to reference yet) or a lightweight reference into a bucket
+    /// already committed to storage. `dims` is not stored per-token since
+    /// it's already locked in at the `Indexer` level. See ADR 035.
+    enum LedgerToken: Sendable, Equatable {
+        case materialized([Float])
+        /// `pairOffset` is the token's index into the bucket's decoded
+        /// `IndicesCodec.decode(bucket.indices)` array, which is also the
+        /// row index into the bucket's decoded residuals (`base =
+        /// pairOffset * dims`).
+        case bucketRef(genID: Int64, bucketID: Int64, pairOffset: Int)
+    }
+
     /// Every embedding ever added, keyed by chunkID. Token order within
-    /// each chunk is the order of the embeddings passed to `add`.
-    private var ledger: [Int64: [[Float]]] = [:]
+    /// each chunk is the order of the embeddings passed to `add`. Rows are
+    /// `.materialized` until the chunk's tokens are first flushed, at which
+    /// point `performFlush()` transitions them to `.bucketRef` (issue #137).
+    private var ledger: [Int64: [LedgerToken]] = [:]
 
     /// Vector dimensionality, locked in by the first `add`.
     private var dims: Int?
@@ -178,9 +227,11 @@ public actor Indexer {
             return false
         }
 
-        // Decode the payload. A corrupt/truncated blob throws — treat it as an
-        // unusable snapshot and fall back rather than propagating out of init.
-        let decoded: [Int64: [[Float]]]
+        // Decode the payload. A corrupt/truncated blob — or a v1
+        // (pre-issue-#137) payload rejected by the version check — throws;
+        // treat it as an unusable snapshot and fall back rather than
+        // propagating out of init.
+        let decoded: [Int64: [LedgerToken]]
         do {
             decoded = try LedgerSnapshotCodec.decode(record.payload, dims: record.dims)
         } catch {
@@ -198,15 +249,58 @@ public actor Indexer {
         return true
     }
 
-    /// `.throwError` rehydration path — unchanged from the original implementation.
-    /// Throws `rehydrationConflict` on the first detected chunkID overlap.
+    /// Cheap, non-residual-decoding half of the Requirement 13 integrity
+    /// walk: `bucket.center` decodes to a non-empty `[Float]`, and its
+    /// dims agree with any previously-seen bucket in this rehydration pass.
+    /// Shared by both rehydration paths. Does not touch `indices` or
+    /// `residuals` — callers check those separately (residuals need
+    /// `pairs.count`, which requires decoding `indices` first).
+    private static func checkedBucketCenter(
+        _ bucket: BucketRecord, generationID: Int64, inferredDims: inout Int?
+    ) throws -> [Float] {
+        let center = Indexer.decodeFloat32LE(bucket.center)
+        guard !center.isEmpty else {
+            throw Error.rehydrationBucketCorrupt(generationID: generationID)
+        }
+        if let existing = inferredDims, existing != center.count {
+            throw Error.rehydrationBucketCorrupt(generationID: generationID)
+        }
+        inferredDims = center.count
+        return center
+    }
+
+    /// The remaining half of the Requirement 13 integrity walk: verify the
+    /// `residuals` blob is exactly the byte count Q4Codec would produce for
+    /// `pairsCount * dims` values (2 values packed per byte) — a size
+    /// check only, not a decode of the residual contents. Catches
+    /// truncation/corruption at the same cost as the bucket-ref population
+    /// work already required by Requirement 4 (O(pairs), no O(pairs×dims)).
+    private static func checkedResidualsSize(
+        _ bucket: BucketRecord, pairsCount: Int, dims: Int, generationID: Int64
+    ) throws {
+        let expectedBytes = pairsCount * dims / 2
+        guard bucket.residuals.count == expectedBytes else {
+            throw Error.rehydrationBucketCorrupt(generationID: generationID)
+        }
+    }
+
+    /// `.throwError` rehydration path.
+    ///
+    /// Populates the ledger with `.bucketRef` tokens pointing directly at
+    /// bucket metadata (issue #137 Requirement 4) instead of reconstructing
+    /// `center + dequantized residuals` per token — the cheap Requirement 13
+    /// integrity walk (header/codec/size checks, no residual-value decode)
+    /// replaces that reconstruction loop and still surfaces corruption at
+    /// store-open time. Throws `rehydrationConflict` on the first detected
+    /// chunkID overlap, unchanged from the original implementation.
     private func rehydrateThrowError(gens: [GenerationRecord]) async throws {
-        // Accumulate (tokenOffset, embedding) triples per chunkID across all
-        // buckets of all generations before populating the ledger. Tokens for
-        // a single chunkID may be spread across multiple buckets, so the sort
-        // step below is required to restore the original tokenOffset order that
-        // performFlush() assumes (row index == tokenOffset).
-        var accum: [Int64: [(tokenOffset: UInt32, embedding: [Float])]] = [:]
+        // Accumulate (tokenOffset, genID, bucketID, pairOffset) tuples per
+        // chunkID across all buckets of all generations before populating
+        // the ledger. Tokens for a single chunkID may be spread across
+        // multiple buckets, so the sort step below is required to restore
+        // the original tokenOffset order that performFlush() assumes (row
+        // index == tokenOffset).
+        var accum: [Int64: [(tokenOffset: UInt32, genID: Int64, bucketID: Int64, pairOffset: Int)]] = [:]
         // Maps chunkID → the generationID where it was first seen. Used to
         // detect the storage-corruption case of a chunkID in two active gens.
         var chunkGenMap: [Int64: Int64] = [:]
@@ -215,21 +309,11 @@ public actor Indexer {
         for gen in gens {
             let buckets = try await storage.buckets(forGeneration: gen.id)
             for bucket in buckets {
-                let center = Indexer.decodeFloat32LE(bucket.center)
-                guard !center.isEmpty else {
-                    throw Error.rehydrationBucketCorrupt(generationID: gen.id)
-                }
+                let center = try Self.checkedBucketCenter(bucket, generationID: gen.id, inferredDims: &inferredDims)
                 let d = center.count
-                if let existing = inferredDims, existing != d {
-                    throw Error.rehydrationBucketCorrupt(generationID: gen.id)
-                }
-                inferredDims = d
 
                 let pairs = try IndicesCodec.decode(bucket.indices)
-                let residuals = Q4Codec.decodeResiduals(bucket.residuals)
-                guard residuals.count == pairs.count * d else {
-                    throw Error.rehydrationBucketCorrupt(generationID: gen.id)
-                }
+                try Self.checkedResidualsSize(bucket, pairsCount: pairs.count, dims: d, generationID: gen.id)
 
                 for (i, pair) in pairs.enumerated() {
                     let chunkID = Int64(pair.chunkID)
@@ -238,14 +322,8 @@ public actor Indexer {
                     }
                     chunkGenMap[chunkID] = gen.id
 
-                    var embedding = [Float]()
-                    embedding.reserveCapacity(d)
-                    let base = i * d
-                    for j in 0..<d {
-                        embedding.append(center[j] + residuals[base + j])
-                    }
                     accum[chunkID, default: []].append(
-                        (tokenOffset: pair.tokenOffset, embedding: embedding)
+                        (tokenOffset: pair.tokenOffset, genID: gen.id, bucketID: bucket.id, pairOffset: i)
                     )
                 }
             }
@@ -253,7 +331,9 @@ public actor Indexer {
 
         for (chunkID, entries) in accum {
             let sorted = entries.sorted { $0.tokenOffset < $1.tokenOffset }
-            ledger[chunkID] = sorted.map { $0.embedding }
+            ledger[chunkID] = sorted.map {
+                .bucketRef(genID: $0.genID, bucketID: $0.bucketID, pairOffset: $0.pairOffset)
+            }
         }
         self.dims = inferredDims
     }
@@ -262,70 +342,56 @@ public actor Indexer {
     ///
     /// Four-pass algorithm:
     ///   1. Accumulate all data (with genID tagging), tracking which
-    ///      generation(s) each chunkID appears in.
+    ///      generation(s) each chunkID appears in. Residual *values* are
+    ///      not decoded here — only the cheap Requirement 13 integrity
+    ///      check (center non-empty, indices decode, residuals blob size).
     ///   2. Resolve winner for each conflicting chunkID via pairwise
     ///      `(level DESC, created DESC, id DESC)` comparison.
     ///   3. Prune loser generation data from storage (atomically per gen).
-    ///   4. Populate the ledger, filtering conflicted chunkIDs to their winner.
+    ///      Residual *values* are decoded here, and only here, for buckets
+    ///      in a loser generation — re-encoding surviving pairs needs the
+    ///      actual residual floats. This confines the one remaining
+    ///      O(pairs×dims) cost to the rare corruption-recovery case.
+    ///   4. Populate the ledger with `.bucketRef` tokens. `storage.replaceGeneration`
+    ///      assigns fresh generation/bucket ids to survivors, so any
+    ///      generation touched by the prune pass is re-walked post-prune to
+    ///      pick up its new ids; untouched generations reuse the pairs
+    ///      already decoded in step 1 at zero extra I/O.
     private func rehydrateAutoRecover(gens: [GenerationRecord]) async throws {
-        // Local decoded bucket — stashed during the accumulation pass so the
-        // prune pass can re-encode surviving entries without extra storage I/O.
-        struct DecodedBucket {
+        // Local decoded bucket metadata — stashed during the accumulation
+        // pass so the prune pass (step 3) can re-encode surviving entries
+        // without extra storage I/O. Unlike the pre-#137 version, this does
+        // NOT carry decoded residual values: those are only decoded in
+        // step 3, and only for buckets in a loser generation.
+        struct DecodedBucketMeta {
             let genID: Int64
             let record: BucketRecord
-            let center: [Float]
             let pairs: [IndexPair]
-            let residuals: [Float]
         }
 
-        // Step 1 — Accumulation pass.
-        // genID-tagged accum: chunkID → [(genID, tokenOffset, embedding)]
-        var accum: [Int64: [(genID: Int64, tokenOffset: UInt32, embedding: [Float])]] = [:]
+        // Step 1 — Accumulation pass. Tracks which chunkIDs conflict and
+        // stashes decoded (non-residual) bucket metadata; does not build
+        // ledger entries directly since bucket ids for any generation
+        // touched by the prune pass (step 3) become stale before step 4 runs.
         // chunkID → set of all generationIDs that claim it.
         var chunkGenSets: [Int64: Set<Int64>] = [:]
-        var decodedBuckets: [DecodedBucket] = []
+        var decodedBuckets: [DecodedBucketMeta] = []
         var inferredDims: Int? = nil
 
         for gen in gens {
             let buckets = try await storage.buckets(forGeneration: gen.id)
             for bucket in buckets {
-                let center = Indexer.decodeFloat32LE(bucket.center)
-                guard !center.isEmpty else {
-                    throw Error.rehydrationBucketCorrupt(generationID: gen.id)
-                }
+                let center = try Self.checkedBucketCenter(bucket, generationID: gen.id, inferredDims: &inferredDims)
                 let d = center.count
-                if let existing = inferredDims, existing != d {
-                    throw Error.rehydrationBucketCorrupt(generationID: gen.id)
-                }
-                inferredDims = d
 
                 let pairs = try IndicesCodec.decode(bucket.indices)
-                let residuals = Q4Codec.decodeResiduals(bucket.residuals)
-                guard residuals.count == pairs.count * d else {
-                    throw Error.rehydrationBucketCorrupt(generationID: gen.id)
-                }
+                try Self.checkedResidualsSize(bucket, pairsCount: pairs.count, dims: d, generationID: gen.id)
 
-                decodedBuckets.append(DecodedBucket(
-                    genID: gen.id,
-                    record: bucket,
-                    center: center,
-                    pairs: pairs,
-                    residuals: residuals
-                ))
+                decodedBuckets.append(DecodedBucketMeta(genID: gen.id, record: bucket, pairs: pairs))
 
-                for (i, pair) in pairs.enumerated() {
+                for pair in pairs {
                     let chunkID = Int64(pair.chunkID)
                     chunkGenSets[chunkID, default: []].insert(gen.id)
-
-                    var embedding = [Float]()
-                    embedding.reserveCapacity(d)
-                    let base = i * d
-                    for j in 0..<d {
-                        embedding.append(center[j] + residuals[base + j])
-                    }
-                    accum[chunkID, default: []].append(
-                        (genID: gen.id, tokenOffset: pair.tokenOffset, embedding: embedding)
-                    )
                 }
             }
         }
@@ -376,6 +442,11 @@ public actor Indexer {
             }
         }
 
+        // Generations actually rewritten by `replaceGeneration` below (fresh
+        // gen id + fresh bucket ids for survivors) — used by step 5 to know
+        // which generations' `decodedBuckets` entries are now stale.
+        var replacementGens: [GenerationRecord] = []
+
         // For each loser generation, compute surviving buckets and replace atomically.
         for (loserGenID, losingChunkIDs) in loserChunkIDsByGen {
             guard let loserGen = genLookup[loserGenID] else { continue }
@@ -396,13 +467,19 @@ public actor Indexer {
                     """)
             }
 
-            // Build surviving buckets: filter out pairs whose chunkID is a loser.
+            // Build surviving buckets: filter out pairs whose chunkID is a
+            // loser. Residual *values* are decoded here — and only here —
+            // for buckets in this loser generation; re-encoding surviving
+            // pairs needs the actual residual floats. This is the one
+            // remaining O(pairs×dims) cost in this rehydration path,
+            // confined to the rare corruption-recovery case.
             var survivingBuckets: [BucketRecord] = []
             var totalSurvivingEmbeddings = 0
             var survivingMinChunkID: Int64? = nil
             var survivingMaxChunkID: Int64? = nil
 
             for decoded in decodedBuckets where decoded.genID == loserGenID {
+                let residuals = Q4Codec.decodeResiduals(decoded.record.residuals)
                 // Filter pairs to those not in the losing set.
                 var survivingPairs: [IndexPair] = []
                 var survivingResidualValues: [Float] = []
@@ -412,7 +489,7 @@ public actor Indexer {
                     survivingPairs.append(pair)
                     let base = i * d
                     for j in 0..<d {
-                        survivingResidualValues.append(decoded.residuals[base + j])
+                        survivingResidualValues.append(residuals[base + j])
                     }
                     survivingMinChunkID = survivingMinChunkID.map { min($0, chunkID) } ?? chunkID
                     survivingMaxChunkID = survivingMaxChunkID.map { max($0, chunkID) } ?? chunkID
@@ -438,11 +515,18 @@ public actor Indexer {
             )
 
             // Atomically replace the loser in storage. May throw — propagates.
-            _ = try await storage.replaceGeneration(
+            // `replaceGeneration` assigns a fresh generation id (and fresh
+            // bucket ids for every surviving bucket) — captured here so the
+            // ledger-population pass (step 4 below) can re-walk exactly the
+            // generations whose ids changed, instead of trusting the
+            // now-stale ids in `decodedBuckets`.
+            if let replaced = try await storage.replaceGeneration(
                 losingGenerationID: loserGenID,
                 survivingRecord: survivingRecord,
                 survivingBuckets: survivingBuckets
-            )
+            ) {
+                replacementGens.append(replaced)
+            }
         }
 
         // Step 3.5 — Correct stale numEmbeddings on all surviving (non-loser) generations.
@@ -451,7 +535,9 @@ public actor Indexer {
         // pairs actually present in its buckets. The cascade walk in performFlush() uses
         // gen.numEmbeddings for `total` while allRows.count is derived from decoded bucket
         // pairs — if they diverge, ledgerOutOfSync fires. Correct here using
-        // already-decoded bucket data (zero extra I/O).
+        // already-decoded bucket data (zero extra I/O). Only applies to generations
+        // untouched by the prune pass — replacement generations built above already
+        // carry a correct `numEmbeddings` (`totalSurvivingEmbeddings`).
         let loserGenIDs = Set(loserChunkIDsByGen.keys)
         for gen in gens where !loserGenIDs.contains(gen.id) {
             let actualCount = decodedBuckets
@@ -465,19 +551,46 @@ public actor Indexer {
         // Step 4 — Record recoveredConflictCount.
         recoveredConflictCount = winnerGenID.count
 
-        // Step 5 — Ledger population. For conflicting chunkIDs, only use
-        // entries from the winning generation.
-        for (chunkID, entries) in accum {
-            let filteredEntries: [(tokenOffset: UInt32, embedding: [Float])]
-            if let winnerID = winnerGenID[chunkID] {
-                filteredEntries = entries.compactMap { e in
-                    e.genID == winnerID ? (tokenOffset: e.tokenOffset, embedding: e.embedding) : nil
-                }
-            } else {
-                filteredEntries = entries.map { (tokenOffset: $0.tokenOffset, embedding: $0.embedding) }
+        // Step 5 — Ledger population with `.bucketRef` tokens.
+        //
+        // Untouched generations (not in `loserGenIDs`) keep their original
+        // ids, so `decodedBuckets` entries for them are reused directly at
+        // zero extra I/O. By construction, no chunkID within an untouched
+        // generation can be on the losing side of a conflict — if it were,
+        // this generation would itself be a loser for that chunkID and
+        // would appear in `loserGenIDs`. So no winner-filtering is needed
+        // for this branch.
+        var populated: [Int64: [(tokenOffset: UInt32, genID: Int64, bucketID: Int64, pairOffset: Int)]] = [:]
+        for decoded in decodedBuckets where !loserGenIDs.contains(decoded.genID) {
+            for (i, pair) in decoded.pairs.enumerated() {
+                let chunkID = Int64(pair.chunkID)
+                populated[chunkID, default: []].append(
+                    (tokenOffset: pair.tokenOffset, genID: decoded.genID, bucketID: decoded.record.id, pairOffset: i)
+                )
             }
-            let sorted = filteredEntries.sorted { $0.tokenOffset < $1.tokenOffset }
-            ledger[chunkID] = sorted.map { $0.embedding }
+        }
+
+        // Generations replaced by the prune pass: re-walk their (new)
+        // buckets fresh from storage to pick up the post-prune ids.
+        // Decodes only `indices` (O(pairs)), not residual values.
+        for replacedGen in replacementGens {
+            let buckets = try await storage.buckets(forGeneration: replacedGen.id)
+            for bucket in buckets {
+                let pairs = try IndicesCodec.decode(bucket.indices)
+                for (i, pair) in pairs.enumerated() {
+                    let chunkID = Int64(pair.chunkID)
+                    populated[chunkID, default: []].append(
+                        (tokenOffset: pair.tokenOffset, genID: replacedGen.id, bucketID: bucket.id, pairOffset: i)
+                    )
+                }
+            }
+        }
+
+        for (chunkID, entries) in populated {
+            let sorted = entries.sorted { $0.tokenOffset < $1.tokenOffset }
+            ledger[chunkID] = sorted.map {
+                .bucketRef(genID: $0.genID, bucketID: $0.bucketID, pairOffset: $0.pairOffset)
+            }
         }
         self.dims = d
     }
@@ -527,11 +640,11 @@ public actor Indexer {
         let m = embeddings.count / dims
         if m == 0 { return }
 
-        var rows = [[Float]]()
+        var rows = [LedgerToken]()
         rows.reserveCapacity(m)
         for i in 0..<m {
             let start = i * dims
-            rows.append(Array(embeddings[start..<(start + dims)]))
+            rows.append(.materialized(Array(embeddings[start..<(start + dims)])))
         }
         ledger[chunkID, default: []].append(contentsOf: rows)
 
@@ -761,6 +874,184 @@ public actor Indexer {
         try await storage.saveLedgerSnapshot(record)
     }
 
+    /// One bucket's decoded contents, cached during a batched-materialization
+    /// call so that a bucket referenced by multiple tokens is decoded once.
+    private struct DecodedBucketData {
+        let center: [Float]
+        let pairs: [IndexPair]
+        let residuals: [Float]
+    }
+
+    /// Per-call cache for batched bucket-ref materialization (issue #137
+    /// Requirement 6): a bucket referenced by many tokens in the same call
+    /// — e.g. several sqrt-sampled tokens landing in the same source bucket
+    /// — is fetched and decoded at most once. A reference type so it can be
+    /// threaded through a hot per-row loop (`collectAndMaterialize`) without
+    /// `inout` plumbing. Not `Sendable`: always created and consumed within
+    /// a single actor-isolated call, never shared across concurrent
+    /// contexts or stored across calls.
+    private final class BucketDecodeCache {
+        var rawBucketsByGen: [Int64: [Int64: BucketRecord]] = [:]
+        var decoded: [Int64: DecodedBucketData] = [:]
+    }
+
+    /// Fetch (if needed) and decode (if needed) the bucket `bucketID` in
+    /// generation `genID`, consulting/populating `cache` so repeated calls
+    /// for the same bucket within one `cache`'s lifetime do zero extra I/O
+    /// or decode work.
+    private func decodedBucket(
+        genID: Int64, bucketID: Int64, chunkID: Int64, cache: BucketDecodeCache
+    ) async throws -> DecodedBucketData {
+        if let cached = cache.decoded[bucketID] {
+            return cached
+        }
+        let record: BucketRecord
+        if let existing = cache.rawBucketsByGen[genID]?[bucketID] {
+            record = existing
+        } else {
+            let fetched: [BucketRecord]
+            do {
+                fetched = try await storage.buckets(forGeneration: genID)
+            } catch {
+                throw Error.bucketRefUnresolvable(chunkID: chunkID, bucketID: bucketID, cause: String(describing: error))
+            }
+            var byID: [Int64: BucketRecord] = [:]
+            byID.reserveCapacity(fetched.count)
+            for b in fetched { byID[b.id] = b }
+            cache.rawBucketsByGen[genID] = byID
+            guard let found = byID[bucketID] else {
+                throw Error.bucketRefUnresolvable(
+                    chunkID: chunkID, bucketID: bucketID,
+                    cause: "bucket \(bucketID) not found in generation \(genID)"
+                )
+            }
+            record = found
+        }
+        do {
+            let center = Indexer.decodeFloat32LE(record.center)
+            let pairs = try IndicesCodec.decode(record.indices)
+            let residuals = Q4Codec.decodeResiduals(record.residuals)
+            let result = DecodedBucketData(center: center, pairs: pairs, residuals: residuals)
+            cache.decoded[bucketID] = result
+            return result
+        } catch {
+            throw Error.bucketRefUnresolvable(chunkID: chunkID, bucketID: bucketID, cause: String(describing: error))
+        }
+    }
+
+    /// Resolve one `.bucketRef` token to its `center + dequantized residual`
+    /// row, via `decodedBucket` (so repeated refs into the same bucket incur
+    /// no extra I/O/decode).
+    ///
+    /// - Throws: `Error.bucketRefUnresolvable` if the referenced generation's
+    ///   buckets can't be fetched, the referenced bucketID isn't present, or
+    ///   the bucket's decoded contents don't have room for `pairOffset` at
+    ///   the expected `dims` — covering both storage-read failures and
+    ///   residual corruption the cheap init-time integrity walk (Requirement
+    ///   13) doesn't catch (it only checks blob sizes, not decoded values).
+    private func resolveBucketRefRow(
+        genID: Int64, bucketID: Int64, pairOffset: Int, chunkID: Int64, dims: Int, cache: BucketDecodeCache
+    ) async throws -> [Float] {
+        let decoded = try await decodedBucket(genID: genID, bucketID: bucketID, chunkID: chunkID, cache: cache)
+        guard pairOffset >= 0, pairOffset < decoded.pairs.count,
+              decoded.center.count == dims,
+              (pairOffset + 1) * dims <= decoded.residuals.count
+        else {
+            throw Error.bucketRefUnresolvable(
+                chunkID: chunkID, bucketID: bucketID,
+                cause: "pairOffset \(pairOffset) out of range or bucket size mismatch (dims=\(dims))"
+            )
+        }
+        let base = pairOffset * dims
+        var row = [Float](repeating: 0, count: dims)
+        for j in 0..<dims {
+            row[j] = decoded.center[j] + decoded.residuals[base + j]
+        }
+        return row
+    }
+
+    /// Resolve a list of ledger tokens into flat row data, in the same
+    /// order as `tokens`. `.materialized` tokens are copied directly with
+    /// no I/O; `.bucketRef` tokens are resolved via `resolveBucketRefRow`,
+    /// batching bucket decode by bucketID (issue #137 Requirement 6). Used
+    /// by `ledgerContents()` (test-only accessor); the `performFlush()` hot
+    /// path uses `collectAndMaterialize` instead, which inlines this same
+    /// per-token resolution directly into its collection loop to avoid the
+    /// extra intermediate `(chunkID, token)` array this general-purpose
+    /// entry point allocates.
+    private func materialize(
+        _ tokens: [(chunkID: Int64, token: LedgerToken)],
+        dims: Int
+    ) async throws -> [Float] {
+        let cache = BucketDecodeCache()
+        var out = [Float]()
+        out.reserveCapacity(tokens.count * dims)
+        for (chunkID, token) in tokens {
+            switch token {
+            case .materialized(let row):
+                out.append(contentsOf: row)
+            case .bucketRef(let genID, let bucketID, let pairOffset):
+                out.append(contentsOf: try await resolveBucketRefRow(
+                    genID: genID, bucketID: bucketID, pairOffset: pairOffset, chunkID: chunkID, dims: dims, cache: cache
+                ))
+            }
+        }
+        return out
+    }
+
+    /// Collect ledger rows for chunk ids in `[min, max]`, in (chunkID
+    /// ascending, tokenOffset ascending) order, materializing each row
+    /// in-place as it's collected. Returns the sorted chunk ids, the flat
+    /// materialized values, parallel per-row `(chunkID, tokenOffset)`
+    /// arrays, and a `chunkID -> row start index` map — the latter lets the
+    /// sqrt-sample training step (step 4 of `performFlush`) slice sampled
+    /// rows directly out of the flat buffer instead of decoding a second
+    /// time.
+    ///
+    /// This is a single pass (no intermediate token list) so the common
+    /// case — a chunk range with no bucket-refs yet, e.g. the first flush
+    /// of a fresh corpus — costs the same as the pre-#137 direct-copy loop.
+    private func collectAndMaterialize(
+        min: Int64, max: Int64, expectedTotal: Int, dims: Int
+    ) async throws -> (
+        sortedChunkIDs: [Int64],
+        flat: [Float],
+        rowChunkIDs: [Int64],
+        rowTokenOffsets: [UInt32],
+        chunkRowStart: [Int64: Int]
+    ) {
+        let sorted = ledger.keys
+            .filter { $0 >= min && $0 <= max }
+            .sorted()
+        var flat: [Float] = []
+        flat.reserveCapacity(expectedTotal * dims)
+        var rowChunkIDs: [Int64] = []
+        rowChunkIDs.reserveCapacity(expectedTotal)
+        var rowTokenOffsets: [UInt32] = []
+        rowTokenOffsets.reserveCapacity(expectedTotal)
+        var chunkRowStart: [Int64: Int] = [:]
+        chunkRowStart.reserveCapacity(sorted.count)
+        let cache = BucketDecodeCache()
+
+        for chunkID in sorted {
+            let tokens = ledger[chunkID]!
+            chunkRowStart[chunkID] = rowChunkIDs.count
+            for (idx, token) in tokens.enumerated() {
+                switch token {
+                case .materialized(let row):
+                    flat.append(contentsOf: row)
+                case .bucketRef(let genID, let bucketID, let pairOffset):
+                    flat.append(contentsOf: try await resolveBucketRefRow(
+                        genID: genID, bucketID: bucketID, pairOffset: pairOffset, chunkID: chunkID, dims: dims, cache: cache
+                    ))
+                }
+                rowChunkIDs.append(chunkID)
+                rowTokenOffsets.append(UInt32(idx))
+            }
+        }
+        return (sorted, flat, rowChunkIDs, rowTokenOffsets, chunkRowStart)
+    }
+
     /// Body of the flush operation. Must only be invoked by `flush()`,
     /// which holds the `flushInProgress` leader guard. Concurrent calls
     /// to this method would re-introduce the race documented on `flush()`.
@@ -819,29 +1110,15 @@ public actor Indexer {
         indexerLogger.info("[Compact] started: input_segments=\(inputSegments, privacy: .public) input_bytes=\(inputBytes, privacy: .public) trigger=\(trigger, privacy: .public)")
         do {
 
-        // 3. Collect every embedding in [minChunkID, maxChunkID] from
-        // the in-memory ledger, in (chunkID ascending, tokenOffset
-        // ascending) order. Building allFlat directly (rather than an
-        // intermediate [[Float]]) avoids ~1 heap allocation per token
-        // and saves ~876 MB of per-element Swift Array overhead at
-        // reproducer scale. allFlat is reused in step 7 (no second copy).
-        var allFlat: [Float] = []
-        allFlat.reserveCapacity(total * dims)
-        var rowChunkIDs: [Int64] = []
-        rowChunkIDs.reserveCapacity(total)
-        var rowTokenOffsets: [UInt32] = []
-        rowTokenOffsets.reserveCapacity(total)
-        var sortedChunkIDs = ledger.keys
-            .filter { $0 >= minChunkID && $0 <= maxChunkID }
-            .sorted()
-        for chunkID in sortedChunkIDs {
-            let tokens = ledger[chunkID]!
-            for (idx, row) in tokens.enumerated() {
-                allFlat.append(contentsOf: row)
-                rowChunkIDs.append(chunkID)
-                rowTokenOffsets.append(UInt32(idx))
-            }
-        }
+        // 3. Collect every embedding in [minChunkID, maxChunkID] from the
+        // in-memory ledger, in (chunkID ascending, tokenOffset ascending)
+        // order. `collectAndMaterialize` batches bucket-ref decode by
+        // bucketID (issue #137 Requirement 6) and builds `allFlat` directly
+        // — no intermediate `[[Float]]` — reused as-is in step 7 (no second
+        // copy) and sliced in step 4 for the sqrt-sample training set (no
+        // second bucket decode there either).
+        var (sortedChunkIDs, allFlat, rowChunkIDs, rowTokenOffsets, chunkRowStart) =
+            try await collectAndMaterialize(min: minChunkID, max: maxChunkID, expectedTotal: total, dims: dims)
         var m = rowChunkIDs.count
         if m != total {
             // Mid-operation ledger–storage divergence: the cascade walk's
@@ -871,23 +1148,8 @@ public actor Indexer {
                 total += g.numEmbeddings
                 targetLevel = max(targetLevel, g.level)
             }
-            allFlat.removeAll(keepingCapacity: true)
-            allFlat.reserveCapacity(total * dims)
-            rowChunkIDs.removeAll(keepingCapacity: true)
-            rowChunkIDs.reserveCapacity(total)
-            rowTokenOffsets.removeAll(keepingCapacity: true)
-            rowTokenOffsets.reserveCapacity(total)
-            sortedChunkIDs = ledger.keys
-                .filter { $0 >= minChunkID && $0 <= maxChunkID }
-                .sorted()
-            for chunkID in sortedChunkIDs {
-                let tokens = ledger[chunkID]!
-                for (idx, row) in tokens.enumerated() {
-                    allFlat.append(contentsOf: row)
-                    rowChunkIDs.append(chunkID)
-                    rowTokenOffsets.append(UInt32(idx))
-                }
-            }
+            (sortedChunkIDs, allFlat, rowChunkIDs, rowTokenOffsets, chunkRowStart) =
+                try await collectAndMaterialize(min: minChunkID, max: maxChunkID, expectedTotal: total, dims: dims)
             m = rowChunkIDs.count
             if m != total {
                 throw Error.ledgerOutOfSync(ledgerRows: m, expected: total)
@@ -902,21 +1164,27 @@ public actor Indexer {
         let finalTrigger: CompactionEvent.Trigger = targetLevel > 0 ? .cascade : .manual
 
         // 4. Build the per-chunk sqrt-sample training set, matching
-        // Witchcraft's `sample_embeddings_for_kmeans`.
+        // Witchcraft's `sample_embeddings_for_kmeans`. Sampled rows are
+        // sliced directly out of `allFlat` (already materialized in step 3)
+        // via `chunkRowStart` — no second bucket decode is needed, so this
+        // consumer is "free" once step 3's batched materialization has run.
         var rng = SplitMix64(seed: config.seed)
-        var trainingRows: [[Float]] = []
+        var trainFlat: [Float] = []
+        trainFlat.reserveCapacity(m * dims)
+        var trainM = 0
         for chunkID in sortedChunkIDs {
-            let tokens = ledger[chunkID]!
-            let chunkM = tokens.count
+            let chunkM = ledger[chunkID]!.count
             let sampleK = Int(Double(chunkM).squareRoot().rounded(.up))
             let picked = Self.sampleDistinct(
                 count: min(sampleK, chunkM), from: chunkM, rng: &rng
             )
+            let base = chunkRowStart[chunkID]!
             for i in picked {
-                trainingRows.append(tokens[i])
+                let rowStart = (base + i) * dims
+                trainFlat.append(contentsOf: allFlat[rowStart..<(rowStart + dims)])
+                trainM += 1
             }
         }
-        let trainM = trainingRows.count
 
         // 5. Compute k via Witchcraft's formula, clamped to the training
         // set size and to >= 1.
@@ -928,9 +1196,6 @@ public actor Indexer {
         k = min(k, trainM)
 
         // 6. Run k-means on the training set.
-        var trainFlat = [Float]()
-        trainFlat.reserveCapacity(trainM * dims)
-        for row in trainingRows { trainFlat.append(contentsOf: row) }
         let kmeansResult = KMeans.cluster(
             data: trainFlat, dims: dims, clusters: k,
             maxIterations: config.kmeansIterations,
@@ -1005,7 +1270,27 @@ public actor Indexer {
                     residuals: Q4Codec.encodeResiduals(residualValues)
                 )
             }
-            _ = try await storage.insertBucket(bucket)
+            let insertedBucket = try await storage.insertBucket(bucket)
+
+            // Requirement 3 (issue #137): transition the tokens just
+            // flushed from materialized to bucket-ref form, pointing at
+            // the generation/bucket/pairOffset just written. `pairOffset`
+            // is the token's index within `pairs` (== its index within
+            // `members`, since `pairs` was built by iterating `members` in
+            // this exact order), matching what
+            // `IndicesCodec.decode(bucket.indices)` will later return.
+            // Chunks outside this flush's [minChunkID, maxChunkID] range
+            // are untouched. Safe against concurrent mutation: `add()` /
+            // `removeFromLedger()` gate on `flushInProgress`, which is
+            // still held by the caller (`flush()`) for the duration of
+            // `performFlush()`.
+            for (pairOffset, rowIdx) in members.enumerated() {
+                let chunkID = rowChunkIDs[rowIdx]
+                let tokenOffset = Int(rowTokenOffsets[rowIdx])
+                ledger[chunkID]?[tokenOffset] = .bucketRef(
+                    genID: insertedGen.id, bucketID: insertedBucket.id, pairOffset: pairOffset
+                )
+            }
         }
 
         // 11. Delete merged-in generations now that the new one is
@@ -1061,13 +1346,45 @@ public actor Indexer {
 
     // MARK: - Testing helpers
 
-    /// Returns a live copy of the current ledger (chunkID → per-token
-    /// embeddings). Internal, not part of the public API. Accessible from
-    /// `@testable import SwitchcraftCore`. Renamed from `ledgerSnapshot`
-    /// (issue #136) to disambiguate from the persisted `LedgerSnapshotRecord`
-    /// fast-path feature — this is an in-memory copy for test assertions, not
-    /// the on-disk snapshot.
-    var ledgerContents: [Int64: [[Float]]] { ledger }
+    /// Returns a fully-materialized copy of the current ledger (chunkID →
+    /// per-token embeddings), resolving any `.bucketRef` tokens via a single
+    /// batched `materialize` call (issue #137 Requirement 7). Internal, not
+    /// part of the public API. Accessible from `@testable import
+    /// SwitchcraftCore`. Renamed from `ledgerSnapshot` (issue #136) to
+    /// disambiguate from the persisted `LedgerSnapshotRecord` fast-path
+    /// feature — this is an in-memory copy for test assertions, not the
+    /// on-disk snapshot.
+    ///
+    /// **Breaking change** (issue #137): now `async throws` since resolving
+    /// bucket-refs may read from storage. All in-package call sites are
+    /// test-only and already run in an async test context.
+    func ledgerContents() async throws -> [Int64: [[Float]]] {
+        guard let dims = self.dims else { return [:] }
+        var queue: [(chunkID: Int64, token: LedgerToken)] = []
+        var order: [(chunkID: Int64, count: Int)] = []
+        order.reserveCapacity(ledger.count)
+        for (chunkID, tokens) in ledger {
+            order.append((chunkID: chunkID, count: tokens.count))
+            for token in tokens {
+                queue.append((chunkID: chunkID, token: token))
+            }
+        }
+        let flat = try await materialize(queue, dims: dims)
+        var out: [Int64: [[Float]]] = [:]
+        out.reserveCapacity(order.count)
+        var offset = 0
+        for (chunkID, count) in order {
+            var rows: [[Float]] = []
+            rows.reserveCapacity(count)
+            for _ in 0..<count {
+                let start = offset * dims
+                rows.append(Array(flat[start..<(start + dims)]))
+                offset += 1
+            }
+            out[chunkID] = rows
+        }
+        return out
+    }
 
     /// True when `init` populated the ledger from a persisted snapshot
     /// (fast path) rather than running the full rehydration walk. Diagnostic

@@ -45,7 +45,7 @@ struct IndexerSnapshotFastPathTests {
             try await indexer.add(chunkID: chunkID, embeddings: flat, dims: dims)
         }
         _ = try await indexer.flush()
-        let ledger = await indexer.ledgerContents
+        let ledger = try await indexer.ledgerContents()
         return (storage, ledger)
     }
 
@@ -66,7 +66,7 @@ struct IndexerSnapshotFastPathTests {
 
         // The fast path reconstructs the EXACT in-memory ledger (snapshot stores
         // full-precision floats), unlike the Q4-lossy full-walk reconstruction.
-        let reloaded = await reopened.ledgerContents
+        let reloaded = try await reopened.ledgerContents()
         #expect(reloaded == originalLedger)
 
         // Invalidate-on-load: the on-disk snapshot must be cleared after the load.
@@ -86,7 +86,7 @@ struct IndexerSnapshotFastPathTests {
         let second = try await Indexer(storage: storage, config: .testing())
         #expect(await second.didUseSnapshotFastPath == false)
         // Full-walk rehydration still reconstructs every chunk.
-        let ledger = await second.ledgerContents
+        let ledger = try await second.ledgerContents()
         #expect(ledger.count == 5)
     }
 
@@ -101,7 +101,7 @@ struct IndexerSnapshotFastPathTests {
 
         let reopened = try await Indexer(storage: storage, config: .testing())
         #expect(await reopened.didUseSnapshotFastPath == false)
-        let ledger = await reopened.ledgerContents
+        let ledger = try await reopened.ledgerContents()
         #expect(ledger.count == 6)
     }
 
@@ -163,7 +163,7 @@ struct IndexerSnapshotFastPathTests {
         let reopened = try await Indexer(storage: storage, config: .testing())
         #expect(await reopened.didUseSnapshotFastPath == false)
         // Fell back to full rehydration, which still reconstructs every chunk.
-        let ledger = await reopened.ledgerContents
+        let ledger = try await reopened.ledgerContents()
         #expect(ledger.count == 6)
         // Stale snapshot must have been cleared during the mismatch handling.
         #expect(try await storage.loadLedgerSnapshot() == nil)
@@ -195,7 +195,7 @@ struct IndexerSnapshotFastPathTests {
         // init must not throw — the decode failure is swallowed and the walk runs.
         let reopened = try await Indexer(storage: storage, config: .testing())
         #expect(await reopened.didUseSnapshotFastPath == false)
-        let ledger = await reopened.ledgerContents
+        let ledger = try await reopened.ledgerContents()
         #expect(ledger.count == 6)
         // The corrupt snapshot must have been cleared on the failed load attempt.
         #expect(try await storage.loadLedgerSnapshot() == nil)

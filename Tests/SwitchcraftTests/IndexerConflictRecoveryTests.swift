@@ -100,7 +100,7 @@ struct IndexerConflictRecoveryTests {
         #expect(await indexer.recoveredConflictCount == 1)
 
         // The ledger must have exactly 1 entry for sharedChunkID (from the winner).
-        let ledger = await indexer.ledgerContents
+        let ledger = try await indexer.ledgerContents()
         let entries = ledger[sharedChunkID]
         #expect(entries != nil)
         #expect(entries?.count == 1)
@@ -275,7 +275,7 @@ struct IndexerConflictRecoveryTests {
 
         // Verify the winner's embedding is in the ledger.
         // Gen3 center=[0,0,1,0] → embedding[2] ≈ 1.0.
-        let ledger = await indexer.ledgerContents
+        let ledger = try await indexer.ledgerContents()
         let entries = ledger[sharedChunkID]
         #expect(entries != nil)
         #expect(entries?.count == 1)
