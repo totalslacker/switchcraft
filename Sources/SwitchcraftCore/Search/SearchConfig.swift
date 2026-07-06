@@ -45,6 +45,17 @@ public struct SearchConfig: Sendable, Hashable {
     /// See ADR 028 for rationale and interaction with ADR 006 MEAN aggregation.
     public var queryMinSurfaceFormLength: Int
 
+    /// Benchmark-only escape hatch that forces `SearchEngine.search` onto
+    /// the pre-#140 sequential, non-deduplicated code path
+    /// (`searchLegacy`) instead of the parallel-decode + query-token-dedup
+    /// path (`searchOptimized`) that is the default as of ADR 035.
+    ///
+    /// Not intended for production use — it exists so the search-latency
+    /// benchmark can measure both code paths against the same fixture in
+    /// a single test invocation. Both paths produce identical output
+    /// (see ADR 006(f) and ADR 035); only wall-clock time differs.
+    public var legacySequentialSearch: Bool
+
     /// Build a `SearchConfig`. All arguments default to upstream
     /// Witchcraft's reference constants.
     public init(
@@ -52,7 +63,8 @@ public struct SearchConfig: Sendable, Hashable {
         tPrime: Int = 40_000,
         threshold: Float = 0,
         searchDeadline: Duration = .seconds(5),
-        queryMinSurfaceFormLength: Int = 0
+        queryMinSurfaceFormLength: Int = 0,
+        legacySequentialSearch: Bool = false
     ) {
         precondition(k > 0, "k must be positive")
         precondition(tPrime > 0, "tPrime must be positive")
@@ -62,5 +74,6 @@ public struct SearchConfig: Sendable, Hashable {
         self.threshold = threshold
         self.searchDeadline = searchDeadline
         self.queryMinSurfaceFormLength = queryMinSurfaceFormLength
+        self.legacySequentialSearch = legacySequentialSearch
     }
 }
