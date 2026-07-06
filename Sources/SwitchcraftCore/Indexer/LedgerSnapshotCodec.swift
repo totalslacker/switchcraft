@@ -75,56 +75,97 @@ public struct LedgerSnapshotFingerprint: Sendable, Hashable {
 
 /// Wire-format codec for a `LedgerSnapshotRecord.payload` blob.
 ///
-/// The payload encodes the full ledger `[Int64: [[Float]]]` as a flat,
-/// self-describing byte stream so that decoding reconstructs the *exact*
-/// in-memory structure the full rehydration walk would have produced — same
-/// `[Float]` values, same per-chunk token ordering. Bit-for-bit parity here
-/// is required or NFCorpus retrieval results would silently drift (see
-/// ADR 034 / issue #136 requirement 2).
+/// **v2 (issue #137)**: the payload encodes the full ledger
+/// `[Int64: [Indexer.LedgerToken]]` — a per-token tag distinguishes
+/// materialized rows (full-precision `[Float]`, copied verbatim) from
+/// bucket-refs (`genID`/`bucketID`/`pairOffset`, copied verbatim). This
+/// means `writeLedgerSnapshot()` is a pure in-memory encode of whatever the
+/// ledger already holds — it never needs to decode a bucket-ref back into
+/// floats just to snapshot it, which would reintroduce the O(pairs×dims)
+/// cost this issue removes from startup, now on the much-hotter flush path.
+/// A snapshot decoded back via `decode(_:dims:)` reproduces the *exact*
+/// mixed representation the ledger had at encode time — no precision loss
+/// beyond whatever the ledger already carried (materialized rows stay
+/// full-precision; bucket-refs stay lossy-only-on-eventual-materialization,
+/// same as the live ledger). See ADR 034 (amended) and ADR 036.
 ///
 /// Layout (all integers little-endian):
+///   - `UInt32`  magic (`0xFFFF_FFFF` — see `unsupportedVersion` below)
+///   - `UInt8`   version (`2`)
 ///   - `UInt32`  chunkCount
 ///   - repeated chunkCount times, chunks sorted by ascending chunkID:
 ///       - `Int64`   chunkID
 ///       - `UInt32`  tokenCount (rows for this chunk)
-///       - tokenCount × dims × `Float32` (little-endian bit patterns), one
-///         row after another in ledger order
+///       - repeated tokenCount times, one token after another in ledger order:
+///           - `UInt8` tag: `0` = materialized, `1` = bucketRef
+///           - tag `0`: dims × `Float32` (little-endian bit patterns)
+///           - tag `1`: `Int64` genID, `Int64` bucketID, `Int64` pairOffset
 ///
 /// `dims` is carried out-of-band on the `LedgerSnapshotRecord` (an empty
 /// ledger cannot infer it), so it is *not* repeated per row here.
-public enum LedgerSnapshotCodec {
+///
+/// **Version history**: v1 (issue #136) began directly with the `UInt32`
+/// chunkCount — no magic, no version byte, no per-token tag (every row was
+/// unconditionally a materialized `[Float]`). `decode(_:dims:)` rejects any
+/// payload whose first 4 bytes aren't the v2 magic, which a v1 payload's
+/// chunk count can only match by coincidence for an implausible ~4-billion
+/// chunk snapshot — for any real payload this is unambiguous. The caller
+/// (`loadFromSnapshotIfValid`) treats any decode failure as "snapshot
+/// unusable" and falls back to the full rehydration walk, so a v1 snapshot
+/// left over from before this upgrade fails closed rather than being
+/// misparsed.
+enum LedgerSnapshotCodec {
 
-    public enum Error: Swift.Error, Sendable, Equatable {
+    enum Error: Swift.Error, Sendable, Equatable {
         /// The payload was truncated or otherwise structurally invalid.
         case corruptPayload(String)
+        /// The payload's magic/version header doesn't match what this
+        /// build of `LedgerSnapshotCodec` writes — most likely a v1
+        /// (pre-issue-#137) snapshot left over from before an upgrade.
+        case unsupportedVersion(UInt8)
     }
+
+    /// Sentinel first 4 bytes distinguishing the v2 (bucket-ref-aware)
+    /// payload format from the v1 (issue #136) format, which began directly
+    /// with a `UInt32` chunk count. No real chunk count can plausibly reach
+    /// this value, so a v1 payload is always safely rejected rather than
+    /// misparsed as v2.
+    private static let magic: UInt32 = 0xFFFF_FFFF
+    private static let version: UInt8 = 2
+
+    private static let tagMaterialized: UInt8 = 0
+    private static let tagBucketRef: UInt8 = 1
 
     /// Encode the ledger into a payload blob. Chunks are emitted in ascending
     /// chunkID order so the encoding is deterministic for a given ledger.
     ///
-    /// - Precondition: every row in every chunk has exactly `dims` elements.
-    public static func encode(_ ledger: [Int64: [[Float]]], dims: Int) -> Data {
+    /// - Precondition: every `.materialized` row has exactly `dims` elements.
+    static func encode(_ ledger: [Int64: [Indexer.LedgerToken]], dims: Int) -> Data {
         precondition(dims > 0, "dims must be positive")
         let sortedChunkIDs = ledger.keys.sorted()
 
-        // Pre-size: 4 (count) + per chunk 8 (id) + 4 (tokenCount) + rows*dims*4.
-        var capacity = 4
-        for chunkID in sortedChunkIDs {
-            let rows = ledger[chunkID]!
-            capacity += 8 + 4 + rows.count * dims * 4
-        }
-        var out = Data(capacity: capacity)
-
+        var out = Data()
+        appendUInt32LE(&out, magic)
+        out.append(version)
         appendUInt32LE(&out, UInt32(sortedChunkIDs.count))
         for chunkID in sortedChunkIDs {
-            let rows = ledger[chunkID]!
+            let tokens = ledger[chunkID]!
             appendInt64LE(&out, chunkID)
-            appendUInt32LE(&out, UInt32(rows.count))
-            for row in rows {
-                precondition(row.count == dims,
-                             "ledger row for chunk \(chunkID) has \(row.count) elements; expected dims \(dims)")
-                for v in row {
-                    appendFloat32LE(&out, v)
+            appendUInt32LE(&out, UInt32(tokens.count))
+            for token in tokens {
+                switch token {
+                case .materialized(let row):
+                    precondition(row.count == dims,
+                                 "ledger row for chunk \(chunkID) has \(row.count) elements; expected dims \(dims)")
+                    out.append(tagMaterialized)
+                    for v in row {
+                        appendFloat32LE(&out, v)
+                    }
+                case .bucketRef(let genID, let bucketID, let pairOffset):
+                    out.append(tagBucketRef)
+                    appendInt64LE(&out, genID)
+                    appendInt64LE(&out, bucketID)
+                    appendInt64LE(&out, Int64(pairOffset))
                 }
             }
         }
@@ -132,10 +173,11 @@ public enum LedgerSnapshotCodec {
     }
 
     /// Decode a payload blob back into a ledger. Throws
-    /// `Error.corruptPayload` if the blob is truncated or its declared
-    /// counts overrun the buffer — the caller treats a throw as "snapshot
-    /// unusable, fall back to full rehydration".
-    public static func decode(_ data: Data, dims: Int) throws -> [Int64: [[Float]]] {
+    /// `Error.unsupportedVersion` if the magic/version header doesn't
+    /// match, or `Error.corruptPayload` if the blob is truncated or its
+    /// declared counts overrun the buffer — the caller treats any throw as
+    /// "snapshot unusable, fall back to full rehydration".
+    static func decode(_ data: Data, dims: Int) throws -> [Int64: [Indexer.LedgerToken]] {
         guard dims > 0 else {
             throw Error.corruptPayload("dims must be positive, got \(dims)")
         }
@@ -151,10 +193,21 @@ public enum LedgerSnapshotCodec {
             }
         }
 
+        try need(4, "magic")
+        let readMagic = readUInt32LE(bytes, offset); offset += 4
+        guard readMagic == magic else {
+            throw Error.unsupportedVersion(0)
+        }
+        try need(1, "version")
+        let readVersion = bytes[offset]; offset += 1
+        guard readVersion == version else {
+            throw Error.unsupportedVersion(readVersion)
+        }
+
         try need(4, "chunkCount")
         let chunkCount = readUInt32LE(bytes, offset); offset += 4
 
-        var ledger: [Int64: [[Float]]] = [:]
+        var ledger: [Int64: [Indexer.LedgerToken]] = [:]
         ledger.reserveCapacity(Int(chunkCount))
         let rowBytes = dims * 4
 
@@ -164,18 +217,31 @@ public enum LedgerSnapshotCodec {
             try need(4, "tokenCount")
             let tokenCount = Int(readUInt32LE(bytes, offset)); offset += 4
 
-            try need(tokenCount * rowBytes, "chunk \(chunkID) rows")
-            var rows: [[Float]] = []
-            rows.reserveCapacity(tokenCount)
+            var tokens: [Indexer.LedgerToken] = []
+            tokens.reserveCapacity(tokenCount)
             for _ in 0..<tokenCount {
-                var row = [Float]()
-                row.reserveCapacity(dims)
-                for _ in 0..<dims {
-                    row.append(readFloat32LE(bytes, offset)); offset += 4
+                try need(1, "chunk \(chunkID) token tag")
+                let tag = bytes[offset]; offset += 1
+                switch tag {
+                case tagMaterialized:
+                    try need(rowBytes, "chunk \(chunkID) materialized row")
+                    var row = [Float]()
+                    row.reserveCapacity(dims)
+                    for _ in 0..<dims {
+                        row.append(readFloat32LE(bytes, offset)); offset += 4
+                    }
+                    tokens.append(.materialized(row))
+                case tagBucketRef:
+                    try need(24, "chunk \(chunkID) bucketRef")
+                    let genID = readInt64LE(bytes, offset); offset += 8
+                    let bucketID = readInt64LE(bytes, offset); offset += 8
+                    let pairOffset = Int(readInt64LE(bytes, offset)); offset += 8
+                    tokens.append(.bucketRef(genID: genID, bucketID: bucketID, pairOffset: pairOffset))
+                default:
+                    throw Error.corruptPayload("unknown token tag \(tag) for chunk \(chunkID) at offset \(offset - 1)")
                 }
-                rows.append(row)
             }
-            ledger[chunkID] = rows
+            ledger[chunkID] = tokens
         }
 
         if offset != bytes.count {

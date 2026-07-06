@@ -45,7 +45,7 @@ struct IndexerSnapshotFastPathTests {
             try await indexer.add(chunkID: chunkID, embeddings: flat, dims: dims)
         }
         _ = try await indexer.flush()
-        let ledger = await indexer.ledgerContents
+        let ledger = try await indexer.ledgerContents()
         return (storage, ledger)
     }
 
@@ -64,9 +64,16 @@ struct IndexerSnapshotFastPathTests {
         #expect(await reopened.didUseSnapshotFastPath == true)
         #expect(await reopened.recoveredConflictCount == 0)
 
-        // The fast path reconstructs the EXACT in-memory ledger (snapshot stores
-        // full-precision floats), unlike the Q4-lossy full-walk reconstruction.
-        let reloaded = await reopened.ledgerContents
+        // The fast path reconstructs the exact in-memory ledger. Both sides of
+        // this comparison already resolve through the same Q4-lossy path
+        // (issue #137 / ADR 036): `originalLedger` was captured via
+        // `ledgerContents()` right after flush, when this corpus's tokens are
+        // already `.bucketRef` (materialized on demand by `ledgerContents()`
+        // itself), and `reloaded` resolves the snapshot's own bucket-refs the
+        // same way — so this assertion is "same bucket data resolves
+        // identically," not "snapshot floats are more precise than a Q4 walk"
+        // (ADR 034's original claim, corrected by ADR 036 §6).
+        let reloaded = try await reopened.ledgerContents()
         #expect(reloaded == originalLedger)
 
         // Invalidate-on-load: the on-disk snapshot must be cleared after the load.
@@ -86,7 +93,7 @@ struct IndexerSnapshotFastPathTests {
         let second = try await Indexer(storage: storage, config: .testing())
         #expect(await second.didUseSnapshotFastPath == false)
         // Full-walk rehydration still reconstructs every chunk.
-        let ledger = await second.ledgerContents
+        let ledger = try await second.ledgerContents()
         #expect(ledger.count == 5)
     }
 
@@ -101,7 +108,7 @@ struct IndexerSnapshotFastPathTests {
 
         let reopened = try await Indexer(storage: storage, config: .testing())
         #expect(await reopened.didUseSnapshotFastPath == false)
-        let ledger = await reopened.ledgerContents
+        let ledger = try await reopened.ledgerContents()
         #expect(ledger.count == 6)
     }
 
@@ -163,7 +170,7 @@ struct IndexerSnapshotFastPathTests {
         let reopened = try await Indexer(storage: storage, config: .testing())
         #expect(await reopened.didUseSnapshotFastPath == false)
         // Fell back to full rehydration, which still reconstructs every chunk.
-        let ledger = await reopened.ledgerContents
+        let ledger = try await reopened.ledgerContents()
         #expect(ledger.count == 6)
         // Stale snapshot must have been cleared during the mismatch handling.
         #expect(try await storage.loadLedgerSnapshot() == nil)
@@ -195,9 +202,64 @@ struct IndexerSnapshotFastPathTests {
         // init must not throw — the decode failure is swallowed and the walk runs.
         let reopened = try await Indexer(storage: storage, config: .testing())
         #expect(await reopened.didUseSnapshotFastPath == false)
-        let ledger = await reopened.ledgerContents
+        let ledger = try await reopened.ledgerContents()
         #expect(ledger.count == 6)
         // The corrupt snapshot must have been cleared on the failed load attempt.
+        #expect(try await storage.loadLedgerSnapshot() == nil)
+    }
+
+    @Test("v1 (pre-issue-#137) snapshot payload falls back to full rehydration, not misparsed")
+    func v1FormatSnapshotFallsBack() async throws {
+        let (storage, originalLedger) = try await Self.populateAndFlush(chunkCount: 6)
+
+        // Reconstruct the exact v1 payload layout (issue #136): no magic, no
+        // version byte, no per-token tag — just chunkCount, then per chunk
+        // chunkID + tokenCount + tokenCount*dims Float32LE, straight from the
+        // ledger captured right after flush.
+        var v1 = Data()
+        func appendU32(_ v: UInt32) {
+            v1.append(UInt8(v & 0xFF)); v1.append(UInt8((v >> 8) & 0xFF))
+            v1.append(UInt8((v >> 16) & 0xFF)); v1.append(UInt8((v >> 24) & 0xFF))
+        }
+        func appendI64(_ v: Int64) {
+            let bits = UInt64(bitPattern: v)
+            for shift in stride(from: 0, through: 56, by: 8) {
+                v1.append(UInt8((bits >> UInt64(shift)) & 0xFF))
+            }
+        }
+        let sortedChunkIDs = originalLedger.keys.sorted()
+        appendU32(UInt32(sortedChunkIDs.count))
+        for chunkID in sortedChunkIDs {
+            let rows = originalLedger[chunkID]!
+            appendI64(chunkID)
+            appendU32(UInt32(rows.count))
+            for row in rows {
+                for v in row { appendU32(v.bitPattern) }
+            }
+        }
+
+        let gens = try await storage.generations()
+        let chunkCount = try await storage.chunkCount()
+        let fp = LedgerSnapshotFingerprint.compute(chunkCount: chunkCount, generations: gens)
+        let v1Record = LedgerSnapshotRecord(
+            dims: Self.dims,
+            chunkCount: fp.chunkCount,
+            maxChunkID: fp.maxChunkID,
+            totalEmbeddings: fp.totalEmbeddings,
+            maxGenerationID: fp.maxGenerationID,
+            generationCount: fp.generationCount,
+            payload: v1
+        )
+        try await storage.saveLedgerSnapshot(v1Record)
+
+        // init must not throw — the version-mismatch decode failure is
+        // swallowed (same as any other corrupt/unusable snapshot) and the
+        // full rehydration walk runs instead, producing the correct ledger.
+        let reopened = try await Indexer(storage: storage, config: .testing())
+        #expect(await reopened.didUseSnapshotFastPath == false)
+        let ledger = try await reopened.ledgerContents()
+        #expect(ledger == originalLedger)
+        // The unusable v1 snapshot must have been cleared on the failed load.
         #expect(try await storage.loadLedgerSnapshot() == nil)
     }
 
@@ -266,9 +328,20 @@ struct IndexerSnapshotSpeedupTests {
         let dims = 64
         let chunkCount = 3_000
         let tokensPerChunk = 4
+        let trials = 7
 
-        // Build a corpus large enough that the full walk (bucket decode + Q4
-        // dequant of every embedding) does real work.
+        // Build a corpus large enough that the full walk does real work.
+        // Note (issue #137 / ADR 036): the full walk itself is now a cheap
+        // O(pairs) integrity walk (no per-token Q4 dequant — that eager
+        // reconstruction was removed), so its absolute cost — and therefore
+        // its margin versus the snapshot fast path, which is also O(pairs) —
+        // is much smaller than when this test was written for ADR 034. A
+        // single-shot wall-clock comparison is thin enough now to be flipped
+        // by scheduler contention when this suite runs alongside the rest of
+        // the package's tests, so this measures min-of-`trials` for each
+        // phase instead of one sample: scheduler/GC jitter only ever adds
+        // delay, never subtracts it, so the minimum across repeated trials
+        // is the most contention-resistant estimate of the true cost.
         let storage = InMemoryStorage()
         try await storage.open()
         let builder = try await Indexer(storage: storage, config: .testing(l0Capacity: 4, lsmFanout: 4))
@@ -285,21 +358,33 @@ struct IndexerSnapshotSpeedupTests {
         // A valid snapshot now exists.
         #expect(try await storage.loadLedgerSnapshot() != nil)
 
-        // Measure the fast path (snapshot present). This consumes + clears it.
-        let fastStart = Date()
-        let fast = try await Indexer(storage: storage, config: .testing(l0Capacity: 4, lsmFanout: 4))
-        let fastElapsed = Date().timeIntervalSince(fastStart)
-        #expect(await fast.didUseSnapshotFastPath == true)
+        var fastSamples: [TimeInterval] = []
+        var fullSamples: [TimeInterval] = []
+        for _ in 0..<trials {
+            // `persistSnapshot()` re-encodes `builder`'s (unchanged) ledger
+            // and re-arms the on-disk snapshot, since the previous trial's
+            // fast-path load consumed + cleared it (invalidate-on-load).
+            try await builder.persistSnapshot()
+            #expect(try await storage.loadLedgerSnapshot() != nil)
 
-        // Measure the full walk (snapshot now absent after invalidate-on-load).
-        #expect(try await storage.loadLedgerSnapshot() == nil)
-        let fullStart = Date()
-        let full = try await Indexer(storage: storage, config: .testing(l0Capacity: 4, lsmFanout: 4))
-        let fullElapsed = Date().timeIntervalSince(fullStart)
-        #expect(await full.didUseSnapshotFastPath == false)
+            let fastStart = Date()
+            let fast = try await Indexer(storage: storage, config: .testing(l0Capacity: 4, lsmFanout: 4))
+            fastSamples.append(Date().timeIntervalSince(fastStart))
+            #expect(await fast.didUseSnapshotFastPath == true)
 
+            // Snapshot now absent after invalidate-on-load — this init takes
+            // the full walk.
+            #expect(try await storage.loadLedgerSnapshot() == nil)
+            let fullStart = Date()
+            let full = try await Indexer(storage: storage, config: .testing(l0Capacity: 4, lsmFanout: 4))
+            fullSamples.append(Date().timeIntervalSince(fullStart))
+            #expect(await full.didUseSnapshotFastPath == false)
+        }
+
+        let fastElapsed = fastSamples.min()!
+        let fullElapsed = fullSamples.min()!
         let ratio = fullElapsed / max(fastElapsed, 1e-9)
-        print("[PerfTest] snapshot fast-path=\(String(format: "%.4f", fastElapsed))s full-walk=\(String(format: "%.4f", fullElapsed))s speedup=\(String(format: "%.2f", ratio))×")
+        print("[PerfTest] snapshot fast-path(min of \(trials))=\(String(format: "%.4f", fastElapsed))s full-walk(min of \(trials))=\(String(format: "%.4f", fullElapsed))s speedup=\(String(format: "%.2f", ratio))×")
 
         // Loose, non-flaky invariant: the fast path must not be slower than the
         // full walk. The `print` above documents the actual speedup.
