@@ -275,10 +275,23 @@ public actor Indexer {
     /// check only, not a decode of the residual contents. Catches
     /// truncation/corruption at the same cost as the bucket-ref population
     /// work already required by Requirement 4 (O(pairs), no O(pairs×dims)).
+    ///
+    /// `Q4Codec.encodeResiduals` requires an even value count (it packs two
+    /// 4-bit levels per byte), so `pairsCount * dims` must itself be even
+    /// for this bucket to ever have been produced by a legitimate encode.
+    /// Checked explicitly before the byte-count comparison: without it, an
+    /// odd `pairsCount * dims` (only reachable via corruption — `dims` is
+    /// fixed and even for a real corpus, so this implies a corrupt `pairs`
+    /// decode) would floor-divide to the same `expectedBytes` as one fewer
+    /// residual value, letting a truncated blob slip past this check.
     private static func checkedResidualsSize(
         _ bucket: BucketRecord, pairsCount: Int, dims: Int, generationID: Int64
     ) throws {
-        let expectedBytes = pairsCount * dims / 2
+        let valueCount = pairsCount * dims
+        guard valueCount % 2 == 0 else {
+            throw Error.rehydrationBucketCorrupt(generationID: generationID)
+        }
+        let expectedBytes = valueCount / 2
         guard bucket.residuals.count == expectedBytes else {
             throw Error.rehydrationBucketCorrupt(generationID: generationID)
         }

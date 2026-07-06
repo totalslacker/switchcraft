@@ -195,4 +195,46 @@ struct LazyLedgerMaterializationTests {
         let compactionReads = await storage.bucketReadCount
         #expect(compactionReads > 0, "the second flush must read/materialize the first flush's bucket-ref generation")
     }
+
+    /// Regression test for a gap in the Requirement 13 integrity walk found
+    /// during review: `checkedResidualsSize` computed `expectedBytes` as
+    /// `pairsCount * dims / 2` and compared it directly against the blob
+    /// size, but never checked that `pairsCount * dims` is itself even.
+    /// `Q4Codec.encodeResiduals` requires an even value count (two 4-bit
+    /// levels packed per byte), so a bucket with an odd `pairsCount * dims`
+    /// can only exist via corruption — and integer division would silently
+    /// floor that odd product, letting a residuals blob truncated by
+    /// exactly one packed value slip past the check undetected.
+    ///
+    /// Plants exactly that: 1 pair × dims=3 (odd product = 3) with a
+    /// residuals blob of the floor-divided 1 byte, bypassing `Indexer.add`/
+    /// `flush` entirely so the corruption is under direct control.
+    @Test("odd pairsCount×dims with a floor-divided-matching residuals blob is still rejected as corrupt")
+    func oddPairsTimesDimsIsRejectedAsCorrupt() async throws {
+        let storage = InMemoryStorage()
+        try await storage.open()
+
+        let dims = 3
+        let gen = try await storage.insertGeneration(GenerationRecord(
+            level: 0, numEmbeddings: 1, minChunkID: 1, maxChunkID: 1, created: Date()
+        ))
+        let pairs = [IndexPair(chunkID: 1, tokenOffset: 0)]
+        // 1 pair × 3 dims = 3 values (odd) — never producible by
+        // Q4Codec.encodeResiduals, which preconditions an even count. A
+        // corrupt/truncated blob could plausibly still be 1 byte (the
+        // floor of 3/2), which the pre-fix check accepted.
+        let corruptResiduals = Data([0x00])
+        let bucket = BucketRecord(
+            generationID: gen.id,
+            center: Indexer.encodeFloat32LE([Float](repeating: 0, count: dims)),
+            indices: IndicesCodec.encode(pairs),
+            residuals: corruptResiduals
+        )
+        _ = try await storage.insertBucket(bucket)
+
+        let config = IndexerConfig.testing(rehydrationConflictBehavior: .throwError)
+        await #expect(throws: Indexer.Error.rehydrationBucketCorrupt(generationID: gen.id)) {
+            _ = try await Indexer(storage: storage, config: config)
+        }
+    }
 }
