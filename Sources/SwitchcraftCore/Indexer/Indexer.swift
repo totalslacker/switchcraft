@@ -694,24 +694,39 @@ public actor Indexer {
     }
 
     /// Remove ledger rows for chunk ids that `SwitchcraftStore.vacuum()`
-    /// just deleted from storage.
+    /// just deleted from storage, and repoint every still-live chunk's
+    /// `.bucketRef` tokens at their surviving pair's new offset in any
+    /// bucket vacuum just compacted (issue #142).
     ///
     /// Unlike `removeFromLedger()` (used by the R1 orphan-recovery path to
     /// clear stale rows immediately before re-buffering fresh ones via
-    /// `add()`), this is a **true delete**: the chunk ids are gone from
-    /// storage for good, not about to be re-added. `removedFromLedgerCount`
-    /// is deliberately **not** incremented here — that counter exists to
-    /// compensate `performFlush()`'s cascade-walk total for rows that were
-    /// cleared-and-about-to-be-refilled (see ADR 029 amendment, issue
-    /// #132); vacuum already decremented the corresponding
-    /// `generation.numEmbeddings` in storage for these exact chunk ids
-    /// before calling this method, so the ledger and storage stay in
-    /// lockstep with no compensation needed. Incrementing it here would
-    /// double-subtract and desync a later flush.
+    /// `add()`), the `chunkIDs` deletion here is a **true delete**: the
+    /// chunk ids are gone from storage for good, not about to be re-added.
+    /// `removedFromLedgerCount` is deliberately **not** incremented here —
+    /// that counter exists to compensate `performFlush()`'s cascade-walk
+    /// total for rows that were cleared-and-about-to-be-refilled (see ADR
+    /// 029 amendment, issue #132); vacuum already decremented the
+    /// corresponding `generation.numEmbeddings` in storage for these exact
+    /// chunk ids before calling this method, so the ledger and storage
+    /// stay in lockstep with no compensation needed. Incrementing it here
+    /// would double-subtract and desync a later flush.
+    ///
+    /// `remaps` come from `VacuumPlanBuilder.Result.bucketRefRemaps`,
+    /// computed in the same per-bucket loop that produced the compacted
+    /// bytes `applyVacuumPlan` already committed — this just applies the
+    /// matching ledger-side update via the same
+    /// `ledger[chunkID]?[tokenOffset] = .bucketRef(...)` pattern
+    /// `performFlush()` already uses when it first materializes a
+    /// bucket-ref (ADR 036). Applied as a blind overwrite, mirroring that
+    /// precedent — `vacuum()`'s documented contract already excludes
+    /// concurrent same-process `add()`/`index()` racing this call, so no
+    /// defensive pre-check is needed.
     ///
     /// Includes the same flush-waiter gate as `add()`/`removeFromLedger()`
     /// to avoid racing a concurrent `performFlush()` mid-decode.
-    public func removeAbandonedFromLedger(_ chunkIDs: Set<Int64>) async throws {
+    public func applyVacuumLedgerUpdates(
+        abandonedChunkIDs chunkIDs: Set<Int64>, remaps: [VacuumPlanBuilder.BucketRefRemap]
+    ) async throws {
         while flushInProgress {
             _ = try await withCheckedThrowingContinuation { (c: CheckedContinuation<CompactionEvent?, any Swift.Error>) in
                 flushWaiters.append(c)
@@ -719,6 +734,11 @@ public actor Indexer {
         }
         for chunkID in chunkIDs {
             ledger.removeValue(forKey: chunkID)
+        }
+        for remap in remaps {
+            ledger[remap.chunkID]?[Int(remap.tokenOffset)] = .bucketRef(
+                genID: remap.genID, bucketID: remap.bucketID, pairOffset: remap.newPairOffset
+            )
         }
     }
 

@@ -403,6 +403,14 @@ public actor SwitchcraftStore {
     /// will not throw `Indexer.Error.ledgerOutOfSync` as a result of a
     /// prior `vacuum()` call.
     ///
+    /// This includes still-live chunks that shared a compacted bucket with
+    /// an abandoned one: every surviving `.bucketRef` is repointed at its
+    /// pair's new post-compaction offset in the same call, so it continues
+    /// to resolve to the exact same embedding it did before vacuum ran —
+    /// neither `Indexer.Error.bucketRefUnresolvable` nor a silently wrong
+    /// embedding can result from vacuum's own compaction (ADR 037, issue
+    /// #142).
+    ///
     /// ## Concurrency contract
     ///
     /// `vacuum()` flushes pending writes first (mirroring
@@ -473,7 +481,9 @@ public actor SwitchcraftStore {
         let postBytes = try await storage.freeListByteCount()
         let reclaimed = max(0, postBytes - preBytes)
 
-        try await indexer.removeAbandonedFromLedger(batchChunkIDs)
+        try await indexer.applyVacuumLedgerUpdates(
+            abandonedChunkIDs: batchChunkIDs, remaps: planResult.bucketRefRemaps
+        )
 
         let checkpoint = try await storage.walCheckpoint()
 
