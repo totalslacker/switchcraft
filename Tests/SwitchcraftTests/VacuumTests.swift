@@ -653,7 +653,15 @@ struct VacuumTests {
     /// and the forced cascade immediately after must not throw.
     @Test("sustained workload: 20+ vacuum cycles against a corpus with buckets shared across live and abandoned chunks each fully drain, with no bucketRefUnresolvable and no ledgerOutOfSync (AC3)")
     func vacuumSustainedSharedBucketWorkloadFullyDrains() async throws {
-        let config = StoreConfig(indexer: IndexerConfig(l0Capacity: 4, lsmFanout: 2))
+        // This test asserts vacuum/ledger correctness, not search latency —
+        // give the final sanity `search()` a generous deadline so it can't
+        // spuriously fail under CI resource contention from the other
+        // ~360 tests running concurrently (the default 5s deadline was
+        // observed to trip at 13.9s elapsed under CI load).
+        let config = StoreConfig(
+            indexer: IndexerConfig(l0Capacity: 4, lsmFanout: 2),
+            search: SearchConfig(searchDeadline: .seconds(60))
+        )
         let (store, _) = try await Self.makeStore(.inMemory, config: config)
 
         let cycles = 25
