@@ -136,6 +136,30 @@ enum LedgerSnapshotCodec {
     private static let tagMaterialized: UInt8 = 0
     private static let tagBucketRef: UInt8 = 1
 
+    /// Exact wire-format byte size for `encode(_:dims:)`'s output, computed
+    /// without allocating the output buffer. Used to `reserveCapacity` (and,
+    /// post-issue-#144, to preallocate the exact-size bulk buffer) so the
+    /// encoder never pays repeated-reallocation cost on a large ledger,
+    /// mirroring `decode()`'s pre-sizing of its own output collections.
+    private static func encodedByteCount(_ ledger: [Int64: [Indexer.LedgerToken]], dims: Int) -> Int {
+        let rowBytes = dims * 4
+        // magic (4) + version (1) + chunkCount (4)
+        var size = 9
+        for tokens in ledger.values {
+            // chunkID (8) + tokenCount (4)
+            size += 12
+            for token in tokens {
+                switch token {
+                case .materialized:
+                    size += 1 + rowBytes
+                case .bucketRef:
+                    size += 1 + 24
+                }
+            }
+        }
+        return size
+    }
+
     /// Encode the ledger into a payload blob. Chunks are emitted in ascending
     /// chunkID order so the encoding is deterministic for a given ledger.
     ///
@@ -145,6 +169,7 @@ enum LedgerSnapshotCodec {
         let sortedChunkIDs = ledger.keys.sorted()
 
         var out = Data()
+        out.reserveCapacity(encodedByteCount(ledger, dims: dims))
         appendUInt32LE(&out, magic)
         out.append(version)
         appendUInt32LE(&out, UInt32(sortedChunkIDs.count))
