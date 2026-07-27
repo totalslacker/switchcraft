@@ -838,15 +838,21 @@ public actor Indexer {
     /// `add()`/`removeFromLedger()` calls (which gate on `flushInProgress`)
     /// cannot mutate the ledger mid-encode, mirroring `flush()`'s
     /// leader/waiter drain.
-    public func persistSnapshot() async throws {
+    ///
+    /// Returns a wall-clock/size breakdown of the write (issue #144, REQ-1) —
+    /// all-zero if `writeLedgerSnapshot()` took an early-return path. Callers
+    /// that don't need the breakdown may discard it.
+    @discardableResult
+    public func persistSnapshot() async throws -> PersistSnapshotStats {
         while flushInProgress {
             _ = try await withCheckedThrowingContinuation { (c: CheckedContinuation<CompactionEvent?, any Swift.Error>) in
                 flushWaiters.append(c)
             }
         }
         flushInProgress = true
+        let stats: PersistSnapshotStats
         do {
-            try await writeLedgerSnapshot()
+            stats = try await writeLedgerSnapshot()
         } catch {
             let waiters = flushWaiters
             flushWaiters.removeAll()
@@ -858,6 +864,7 @@ public actor Indexer {
         flushWaiters.removeAll()
         flushInProgress = false
         for w in waiters { w.resume(returning: nil) }
+        return stats
     }
 
     /// Encode the current ledger + a fresh storage fingerprint into a
@@ -867,10 +874,11 @@ public actor Indexer {
     /// (`flushInProgress == true`) so the ledger is stable across its `await`
     /// points. If `dims` has never been locked in (empty index), there is
     /// nothing meaningful to snapshot — any stale snapshot is cleared instead.
-    private func writeLedgerSnapshot() async throws {
+    @discardableResult
+    private func writeLedgerSnapshot() async throws -> PersistSnapshotStats {
         guard let dims = self.dims else {
             try await storage.clearLedgerSnapshot()
-            return
+            return .zero
         }
         let gens = try await storage.generations()
         let chunkCount = try await storage.chunkCount()
@@ -891,10 +899,12 @@ public actor Indexer {
         guard ledgerRowCount == fingerprint.totalEmbeddings else {
             indexerLogger.warning("Skipping ledger snapshot write: ledger rows (\(ledgerRowCount, privacy: .public)) != storage embeddings (\(fingerprint.totalEmbeddings, privacy: .public)); next startup will use full rehydration")
             try await storage.clearLedgerSnapshot()
-            return
+            return .zero
         }
 
+        let encodeStart = Date()
         let payload = LedgerSnapshotCodec.encode(ledger, dims: dims)
+        let encodeSeconds = Date().timeIntervalSince(encodeStart)
         let record = LedgerSnapshotRecord(
             dims: dims,
             chunkCount: fingerprint.chunkCount,
@@ -904,7 +914,16 @@ public actor Indexer {
             generationCount: fingerprint.generationCount,
             payload: payload
         )
+        let writeStart = Date()
         try await storage.saveLedgerSnapshot(record)
+        let writeSeconds = Date().timeIntervalSince(writeStart)
+
+        return PersistSnapshotStats(
+            encodeSeconds: encodeSeconds,
+            writeSeconds: writeSeconds,
+            bytesSerialized: payload.count,
+            chunkCount: fingerprint.chunkCount
+        )
     }
 
     /// One bucket's decoded contents, cached during a batched-materialization

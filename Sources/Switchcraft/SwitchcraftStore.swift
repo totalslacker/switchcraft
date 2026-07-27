@@ -676,6 +676,12 @@ public actor SwitchcraftStore {
     /// shutdown, every other public method throws
     /// `SwitchcraftStoreError.alreadyShutDown`.
     ///
+    /// Logs a wall-clock breakdown at `.info` (issue #144, REQ-1) —
+    /// WAL-checkpoint time, `persistSnapshot` total time (with encode/write
+    /// sub-times and bytes serialized), and overall shutdown time — so the
+    /// dominant cost of a slow shutdown is observable without attaching a
+    /// profiler.
+    ///
     /// - Throws: indexer or storage errors raised during flush/close.
     public func shutdown() async throws {
         if isShutDown { return }
@@ -683,6 +689,7 @@ public actor SwitchcraftStore {
         // the actor is suspended in flush/close observe shutdown and
         // throw `alreadyShutDown` instead of racing through gates.
         isShutDown = true
+        let shutdownStart = Date()
         try await flushAndClearPending()
         // Persist a final ledger snapshot so the next launch can take the
         // fast startup path instead of a full rehydration walk (issue #136 /
@@ -692,18 +699,27 @@ public actor SwitchcraftStore {
         // next startup silently regresses to a full walk. Ordered before the
         // WAL checkpoint below so the snapshot write is covered by the same
         // wal_checkpoint(TRUNCATE) (ADR 033 ordering constraint).
-        try await indexer.persistSnapshot()
+        let snapshotStart = Date()
+        let snapshotStats = try await indexer.persistSnapshot()
+        let persistSnapshotSeconds = Date().timeIntervalSince(snapshotStart)
         // Checkpoint the WAL before closing so that the next launch finds
         // a clean database file. Skipped on error — a partial WAL is still
         // better than a half-checkpointed file, and `close()` handles final
         // cleanup regardless. Calls storage directly (not self.walCheckpoint())
         // to avoid re-entering the isShutDown guard and to skip a second flush.
+        let checkpointStart = Date()
         if case .partial(let frames) = try? await storage.walCheckpoint() {
             logger.error(
                 "WAL checkpoint partial on shutdown: \(frames) frames remaining"
             )
         }
+        let walCheckpointSeconds = Date().timeIntervalSince(checkpointStart)
         try await storage.close()
+        let totalSeconds = Date().timeIntervalSince(shutdownStart)
+
+        logger.info("switchcraft-adapter-shutdown: wal_checkpoint took \(String(format: "%.3f", walCheckpointSeconds), privacy: .public)s")
+        logger.info("switchcraft-adapter-shutdown: persistSnapshot took \(String(format: "%.3f", persistSnapshotSeconds), privacy: .public)s (encode \(String(format: "%.3f", snapshotStats.encodeSeconds), privacy: .public)s, write \(String(format: "%.3f", snapshotStats.writeSeconds), privacy: .public)s, bytes=\(snapshotStats.bytesSerialized, privacy: .public), chunks=\(snapshotStats.chunkCount, privacy: .public))")
+        logger.info("switchcraft-adapter-shutdown: total \(String(format: "%.3f", totalSeconds), privacy: .public)s")
     }
 
     // MARK: - Helpers
