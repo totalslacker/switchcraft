@@ -682,8 +682,18 @@ public actor SwitchcraftStore {
     /// dominant cost of a slow shutdown is observable without attaching a
     /// profiler.
     ///
+    /// `onSnapshotProgress`, if supplied, is invoked periodically during the
+    /// snapshot encode with chunks/bytes encoded so far (issue #144, REQ-5),
+    /// so a host app can surface real shutdown progress instead of an opaque
+    /// work-item name. Not invoked if there is nothing to encode (empty
+    /// index). Delivered from this actor's execution context — a callback
+    /// that needs to update UI must hop to the main actor itself, matching
+    /// `setOnCompactionEvent`'s dispatch contract.
+    ///
     /// - Throws: indexer or storage errors raised during flush/close.
-    public func shutdown() async throws {
+    public func shutdown(
+        onSnapshotProgress: (@Sendable (SnapshotProgress) async -> Void)? = nil
+    ) async throws {
         if isShutDown { return }
         // Set the flag before any `await` so calls that arrive while
         // the actor is suspended in flush/close observe shutdown and
@@ -700,7 +710,7 @@ public actor SwitchcraftStore {
         // WAL checkpoint below so the snapshot write is covered by the same
         // wal_checkpoint(TRUNCATE) (ADR 033 ordering constraint).
         let snapshotStart = Date()
-        let snapshotStats = try await indexer.persistSnapshot()
+        let snapshotStats = try await indexer.persistSnapshot(onProgress: onSnapshotProgress)
         let persistSnapshotSeconds = Date().timeIntervalSince(snapshotStart)
         // Checkpoint the WAL before closing so that the next launch finds
         // a clean database file. Skipped on error — a partial WAL is still

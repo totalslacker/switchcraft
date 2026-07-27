@@ -160,41 +160,99 @@ enum LedgerSnapshotCodec {
         return size
     }
 
+    /// Number of chunks encoded between each yield/progress checkpoint
+    /// (issue #144, REQ-4/REQ-5). Picked so a 100K-chunk ledger yields on
+    /// the order of ~200 times — frequent enough that a large encode
+    /// cannot starve the cooperative thread pool for more than a few
+    /// hundred chunks' worth of work at a stretch, infrequent enough that
+    /// the `await`/callback overhead stays negligible next to the encode
+    /// work itself.
+    private static let yieldInterval = 512
+
     /// Encode the ledger into a payload blob. Chunks are emitted in ascending
     /// chunkID order so the encoding is deterministic for a given ledger.
     ///
+    /// Builds directly into a preallocated `[UInt8]` buffer with indexed
+    /// writes rather than `Data.append` (issue #144, REQ-3): at production
+    /// scale (~11.1M embeddings) the append-based version made on the order
+    /// of hundreds of millions of individual single-byte `Data.append`
+    /// calls, each paying its own COW/bounds-check overhead. Computing the
+    /// exact size up front and writing at known offsets removes that
+    /// per-call overhead entirely.
+    ///
+    /// `async` so it can periodically `await Task.yield()` (REQ-4): this
+    /// runs synchronously on the `Indexer` actor with no other `await`
+    /// points, so an unyielding multi-second encode over a large ledger
+    /// would otherwise occupy one of the process's cooperative-pool worker
+    /// threads for the whole duration, risking starvation of unrelated
+    /// concurrent work elsewhere in the host app. Periodic yielding is only
+    /// safe because every caller holds the `flushInProgress` leader gate for
+    /// the duration of the call (see `Indexer.writeLedgerSnapshot()`) — no
+    /// concurrent `add()`/`removeFromLedger()` can mutate `ledger` between
+    /// yields. Any future caller of `encode()` must hold that same gate.
+    ///
+    /// `onProgress`, if supplied, is invoked at the same checkpoints with
+    /// chunks/bytes encoded so far (REQ-5), from this function's caller's
+    /// execution context (the `Indexer` actor) — a callback that needs to
+    /// hop elsewhere must do so itself.
+    ///
     /// - Precondition: every `.materialized` row has exactly `dims` elements.
-    static func encode(_ ledger: [Int64: [Indexer.LedgerToken]], dims: Int) -> Data {
+    static func encode(
+        _ ledger: [Int64: [Indexer.LedgerToken]],
+        dims: Int,
+        onProgress: (@Sendable (SnapshotProgress) async -> Void)? = nil
+    ) async -> Data {
         precondition(dims > 0, "dims must be positive")
         let sortedChunkIDs = ledger.keys.sorted()
+        let totalSize = encodedByteCount(ledger, dims: dims)
 
-        var out = Data()
-        out.reserveCapacity(encodedByteCount(ledger, dims: dims))
-        appendUInt32LE(&out, magic)
-        out.append(version)
-        appendUInt32LE(&out, UInt32(sortedChunkIDs.count))
-        for chunkID in sortedChunkIDs {
+        var buffer = [UInt8](repeating: 0, count: totalSize)
+        var offset = 0
+
+        writeUInt32LE(&buffer, offset, magic); offset += 4
+        buffer[offset] = version; offset += 1
+        writeUInt32LE(&buffer, offset, UInt32(sortedChunkIDs.count)); offset += 4
+
+        for (i, chunkID) in sortedChunkIDs.enumerated() {
             let tokens = ledger[chunkID]!
-            appendInt64LE(&out, chunkID)
-            appendUInt32LE(&out, UInt32(tokens.count))
+            writeInt64LE(&buffer, offset, chunkID); offset += 8
+            writeUInt32LE(&buffer, offset, UInt32(tokens.count)); offset += 4
             for token in tokens {
                 switch token {
                 case .materialized(let row):
                     precondition(row.count == dims,
                                  "ledger row for chunk \(chunkID) has \(row.count) elements; expected dims \(dims)")
-                    out.append(tagMaterialized)
+                    buffer[offset] = tagMaterialized; offset += 1
                     for v in row {
-                        appendFloat32LE(&out, v)
+                        writeFloat32LE(&buffer, offset, v); offset += 4
                     }
                 case .bucketRef(let genID, let bucketID, let pairOffset):
-                    out.append(tagBucketRef)
-                    appendInt64LE(&out, genID)
-                    appendInt64LE(&out, bucketID)
-                    appendInt64LE(&out, Int64(pairOffset))
+                    buffer[offset] = tagBucketRef; offset += 1
+                    writeInt64LE(&buffer, offset, genID); offset += 8
+                    writeInt64LE(&buffer, offset, bucketID); offset += 8
+                    writeInt64LE(&buffer, offset, Int64(pairOffset)); offset += 8
                 }
             }
+
+            let chunksEncoded = i + 1
+            if chunksEncoded % yieldInterval == 0 {
+                if let onProgress {
+                    await onProgress(SnapshotProgress(
+                        chunksEncoded: chunksEncoded, totalChunks: sortedChunkIDs.count, bytesEncoded: offset
+                    ))
+                }
+                await Task.yield()
+            }
         }
-        return out
+
+        if let onProgress, !sortedChunkIDs.isEmpty {
+            await onProgress(SnapshotProgress(
+                chunksEncoded: sortedChunkIDs.count, totalChunks: sortedChunkIDs.count, bytesEncoded: offset
+            ))
+        }
+
+        precondition(offset == totalSize, "encoded size mismatch: wrote \(offset) bytes, expected \(totalSize)")
+        return Data(buffer)
     }
 
     /// Decode a payload blob back into a ledger. Throws
@@ -279,22 +337,28 @@ enum LedgerSnapshotCodec {
 
     // MARK: - LE primitives
 
-    private static func appendUInt32LE(_ out: inout Data, _ v: UInt32) {
-        out.append(UInt8(v & 0xFF))
-        out.append(UInt8((v >> 8) & 0xFF))
-        out.append(UInt8((v >> 16) & 0xFF))
-        out.append(UInt8((v >> 24) & 0xFF))
+    /// Write a little-endian `UInt32` at `buffer[offset..<offset+4]`.
+    /// Indexed writes (vs. `Data.append`) avoid a per-call COW/bounds-check
+    /// for each of the millions of integers a large ledger encodes (REQ-3).
+    @inline(__always)
+    private static func writeUInt32LE(_ buffer: inout [UInt8], _ offset: Int, _ v: UInt32) {
+        buffer[offset] = UInt8(v & 0xFF)
+        buffer[offset + 1] = UInt8((v >> 8) & 0xFF)
+        buffer[offset + 2] = UInt8((v >> 16) & 0xFF)
+        buffer[offset + 3] = UInt8((v >> 24) & 0xFF)
     }
 
-    private static func appendInt64LE(_ out: inout Data, _ v: Int64) {
+    @inline(__always)
+    private static func writeInt64LE(_ buffer: inout [UInt8], _ offset: Int, _ v: Int64) {
         let bits = UInt64(bitPattern: v)
-        for shift in stride(from: 0, through: 56, by: 8) {
-            out.append(UInt8((bits >> UInt64(shift)) & 0xFF))
+        for k in 0..<8 {
+            buffer[offset + k] = UInt8((bits >> UInt64(k * 8)) & 0xFF)
         }
     }
 
-    private static func appendFloat32LE(_ out: inout Data, _ v: Float) {
-        appendUInt32LE(&out, v.bitPattern)
+    @inline(__always)
+    private static func writeFloat32LE(_ buffer: inout [UInt8], _ offset: Int, _ v: Float) {
+        writeUInt32LE(&buffer, offset, v.bitPattern)
     }
 
     private static func readUInt32LE(_ b: [UInt8], _ i: Int) -> UInt32 {

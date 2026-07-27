@@ -842,8 +842,14 @@ public actor Indexer {
     /// Returns a wall-clock/size breakdown of the write (issue #144, REQ-1) —
     /// all-zero if `writeLedgerSnapshot()` took an early-return path. Callers
     /// that don't need the breakdown may discard it.
+    ///
+    /// `onProgress`, if supplied, is invoked periodically during the encode
+    /// with chunks/bytes encoded so far (issue #144, REQ-5) — see
+    /// `LedgerSnapshotCodec.encode(_:dims:onProgress:)`.
     @discardableResult
-    public func persistSnapshot() async throws -> PersistSnapshotStats {
+    public func persistSnapshot(
+        onProgress: (@Sendable (SnapshotProgress) async -> Void)? = nil
+    ) async throws -> PersistSnapshotStats {
         while flushInProgress {
             _ = try await withCheckedThrowingContinuation { (c: CheckedContinuation<CompactionEvent?, any Swift.Error>) in
                 flushWaiters.append(c)
@@ -852,7 +858,7 @@ public actor Indexer {
         flushInProgress = true
         let stats: PersistSnapshotStats
         do {
-            stats = try await writeLedgerSnapshot()
+            stats = try await writeLedgerSnapshot(onProgress: onProgress)
         } catch {
             let waiters = flushWaiters
             flushWaiters.removeAll()
@@ -875,7 +881,9 @@ public actor Indexer {
     /// points. If `dims` has never been locked in (empty index), there is
     /// nothing meaningful to snapshot — any stale snapshot is cleared instead.
     @discardableResult
-    private func writeLedgerSnapshot() async throws -> PersistSnapshotStats {
+    private func writeLedgerSnapshot(
+        onProgress: (@Sendable (SnapshotProgress) async -> Void)? = nil
+    ) async throws -> PersistSnapshotStats {
         guard let dims = self.dims else {
             try await storage.clearLedgerSnapshot()
             return .zero
@@ -903,7 +911,7 @@ public actor Indexer {
         }
 
         let encodeStart = Date()
-        let payload = LedgerSnapshotCodec.encode(ledger, dims: dims)
+        let payload = await LedgerSnapshotCodec.encode(ledger, dims: dims, onProgress: onProgress)
         let encodeSeconds = Date().timeIntervalSince(encodeStart)
         let record = LedgerSnapshotRecord(
             dims: dims,
