@@ -43,3 +43,4 @@ ADRs document significant design decisions for Switchcraft. Each file follows th
 - [035 — Search latency: parallel bucket decode + query-token dedup](035-search-latency-parallel-decode-and-query-dedup.md)
 - [036 — Lazy ledger materialization: bucket-ref tokens instead of eager `[Float]`](036-lazy-ledger-bucket-ref-materialization.md)
 - [037 — Vacuum preserves live chunks' `.bucketRef`s via compaction-time remap](037-vacuum-bucket-ref-remap.md)
+- [038 — Shutdown-time snapshot encode: instrumentation, bulk-buffer rewrite, and progress hook](038-shutdown-snapshot-encode-performance.md)
