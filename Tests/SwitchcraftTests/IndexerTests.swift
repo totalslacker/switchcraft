@@ -7,6 +7,13 @@ struct IndexerTests {
 
     // MARK: - Test helpers
 
+    /// Converts a `ContinuousClock.Duration` to fractional seconds via its
+    /// `(seconds, attoseconds)` components (mirrors `PerformanceTests.nanoseconds(_:)`).
+    static func seconds(_ duration: ContinuousClock.Duration) -> TimeInterval {
+        let parts = duration.components
+        return Double(parts.seconds) + Double(parts.attoseconds) / 1e18
+    }
+
     /// Build a unit-norm random `[Float]` row of length `dims`.
     static func randomRow(dims: Int, rng: inout SplitMix64) -> [Float] {
         var v = [Float](repeating: 0, count: dims)
@@ -406,12 +413,13 @@ struct IndexerTests {
             rows.append(Self.randomRow(dims: dims, rng: &rng))
         }
 
-        let start = Date()
+        let clock = ContinuousClock()
+        let start = clock.now
         for (i, row) in rows.enumerated() {
             try await indexer.add(chunkID: Int64(i + 1), embeddings: row, dims: dims)
         }
         try await indexer.flush()
-        let elapsed = Date().timeIntervalSince(start)
+        let elapsed = Self.seconds(clock.now - start)
 
         let gens = try await storage.generations()
         #expect(gens.count == 1)
@@ -424,22 +432,28 @@ struct IndexerTests {
         // by `vDSP_maxvi` (Accelerate), which is always SIMD-compiled and
         // executes the same argmax in ~15ms regardless of build config.
         //
-        // Measurement evidence (11 runs each, M3 Max, sequential, debug mode):
+        // Measurement evidence (#97, 11 runs each, M3 Max, sequential debug mode):
         //   Pre-fix (plain Swift argmax): median=6.515s, p95=9.611s — nearly
         //     no headroom against the 10s limit; 36.5s spike observed under load.
         //   Post-fix (vDSP_maxvi):        wall-clock median=3.688s (upper bound
         //     on elapsed); all 11 runs passed elapsed<10s. The argmax step is
         //     now ~15ms; remaining elapsed is dominated by 5000 async add() hops.
         //
-        // Per ADR 012, CI (macOS-15) is ~1.35× slower than local for this kind
-        // of work. At a local elapsed upper bound of ~9s (worst-case load), the
-        // CI-adjusted estimate stays under 10s with comfortable margin after the
-        // vDSP_maxvi optimisation.
+        // Re-measured for issue #146 (11 consecutive *full-suite* debug runs —
+        // isolated `--filter` runs can't reproduce Swift Testing's default
+        // intra-process parallel scheduling, which is the actual contention
+        // source, not CI-vs-local variance): see ADR 039 for full data. The
+        // 10s/5s limits were left unchanged — the #97 baseline held with real
+        // headroom; the prior "ADR 012, ~1.35× CI-runner factor" comment above
+        // this one cited a discarded debug-mode calibration figure computed for
+        // a *different*, release-mode-only suite (search latency, not an async
+        // add-loop) and did not actually apply here — removed as inaccurate.
         #if DEBUG
         let limit: TimeInterval = 10.0
         #else
         let limit: TimeInterval = 5.0
         #endif
+        print("[PerfSmoke] elapsed=\(String(format: "%.3f", elapsed))s limit=\(limit)s")
         #expect(elapsed < limit, "indexing took \(elapsed)s — expected < \(limit)s")
     }
 }
