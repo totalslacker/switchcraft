@@ -442,7 +442,7 @@ struct IndexerTests {
         // Re-measured for issue #146 (11 consecutive *full-suite* debug runs —
         // isolated `--filter` runs can't reproduce Swift Testing's default
         // intra-process parallel scheduling, which is the actual contention
-        // source, not CI-vs-local variance): see ADR 038 for full data. The
+        // source, not CI-vs-local variance): see ADR 039 for full data. The
         // 10s/5s limits were left unchanged — the #97 baseline held with real
         // headroom; the prior "ADR 012, ~1.35× CI-runner factor" comment above
         // this one cited a discarded debug-mode calibration figure computed for

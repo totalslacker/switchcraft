@@ -56,7 +56,7 @@ struct SQLiteStorageConcurrencyTests {
     /// adjustments — see #95). Defaults to 5 iterations: issue #146 found the
     /// previous default of 1 iteration made this a mislabeled single sample, not
     /// an actual median, and a real contributor to ceiling noise independent of
-    /// host load (see ADR 038).
+    /// host load (see ADR 039).
     private static func measureMedian(
         iterations: Int = 5,
         _ work: () async throws -> Void
@@ -171,10 +171,10 @@ struct SQLiteStorageConcurrencyTests {
         // Ceiling combines a relative ratio with an absolute floor so a few
         // milliseconds of scheduling jitter on a fast/quiet host (where
         // tIsolated itself is tiny) isn't a large relative overshoot — see
-        // issue #146 / ADR 038, and the same shape already used by
+        // issue #146 / ADR 039, and the same shape already used by
         // `IndexerConflictRecoveryTests.recoveryBatch_compactionBoundary_withinTwoXBaseline`.
         // `fixedSlackSeconds` (30ms) was chosen from measured scheduling-jitter
-        // evidence gathered for issue #146 — see ADR 038 for the raw data.
+        // evidence gathered for issue #146 — see ADR 039 for the raw data.
         let fixedSlackSeconds = 0.030
         let ceiling = max(tIsolated * 1.5, tIsolated + fixedSlackSeconds)
         let msg = "concurrent writes took \(tConcurrentWrites)s, isolated was \(tIsolated)s, ceiling=\(ceiling)s"
