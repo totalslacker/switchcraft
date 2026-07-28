@@ -273,6 +273,33 @@ struct LedgerSnapshotCodecTests {
         #expect(updates.last?.bytesEncoded == data(forChunkCount: chunkCount))
     }
 
+    @Test("onProgress does not fire a duplicate final checkpoint when chunk count is an exact multiple of the yield interval")
+    func onProgressNoDuplicateOnExactMultiple() async throws {
+        // 1024 is exactly 2x the encoder's internal yield interval (512), so
+        // the in-loop checkpoint at chunk 1024 already reports the final
+        // state; a naive unconditional trailing callback would report it
+        // again with identical values.
+        let chunkCount = 1_024
+        var ledger: [Int64: [Indexer.LedgerToken]] = [:]
+        ledger.reserveCapacity(chunkCount)
+        for c in 1...chunkCount {
+            ledger[Int64(c)] = [.materialized([Float(c)])]
+        }
+
+        final actor ProgressRecorder {
+            private(set) var updates: [SnapshotProgress] = []
+            func record(_ p: SnapshotProgress) { updates.append(p) }
+        }
+        let recorder = ProgressRecorder()
+
+        _ = await LedgerSnapshotCodec.encode(ledger, dims: 1) { progress in
+            await recorder.record(progress)
+        }
+
+        let updates = await recorder.updates
+        #expect(updates.map(\.chunksEncoded) == [512, 1024])
+    }
+
     @Test("empty ledger never invokes onProgress")
     func onProgressNotCalledForEmptyLedger() async throws {
         actor Flag {
