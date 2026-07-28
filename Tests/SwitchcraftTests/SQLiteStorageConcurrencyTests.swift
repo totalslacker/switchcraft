@@ -44,16 +44,29 @@ struct SQLiteStorageConcurrencyTests {
         DocumentRecord(uuid: uuid, date: Date(), hash: "wh-\(uuid)", body: "write doc \(uuid)")
     }
 
-    /// Returns the median wall time (seconds) of `iterations` invocations.
+    /// Converts a `ContinuousClock.Duration` to fractional seconds via its
+    /// `(seconds, attoseconds)` components (mirrors `PerformanceTests.nanoseconds(_:)`).
+    private static func seconds(_ duration: ContinuousClock.Duration) -> Double {
+        let parts = duration.components
+        return Double(parts.seconds) + Double(parts.attoseconds) / 1e18
+    }
+
+    /// Returns the median wall time (seconds) of `iterations` invocations, timed
+    /// with `ContinuousClock` (not `Date`, which is subject to wall-clock/NTP
+    /// adjustments — see #95). Defaults to 5 iterations: issue #146 found the
+    /// previous default of 1 iteration made this a mislabeled single sample, not
+    /// an actual median, and a real contributor to ceiling noise independent of
+    /// host load (see ADR 038).
     private static func measureMedian(
-        iterations: Int = 3,
+        iterations: Int = 5,
         _ work: () async throws -> Void
     ) async throws -> Double {
+        let clock = ContinuousClock()
         var times: [Double] = []
         for _ in 0..<iterations {
-            let start = Date()
+            let start = clock.now
             try await work()
-            times.append(Date().timeIntervalSince(start))
+            times.append(Self.seconds(clock.now - start))
         }
         let sorted = times.sorted()
         return sorted[sorted.count / 2]
@@ -116,9 +129,10 @@ struct SQLiteStorageConcurrencyTests {
 
         let bulkCount = 50
 
-        // Baseline: 50 sequential writes in isolation.
+        // Baseline: 50 sequential writes in isolation. `measureMedian`'s default
+        // (5 iterations) gives an actual median rather than a single noisy sample.
         var isoCounter = 0
-        let tIsolated = try await Self.measureMedian(iterations: 1) {
+        let tIsolated = try await Self.measureMedian {
             for _ in 0..<bulkCount {
                 isoCounter += 1
                 try await storage.upsertDocument(Self.makeWriteDoc(uuid: "iso-\(isoCounter)"))
@@ -127,6 +141,7 @@ struct SQLiteStorageConcurrencyTests {
 
         // Concurrent: 50 writes + slow FTS scan running in parallel.
         // We time only the writes task; the FTS scan runs alongside.
+        let clock = ContinuousClock()
         let tConcurrentWrites = try await withThrowingTaskGroup(of: Double.self) { group -> Double in
             group.addTask {
                 // Slow FTS scan — holds the reader actor for its duration.
@@ -138,12 +153,12 @@ struct SQLiteStorageConcurrencyTests {
 
             let batchCounter = MutableBox(0)
             group.addTask {
-                let t = Date()
+                let t = clock.now
                 for _ in 0..<bulkCount {
                     let n = batchCounter.increment()
                     try await storage.upsertDocument(Self.makeWriteDoc(uuid: "conc-\(n)"))
                 }
-                return Date().timeIntervalSince(t)
+                return Self.seconds(clock.now - t)
             }
 
             var writeDuration = 0.0
@@ -153,8 +168,19 @@ struct SQLiteStorageConcurrencyTests {
             return writeDuration
         }
 
-        let ceiling = tIsolated * 1.5
+        // Ceiling combines a relative ratio with an absolute floor so a few
+        // milliseconds of scheduling jitter on a fast/quiet host (where
+        // tIsolated itself is tiny) isn't a large relative overshoot — see
+        // issue #146 / ADR 038, and the same shape already used by
+        // `IndexerConflictRecoveryTests.recoveryBatch_compactionBoundary_withinTwoXBaseline`.
+        // `fixedSlackSeconds` (30ms) was chosen from measured scheduling-jitter
+        // evidence gathered for issue #146 — see ADR 038 for the raw data.
+        let fixedSlackSeconds = 0.030
+        let ceiling = max(tIsolated * 1.5, tIsolated + fixedSlackSeconds)
         let msg = "concurrent writes took \(tConcurrentWrites)s, isolated was \(tIsolated)s, ceiling=\(ceiling)s"
+        print("[SafariUnfucker] tIsolated=\(String(format: "%.4f", tIsolated))s " +
+              "tConcurrentWrites=\(String(format: "%.4f", tConcurrentWrites))s " +
+              "ceiling=\(String(format: "%.4f", ceiling))s")
         #expect(tConcurrentWrites < ceiling, Comment(rawValue: msg))
     }
 }
