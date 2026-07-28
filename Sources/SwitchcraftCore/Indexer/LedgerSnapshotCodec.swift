@@ -245,7 +245,10 @@ enum LedgerSnapshotCodec {
             }
         }
 
-        if let onProgress, !sortedChunkIDs.isEmpty {
+        // Skip when the last in-loop checkpoint already reported the final
+        // chunk (chunk count is an exact multiple of yieldInterval) — firing
+        // again here would deliver an identical "done" update twice.
+        if let onProgress, !sortedChunkIDs.isEmpty, sortedChunkIDs.count % yieldInterval != 0 {
             await onProgress(SnapshotProgress(
                 chunksEncoded: sortedChunkIDs.count, totalChunks: sortedChunkIDs.count, bytesEncoded: offset
             ))
