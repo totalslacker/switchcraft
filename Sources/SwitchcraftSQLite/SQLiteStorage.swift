@@ -698,6 +698,82 @@ public actor SQLiteStorage: SwitchcraftStorage {
         }
     }
 
+    public func scanBuckets(forGeneration generationID: Int64) async throws -> [BucketScanRecord] {
+        try Task.checkCancellation()
+        switch mode {
+        case .closed:
+            throw SQLiteError(code: 1, message: "storage is not open")
+        case .inMemory(let conn):
+            let stmt = try conn.prepare("""
+                SELECT id, generation_id, center, length(residuals)
+                FROM bucket
+                WHERE generation_id = ?
+                ORDER BY id ASC
+                """)
+            try stmt.bind([.int(generationID)])
+            var rows: [BucketScanRecord] = []
+            do {
+                while try stmt.step() {
+                    rows.append(BucketScanRecord(
+                        id: stmt.columnInt64(0),
+                        generationID: stmt.columnInt64(1),
+                        center: stmt.columnBlob(2),
+                        residualByteCount: Int(stmt.columnInt64(3))
+                    ))
+                }
+            } catch {
+                try translateIfInterrupt(error)
+            }
+            return rows
+        case .fileBacked(_, let reader):
+            do {
+                return try await reader.scanBuckets(forGeneration: generationID)
+            } catch {
+                try translateIfInterrupt(error)
+            }
+        }
+    }
+
+    public func buckets(ids: [Int64]) async throws -> [BucketRecord] {
+        try Task.checkCancellation()
+        guard !ids.isEmpty else { return [] }
+        switch mode {
+        case .closed:
+            throw SQLiteError(code: 1, message: "storage is not open")
+        case .inMemory(let conn):
+            var rows: [BucketRecord] = []
+            do {
+                for batch in SQLiteReaderActor.chunked(ids, into: SQLiteReaderActor.bucketFetchBatchSize) {
+                    let placeholders = Array(repeating: "?", count: batch.count).joined(separator: ", ")
+                    let stmt = try conn.prepare("""
+                        SELECT id, generation_id, center, indices, residuals
+                        FROM bucket
+                        WHERE id IN (\(placeholders))
+                        """)
+                    try stmt.bind(batch.map { SQLValue.int($0) })
+                    while try stmt.step() {
+                        rows.append(BucketRecord(
+                            id: stmt.columnInt64(0),
+                            generationID: stmt.columnInt64(1),
+                            center: stmt.columnBlob(2),
+                            indices: stmt.columnBlob(3),
+                            residuals: stmt.columnBlob(4)
+                        ))
+                    }
+                }
+            } catch {
+                try translateIfInterrupt(error)
+            }
+            return rows
+        case .fileBacked(_, let reader):
+            do {
+                return try await reader.buckets(ids: ids)
+            } catch {
+                try translateIfInterrupt(error)
+            }
+        }
+    }
+
     // MARK: - Vacuum
 
     public func applyVacuumPlan(_ plan: VacuumPlan) async throws -> Int {

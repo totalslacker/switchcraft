@@ -130,6 +130,35 @@ public struct BucketRecord: Sendable, Hashable {
     }
 }
 
+/// A lightweight, scan-phase view of a bucket used during the centroid scan.
+///
+/// The centroid scan (see `SearchEngine`) only needs the centroid (to score
+/// against the query via `cblas_sgemm`) and the residual token count (to
+/// drive the cumulative-budget `tPrime` selection logic) for every bucket in
+/// a generation — `indices` and `residuals` are only needed for the small
+/// subset of buckets selection actually picks. `residualByteCount` is the
+/// raw byte length of the `residuals` blob (not divided by dims/2 into a
+/// token count) because the storage layer does not track `dims`; callers
+/// derive the token count themselves. See ADR 041.
+public struct BucketScanRecord: Sendable, Hashable {
+    public var id: Int64
+    public var generationID: Int64
+    public var center: Data
+    public var residualByteCount: Int
+
+    public init(
+        id: Int64,
+        generationID: Int64,
+        center: Data,
+        residualByteCount: Int
+    ) {
+        self.id = id
+        self.generationID = generationID
+        self.center = center
+        self.residualByteCount = residualByteCount
+    }
+}
+
 /// A persisted point-in-time snapshot of the indexer's in-memory ledger.
 ///
 /// Written at points where the ledger is known-consistent with storage

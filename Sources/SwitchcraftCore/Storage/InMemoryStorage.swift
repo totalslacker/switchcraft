@@ -220,6 +220,29 @@ public actor InMemoryStorage: SwitchcraftStorage {
         bucketsByGeneration[generationID] ?? []
     }
 
+    public func scanBuckets(forGeneration generationID: Int64) async throws -> [BucketScanRecord] {
+        (bucketsByGeneration[generationID] ?? []).map { bucket in
+            BucketScanRecord(
+                id: bucket.id,
+                generationID: bucket.generationID,
+                center: bucket.center,
+                residualByteCount: bucket.residuals.count
+            )
+        }
+    }
+
+    public func buckets(ids: [Int64]) async throws -> [BucketRecord] {
+        guard !ids.isEmpty else { return [] }
+        let wanted = Set(ids)
+        var byID: [Int64: BucketRecord] = [:]
+        for buckets in bucketsByGeneration.values {
+            for bucket in buckets where wanted.contains(bucket.id) {
+                byID[bucket.id] = bucket
+            }
+        }
+        return ids.compactMap { byID[$0] }
+    }
+
     // MARK: - Vacuum
 
     public func applyVacuumPlan(_ plan: VacuumPlan) async throws -> Int {

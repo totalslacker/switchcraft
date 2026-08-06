@@ -46,3 +46,4 @@ ADRs document significant design decisions for Switchcraft. Each file follows th
 - [038 — Shutdown-time snapshot encode: instrumentation, bulk-buffer rewrite, and progress hook](038-shutdown-snapshot-encode-performance.md)
 - [039 — Wall-clock threshold assertions: absolute floors, `ContinuousClock`, and multi-sample medians](039-wall-clock-threshold-assertions.md)
 - [040 — Per-stage search timing instrumentation](040-search-stage-timing-instrumentation.md)
+- [041 — Two-phase centroid scan (scan + fetch)](041-two-phase-centroid-scan.md)

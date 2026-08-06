@@ -170,6 +170,29 @@ public protocol SwitchcraftStorage: Sendable {
     /// Return all buckets for the given generation, in insertion order.
     func buckets(forGeneration generationID: Int64) async throws -> [BucketRecord]
 
+    /// Return a lightweight scan-phase view (`center` + residual byte count,
+    /// no `indices`/`residuals` payload bytes) of every bucket in the given
+    /// generation, ordered by ascending `id`.
+    ///
+    /// Used by `SearchEngine`'s centroid scan, which only needs the centroid
+    /// and residual token count to score and select candidate buckets —
+    /// `indices`/`residuals` are fetched afterward, only for the subset of
+    /// buckets selection picks, via `buckets(ids:)`. Implementations MUST NOT
+    /// read the `indices`/`residuals` payload bytes to satisfy this call
+    /// (e.g. a SQL backend should read a blob's length header, not its
+    /// content). The `id ASC` order is load-bearing: it feeds
+    /// `cblas_sgemm`'s summation order and must match `buckets(forGeneration:)`
+    /// exactly for determinism (ADR 006(f), ADR 035, ADR 041).
+    func scanBuckets(forGeneration generationID: Int64) async throws -> [BucketScanRecord]
+
+    /// Return full `BucketRecord`s (`center`, `indices`, `residuals`) for the
+    /// given bucket ids. Ids that no longer exist (e.g. deleted by a
+    /// concurrent vacuum/compaction between scan and fetch) are silently
+    /// omitted from the result rather than causing an error. Return order is
+    /// unspecified — callers that need a specific order must reconstruct it
+    /// themselves (e.g. from the id sequence produced by `scanBuckets`).
+    func buckets(ids: [Int64]) async throws -> [BucketRecord]
+
     // MARK: - Vacuum
 
     /// Atomically apply a pre-computed `VacuumPlan`: update or delete
