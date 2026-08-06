@@ -121,13 +121,16 @@ public actor SearchEngine {
         // 1. Per-query-token centroid scan, accumulating selection
         //    decisions and the missing baseline.
         var missing = [Float](repeating: -.infinity, count: n)
-        // Selected (generationID, bucket) records, deduplicated.
-        var selected: [BucketRecord] = []
+        // Selected bucket ids, deduplicated, in first-seen order. Full
+        // records are fetched in one batch after the scan loop completes
+        // (see ADR 041) — the scan phase only needs `center` and residual
+        // token count, not `indices`/`residuals`.
+        var selectedIDs: [Int64] = []
         var seenBuckets = Set<Int64>()
 
         let generations = try await storage.generations()
         for gen in generations {
-            let buckets = try await storage.buckets(forGeneration: gen.id)
+            let buckets = try await storage.scanBuckets(forGeneration: gen.id)
             if buckets.isEmpty { continue }
 
             // Build the centroid matrix and the per-bucket token count.
@@ -138,7 +141,7 @@ public actor SearchEngine {
             for bucket in buckets {
                 let center = try Self.decodeCenter(bucket.center, dims: dims)
                 centersFlat.append(contentsOf: center)
-                let tokens = bucket.residuals.count / (dims / 2)
+                let tokens = bucket.residualByteCount / (dims / 2)
                 bucketTokenCounts.append(tokens)
             }
 
@@ -173,7 +176,7 @@ public actor SearchEngine {
                     let idx = order[j]
                     let bucketID = buckets[idx].id
                     if seenBuckets.insert(bucketID).inserted {
-                        selected.append(buckets[idx])
+                        selectedIDs.append(bucketID)
                     }
                     cumsum += bucketTokenCounts[idx]
                     if cumsum >= config.tPrime {
@@ -192,6 +195,21 @@ public actor SearchEngine {
 
         // No candidate buckets at all → no hits. (missing[q] is still
         // -inf so the threshold filter would drop everything anyway.)
+        if selectedIDs.isEmpty { return [] }
+
+        // 2.5. Fetch full records (indices + residuals) only for the
+        //      buckets selection actually picked, then reconstruct in
+        //      `selectedIDs` order — not fetch-return order — so decode
+        //      output stays byte-identical to the pre-two-phase-split
+        //      implementation (ADR 041). Ids that vanished between scan
+        //      and fetch (e.g. a concurrent vacuum) are silently dropped,
+        //      matching the existing tolerance for a generation vanishing
+        //      between `storage.generations()` and the scan call above.
+        let fetchedBuckets = try await storage.buckets(ids: selectedIDs)
+        var bucketsByID: [Int64: BucketRecord] = [:]
+        bucketsByID.reserveCapacity(fetchedBuckets.count)
+        for bucket in fetchedBuckets { bucketsByID[bucket.id] = bucket }
+        let selected: [BucketRecord] = selectedIDs.compactMap { bucketsByID[$0] }
         if selected.isEmpty { return [] }
 
         // 3. Decode every selected bucket and reconstruct candidate
@@ -381,14 +399,17 @@ public actor SearchEngine {
         // 1. Per-unique-query-token centroid scan, accumulating selection
         //    decisions and the missing baseline.
         var missing = [Float](repeating: -.infinity, count: m)
-        // Selected (generationID, bucket) records, deduplicated.
-        var selected: [BucketRecord] = []
+        // Selected bucket ids, deduplicated, in first-seen order. Full
+        // records are fetched in one batch after the scan loop completes
+        // (see ADR 041) — the scan phase only needs `center` and residual
+        // token count, not `indices`/`residuals`.
+        var selectedIDs: [Int64] = []
         var seenBuckets = Set<Int64>()
 
         let generations = try await storage.generations()
         for gen in generations {
             try Task.checkCancellation()
-            let buckets = try await storage.buckets(forGeneration: gen.id)
+            let buckets = try await storage.scanBuckets(forGeneration: gen.id)
             if buckets.isEmpty { continue }
 
             // Build the centroid matrix and the per-bucket token count.
@@ -399,7 +420,7 @@ public actor SearchEngine {
             for bucket in buckets {
                 let center = try Self.decodeCenter(bucket.center, dims: dims)
                 centersFlat.append(contentsOf: center)
-                let tokens = bucket.residuals.count / (dims / 2)
+                let tokens = bucket.residualByteCount / (dims / 2)
                 bucketTokenCounts.append(tokens)
             }
 
@@ -434,7 +455,7 @@ public actor SearchEngine {
                     let idx = order[j]
                     let bucketID = buckets[idx].id
                     if seenBuckets.insert(bucketID).inserted {
-                        selected.append(buckets[idx])
+                        selectedIDs.append(bucketID)
                     }
                     cumsum += bucketTokenCounts[idx]
                     if cumsum >= config.tPrime {
@@ -453,6 +474,23 @@ public actor SearchEngine {
 
         // No candidate buckets at all → no hits. (missing[u] is still
         // -inf so the threshold filter would drop everything anyway.)
+        if selectedIDs.isEmpty { return [] }
+
+        try Task.checkCancellation()
+
+        // 2.5. Fetch full records (indices + residuals) only for the
+        //      buckets selection actually picked, then reconstruct in
+        //      `selectedIDs` order — not fetch-return order — so decode
+        //      output stays byte-identical to the pre-two-phase-split
+        //      implementation (ADR 041). Ids that vanished between scan
+        //      and fetch (e.g. a concurrent vacuum) are silently dropped,
+        //      matching the existing tolerance for a generation vanishing
+        //      between `storage.generations()` and the scan call above.
+        let fetchedBuckets = try await storage.buckets(ids: selectedIDs)
+        var bucketsByID: [Int64: BucketRecord] = [:]
+        bucketsByID.reserveCapacity(fetchedBuckets.count)
+        for bucket in fetchedBuckets { bucketsByID[bucket.id] = bucket }
+        let selected: [BucketRecord] = selectedIDs.compactMap { bucketsByID[$0] }
         if selected.isEmpty { return [] }
 
         try Task.checkCancellation()

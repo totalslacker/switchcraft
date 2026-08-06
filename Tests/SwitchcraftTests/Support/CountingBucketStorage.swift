@@ -107,6 +107,14 @@ public actor CountingBucketStorage: SwitchcraftStorage {
         return try await inner.buckets(forGeneration: generationID)
     }
 
+    public func scanBuckets(forGeneration generationID: Int64) async throws -> [BucketScanRecord] {
+        try await inner.scanBuckets(forGeneration: generationID)
+    }
+
+    public func buckets(ids: [Int64]) async throws -> [BucketRecord] {
+        try await inner.buckets(ids: ids)
+    }
+
     // MARK: - Full-text Search
 
     public func searchFullText(

@@ -102,12 +102,24 @@ public actor DelayInjectingStorage: SwitchcraftStorage {
         try await inner.insertBucket(bucket)
     }
 
-    /// The instrumented call: sleeps for `bucketDelay` before delegating.
     public func buckets(forGeneration generationID: Int64) async throws -> [BucketRecord] {
+        try await inner.buckets(forGeneration: generationID)
+    }
+
+    /// The instrumented call: sleeps for `bucketDelay` before delegating.
+    /// This is the call `SearchEngine`'s centroid scan actually makes
+    /// (issue #151 / ADR 041's two-phase scan/fetch split), so this is
+    /// where the delay belongs to preserve the original "slow vector
+    /// stage" semantics.
+    public func scanBuckets(forGeneration generationID: Int64) async throws -> [BucketScanRecord] {
         if bucketDelay > .zero {
             try await Task.sleep(for: bucketDelay)
         }
-        return try await inner.buckets(forGeneration: generationID)
+        return try await inner.scanBuckets(forGeneration: generationID)
+    }
+
+    public func buckets(ids: [Int64]) async throws -> [BucketRecord] {
+        try await inner.buckets(ids: ids)
     }
 
     // MARK: - Full-text Search

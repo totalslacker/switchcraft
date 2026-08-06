@@ -52,6 +52,54 @@ struct SQLiteStorageConformanceTests {
         try await storage.close()
     }
 
+    /// `scanBuckets`'s `residualByteCount` (issue #151 / ADR 041) must match
+    /// the full `buckets(forGeneration:)` fetch's `residuals.count` exactly,
+    /// for buckets with varied residual sizes, in both the `.inMemory` and
+    /// `.fileBacked` `SQLiteStorage` modes — the scan-shaped query reads the
+    /// blob's length header via SQL `length(residuals)`, never the payload,
+    /// so this proves that shortcut still yields the correct byte count.
+    @Test("scanBuckets residualByteCount matches full fetch", arguments: [false, true])
+    func scanBucketsResidualByteCountMatchesFullFetch(onDisk: Bool) async throws {
+        let path: String
+        if onDisk {
+            path = NSTemporaryDirectory().appending("switchcraft-scan-bytes-\(UUID().uuidString).sqlite3")
+        } else {
+            path = ":memory:"
+        }
+        defer { if onDisk { try? FileManager.default.removeItem(atPath: path) } }
+
+        let storage = SQLiteStorage(path: path)
+        try await storage.open()
+
+        let gen = try await storage.insertGeneration(
+            GenerationRecord(level: 0, numEmbeddings: 0, minChunkID: 0, maxChunkID: 0, created: Date())
+        )
+        let residualSizes = [0, 1, 4, 4096]
+        var inserted: [BucketRecord] = []
+        for (i, size) in residualSizes.enumerated() {
+            let bucket = try await storage.insertBucket(
+                BucketRecord(
+                    generationID: gen.id,
+                    center: Data(repeating: UInt8(i), count: 8),
+                    indices: Data(),
+                    residuals: Data(repeating: UInt8(i), count: size)
+                )
+            )
+            inserted.append(bucket)
+        }
+
+        let scanned = try await storage.scanBuckets(forGeneration: gen.id)
+        let full = try await storage.buckets(forGeneration: gen.id)
+        #expect(scanned.count == full.count)
+        let fullByID = Dictionary(uniqueKeysWithValues: full.map { ($0.id, $0) })
+        for record in scanned {
+            #expect(record.residualByteCount == fullByID[record.id]?.residuals.count)
+            #expect(record.center == fullByID[record.id]?.center)
+        }
+
+        try await storage.close()
+    }
+
     /// Verify that opening a V0-schema database (no `title` column) triggers the
     /// V0→V1 migration so that title-based FTS works after upgrading.
     @Test("V0→V1 migration adds title column and rebuilds FTS")

@@ -40,6 +40,9 @@ public enum StorageConformance {
 
         try await runGenerationLifecycle(storage)
         try await runBucketLifecycle(storage)
+        try await runBucketScanLifecycle(storage)
+        try await runBucketsByIDs(storage)
+        try await runBucketsByIDsExceedsBatchSize(storage)
         try await runDeleteGenerationCascadesToBuckets(storage)
         try await runReplaceGeneration(storage)
         try await runUpdateGenerationEmbeddingCount(storage)
@@ -248,6 +251,130 @@ public enum StorageConformance {
 
         let none = try await storage.buckets(forGeneration: 9999)
         #expect(none.isEmpty)
+    }
+
+    /// Covers the scan-shaped query added for issue #151 / ADR 041:
+    /// `id ASC` order matches `buckets(forGeneration:)` exactly (load-bearing
+    /// for `cblas_sgemm` summation order), `center` round-trips byte-for-byte,
+    /// and `residualByteCount` matches the full record's `residuals.count`
+    /// without the backend ever materializing the `residuals`/`indices`
+    /// payload to compute it.
+    static func runBucketScanLifecycle(_ storage: any SwitchcraftStorage) async throws {
+        try await storage.clear()
+
+        let gen = try await storage.insertGeneration(
+            GenerationRecord(level: 0, numEmbeddings: 0, minChunkID: 0, maxChunkID: 0, created: Date())
+        )
+
+        let b1 = try await storage.insertBucket(
+            BucketRecord(
+                generationID: gen.id,
+                center: Data([0x01, 0x02]),
+                indices: Data([0xAA]),
+                residuals: Data([0x03, 0x04, 0x05])
+            )
+        )
+        let b2 = try await storage.insertBucket(
+            BucketRecord(
+                generationID: gen.id,
+                center: Data([0x06, 0x07]),
+                indices: Data([0xBB, 0xCC]),
+                residuals: Data([0x08])
+            )
+        )
+
+        let scanned = try await storage.scanBuckets(forGeneration: gen.id)
+        #expect(
+            scanned.map(\.id) == [b1.id, b2.id],
+            "scan order must match id ASC, same as buckets(forGeneration:)"
+        )
+        #expect(scanned[0].center == b1.center)
+        #expect(scanned[0].residualByteCount == b1.residuals.count)
+        #expect(scanned[1].center == b2.center)
+        #expect(scanned[1].residualByteCount == b2.residuals.count)
+
+        let emptyGen = try await storage.scanBuckets(forGeneration: 9999)
+        #expect(emptyGen.isEmpty)
+    }
+
+    /// Covers `buckets(ids:)` added for issue #151 / ADR 041: only the
+    /// requested ids come back (with full `center`/`indices`/`residuals`),
+    /// ids may span multiple generations in one call, missing ids are
+    /// silently omitted rather than causing an error, and an empty request
+    /// returns an empty result.
+    static func runBucketsByIDs(_ storage: any SwitchcraftStorage) async throws {
+        try await storage.clear()
+
+        #expect(try await storage.buckets(ids: []).isEmpty)
+
+        let gen1 = try await storage.insertGeneration(
+            GenerationRecord(level: 0, numEmbeddings: 0, minChunkID: 0, maxChunkID: 0, created: Date())
+        )
+        let gen2 = try await storage.insertGeneration(
+            GenerationRecord(level: 1, numEmbeddings: 0, minChunkID: 0, maxChunkID: 0, created: Date())
+        )
+
+        let b1 = try await storage.insertBucket(
+            BucketRecord(generationID: gen1.id, center: Data([0x01]), indices: Data([0x02]), residuals: Data([0x03]))
+        )
+        let b2 = try await storage.insertBucket(
+            BucketRecord(generationID: gen1.id, center: Data([0x04]), indices: Data([0x05]), residuals: Data([0x06]))
+        )
+        let b3 = try await storage.insertBucket(
+            BucketRecord(generationID: gen2.id, center: Data([0x07]), indices: Data([0x08]), residuals: Data([0x09]))
+        )
+
+        // Exact requested ids only, spanning multiple generations.
+        let fetched = try await storage.buckets(ids: [b1.id, b3.id])
+        #expect(fetched.count == 2)
+        let byID = Dictionary(uniqueKeysWithValues: fetched.map { ($0.id, $0) })
+        #expect(byID[b1.id]?.center == b1.center)
+        #expect(byID[b1.id]?.indices == b1.indices)
+        #expect(byID[b1.id]?.residuals == b1.residuals)
+        #expect(byID[b3.id]?.generationID == gen2.id)
+
+        // b2 was not requested and must not appear.
+        #expect(!fetched.map(\.id).contains(b2.id))
+
+        // Missing ids are silently omitted, not an error.
+        let withMissing = try await storage.buckets(ids: [b1.id, 987_654_321])
+        #expect(withMissing.map(\.id) == [b1.id])
+
+        let allMissing = try await storage.buckets(ids: [987_654_321, 987_654_322])
+        #expect(allMissing.isEmpty)
+    }
+
+    /// `SQLiteStorage`'s `buckets(ids:)` batches its `IN (...)` fetch in
+    /// chunks (ADR 041) to stay under SQLite's bound-parameter limit. This
+    /// exercises a request that spans more than one batch, so every backend
+    /// must reassemble results across the boundary correctly.
+    static func runBucketsByIDsExceedsBatchSize(_ storage: any SwitchcraftStorage) async throws {
+        try await storage.clear()
+
+        let gen = try await storage.insertGeneration(
+            GenerationRecord(level: 0, numEmbeddings: 0, minChunkID: 0, maxChunkID: 0, created: Date())
+        )
+
+        var ids: [Int64] = []
+        ids.reserveCapacity(550)
+        for i in 0..<550 {
+            let b = try await storage.insertBucket(
+                BucketRecord(
+                    generationID: gen.id,
+                    center: Data([UInt8(i % 256)]),
+                    indices: Data(),
+                    residuals: Data()
+                )
+            )
+            ids.append(b.id)
+        }
+
+        let fetched = try await storage.buckets(ids: ids)
+        #expect(
+            Set(fetched.map(\.id)) == Set(ids),
+            "fetch must return every requested id even across a >500-id batch boundary"
+        )
+        #expect(fetched.count == 550)
     }
 
     static func runDeleteGenerationCascadesToBuckets(_ storage: any SwitchcraftStorage) async throws {
