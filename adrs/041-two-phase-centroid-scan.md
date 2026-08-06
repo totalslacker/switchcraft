@@ -146,8 +146,8 @@ shim, no `sqlite3_status`/`sqlite3_stmt_status` usage) — building one is
 disproportionate new infrastructure for this issue. `BucketScanBytesReadTests`
 (`Tests/SwitchcraftTests/SearchLatencyBenchmark/BucketScanBytesReadTests.swift`)
 instead builds two on-disk `SQLiteStorage` generations with equal bucket
-counts (300 each) but a 200x per-bucket residual-size difference, and
-compares median elapsed time (7 trials) for `scanBuckets` vs.
+counts (2,000 each) but a 200x per-bucket residual-size difference, and
+compares the minimum elapsed time across 9 trials for `scanBuckets` vs.
 `buckets(forGeneration:)` across the two generations. The full-fetch ratio
 (large/small) is asserted to exceed 3x — a **control** proving the
 methodology can actually detect a residual-size effect at all — and the
@@ -156,12 +156,27 @@ full-fetch ratio.
 
 Unlike `SearchLatencyBenchmarkTests` (gated behind
 `SWITCHCRAFT_SEARCH_LATENCY_BENCHMARK=1` because its fixture is hundreds of
-thousands of 768-dim embeddings), this fixture is ~600 buckets and a few MB
-of residual bytes total — cheap enough (under 0.1s observed) to run
+thousands of 768-dim embeddings), this fixture is ~4,000 buckets and a few MB
+of residual bytes total — cheap enough (under 0.5s observed) to run
 unconditionally on every `swift test`. The issue's own risk section notes
 this assertion is "the only thing that will actually catch a regression of
 this specific waste going forward"; gating it behind an opt-in env var most
 contributors never set would defeat that purpose.
+
+**Validate-stage revision**: the bucket count (300→2,000) and trial
+reduction (7-trial median→9-trial minimum) were revised during this issue's
+Validate stage after reproducing a ~37% full-suite flake rate at the
+original scale — see ADR 039 (wall-clock threshold assertions), whose
+"absolute floor for small baselines" diagnosis applies directly here (the
+original 300-bucket fixture's operations completed in 100-600
+*microseconds*, two orders of magnitude below the "tens of milliseconds"
+scale ADR 039 already flagged as fragile under Swift Testing's default
+intra-process parallel scheduling). Minimum-of-trials was chosen over a
+larger median because scheduling contention only ever adds stall time to a
+trial, never subtracts it — the minimum is the best available estimate of
+unstalled cost. 10/10 full-suite reproductions post-fix passed with wide
+margins (scanRatio ~1.4-1.8x vs. the 3.0 threshold; fetchRatio ~10-13x vs.
+the 3.0 floor).
 
 ## Consequences
 
