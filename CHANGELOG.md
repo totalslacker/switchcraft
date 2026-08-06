@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Phase 2: Search timing instrumentation
+
+- **Breaking**: `SwitchcraftStore.search()` now returns `SearchResult`
+  (`hits: [HybridHit]`, `timing: SearchTiming`) instead of `[HybridHit]`
+  directly; `SearchEngine.searchHybrid()` now returns `HybridSearchResult`
+  (`hits: [HybridHit]`, `timing: HybridSearchTiming`) instead of
+  `[HybridHit]` directly. Existing callers need a one-line `.hits` fix.
+  `SearchTiming` exposes per-stage `ContinuousClock` wall-time breakdowns
+  (`flushDuration`, `cascadeCompactionOccurred`/`cascadeCompactionDuration`,
+  `embedDuration`, `vectorDuration`, `bm25Duration`, `mergeDuration`) for a
+  single `search()` call, so callers can diagnose which stage dominates a
+  slow search instead of only seeing total latency. Issue #148, ADR 040.
+- **Breaking**: `SwitchcraftStoreError.searchTimedOut` gained a
+  `partialTiming: SearchTiming` associated value
+  (`searchTimedOut(elapsed:partialTiming:)`), carrying best-effort timing
+  for whichever stages completed before the deadline fired. Existing
+  pattern matches need `case .searchTimedOut(let elapsed, _):`. Issue #148.
+
 ### Phase 2: Metal embedder
 
 - Add Q4_K × FP32 Metal matmul kernel (`kernel_mul_mm_q4_K_f32`) ported
