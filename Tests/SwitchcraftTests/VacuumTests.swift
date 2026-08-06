@@ -81,8 +81,8 @@ struct VacuumTests {
 
         // Capture search results for surviving docs after remove() but
         // before vacuum() — this is the baseline vacuum() must not disturb.
-        let beforeHitsKeep1 = try await store.search(query: "quick brown fox", topK: 10)
-        let beforeHitsKeep2 = try await store.search(query: "slow green turtle", topK: 10)
+        let beforeHitsKeep1 = try await store.search(query: "quick brown fox", topK: 10).hits
+        let beforeHitsKeep2 = try await store.search(query: "slow green turtle", topK: 10).hits
         let countBefore = try await store.documentCount()
 
         let result = try await store.vacuum()
@@ -104,8 +104,8 @@ struct VacuumTests {
         #expect(countAfter == countBefore, "vacuum() must not change documentCount() beyond what remove() already did")
 
         // (d) search() results for surviving docs are unchanged.
-        let afterHitsKeep1 = try await store.search(query: "quick brown fox", topK: 10)
-        let afterHitsKeep2 = try await store.search(query: "slow green turtle", topK: 10)
+        let afterHitsKeep1 = try await store.search(query: "quick brown fox", topK: 10).hits
+        let afterHitsKeep2 = try await store.search(query: "slow green turtle", topK: 10).hits
         #expect(afterHitsKeep1.map(\.uuid) == beforeHitsKeep1.map(\.uuid))
         #expect(afterHitsKeep2.map(\.uuid) == beforeHitsKeep2.map(\.uuid))
         #expect(afterHitsKeep1.contains { $0.uuid == "keep-1" })
@@ -181,9 +181,9 @@ struct VacuumTests {
         // No ledgerOutOfSync on subsequent add()/index()/search().
         try await store.add(id: "post-vacuum-doc", body: "post vacuum content words")
         try await store.index()
-        let hits = try await store.search(query: "survivor document remains", topK: 10)
+        let hits = try await store.search(query: "survivor document remains", topK: 10).hits
         #expect(hits.contains { $0.uuid == "survivor" })
-        let hits2 = try await store.search(query: "post vacuum content", topK: 10)
+        let hits2 = try await store.search(query: "post vacuum content", topK: 10).hits
         #expect(hits2.contains { $0.uuid == "post-vacuum-doc" })
 
         try await store.shutdown()
@@ -350,7 +350,7 @@ struct VacuumTests {
         #expect(orphansAfter.contains { $0.hash == orphanHash })
 
         // The kept doc's chunk must survive and remain searchable.
-        let hits = try await store.search(query: "kept mixed corpus content", topK: 10)
+        let hits = try await store.search(query: "kept mixed corpus content", topK: 10).hits
         #expect(hits.contains { $0.uuid == "kept-doc" })
 
         try await store.shutdown()
@@ -611,7 +611,7 @@ struct VacuumTests {
         // No ledgerOutOfSync: a fresh add()/index()/search() cycle must work.
         try await store.add(id: "post-sustained-doc", body: "post sustained vacuum content")
         try await store.index()
-        let hits = try await store.search(query: "post sustained vacuum content", topK: 5)
+        let hits = try await store.search(query: "post sustained vacuum content", topK: 5).hits
         #expect(hits.contains { $0.uuid == "post-sustained-doc" })
 
         // Document the observed throughput (not asserted, informational).
@@ -715,7 +715,7 @@ struct VacuumTests {
         // shared-bucket vacuum cycles.
         try await store.add(id: "post-sustained-shared-doc", body: "post sustained shared bucket vacuum content")
         try await store.index()
-        let hits = try await store.search(query: "post sustained shared bucket vacuum", topK: 5)
+        let hits = try await store.search(query: "post sustained shared bucket vacuum", topK: 5).hits
         #expect(hits.contains { $0.uuid == "post-sustained-shared-doc" })
 
         try await store.shutdown()

@@ -129,7 +129,7 @@ struct PerformanceTests {
 
         // Warm-up: discount lazy initialisation costs (cold caches, first
         // BM25 lookup, etc.) from the timed loop.
-        _ = try await store.search(query: Self.probeQuery, topK: 10)
+        _ = try await store.search(query: Self.probeQuery, topK: 10).hits
 
         let iterations = 50
         var samplesNs: [UInt64] = []
@@ -138,7 +138,7 @@ struct PerformanceTests {
         let clock = ContinuousClock()
         for _ in 0..<iterations {
             let start = clock.now
-            _ = try await store.search(query: Self.probeQuery, topK: 10)
+            _ = try await store.search(query: Self.probeQuery, topK: 10).hits
             let elapsed = clock.now - start
             samplesNs.append(Self.nanoseconds(elapsed))
         }
@@ -248,7 +248,7 @@ struct PerformanceTests {
         let store = fixture.store
 
         // Warm-up: paged-in caches stabilise the baseline reading.
-        _ = try await store.search(query: Self.probeQuery, topK: 10)
+        _ = try await store.search(query: Self.probeQuery, topK: 10).hits
 
         let baselineOpt = Self.currentResidentBytes()
         try #require(baselineOpt != nil,
@@ -258,7 +258,7 @@ struct PerformanceTests {
 
         let iterations = 50
         for _ in 0..<iterations {
-            _ = try await store.search(query: Self.probeQuery, topK: 10)
+            _ = try await store.search(query: Self.probeQuery, topK: 10).hits
             let nowOpt = Self.currentResidentBytes()
             try #require(nowOpt != nil,
                          "RSS measurement (task_info) failed mid-loop")

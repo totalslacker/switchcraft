@@ -75,7 +75,7 @@ struct SearchTimeoutTests {
         // deadline:.zero ⟹ elapsed (always ≥ 0) ≥ deadline (0) is true
         // at the post-flush checkpoint in SwitchcraftStore.search().
         await #expect(throws: SwitchcraftStoreError.self) {
-            _ = try await store.search(query: "apples", topK: 5, deadline: .zero)
+            _ = try await store.search(query: "apples", topK: 5, deadline: .zero).hits
         }
     }
 
@@ -85,15 +85,21 @@ struct SearchTimeoutTests {
         try await store.add(id: "doc-1", body: "apples oranges grapes")
 
         do {
-            _ = try await store.search(query: "apples", topK: 5, deadline: .zero)
+            _ = try await store.search(query: "apples", topK: 5, deadline: .zero).hits
             Issue.record("Expected searchTimedOut but search completed normally")
         } catch let e as SwitchcraftStoreError {
-            guard case .searchTimedOut(let elapsed) = e else {
+            guard case .searchTimedOut(let elapsed, let partialTiming) = e else {
                 Issue.record("Wrong SwitchcraftStoreError case: \(e)")
                 return
             }
             // elapsed is the cost of flush + deadline check; must be ≥ 0.
             #expect(elapsed >= .zero)
+            // The pre-checkpoint timeout fires right after flush, so
+            // flushDuration must be populated but later stages must not
+            // have run yet (issue #148).
+            #expect(partialTiming.flushDuration != nil)
+            #expect(partialTiming.embedDuration == nil)
+            #expect(partialTiming.vectorDuration == nil)
         } catch {
             Issue.record("Unexpected error type: \(error)")
         }
@@ -144,7 +150,7 @@ struct SearchTimeoutTests {
             // Query completed in fewer than 10,000 VM instructions — the
             // progress handler never fired.  Accept this as a pass; see note.
         } catch let e as SwitchcraftStoreError {
-            guard case .searchTimedOut(let elapsed) = e else {
+            guard case .searchTimedOut(let elapsed, _) = e else {
                 Issue.record("Wrong SwitchcraftStoreError case: \(e)")
                 return
             }
@@ -172,7 +178,7 @@ struct SearchTimeoutTests {
         let searchTask = Task {
             // Will block in embedder.encode("apples") for 100 s
             // unless the task is cancelled first.
-            try await store.search(query: "apples", topK: 5)
+            try await store.search(query: "apples", topK: 5).hits
         }
 
         // Give the task time to start and suspend inside Task.sleep
@@ -204,7 +210,7 @@ struct SearchTimeoutTests {
             query: "apples",
             topK: 5,
             deadline: .seconds(30)
-        )
+        ).hits
         #expect(!hits.isEmpty)
         #expect(hits[0].uuid == "apple-doc")
     }
@@ -218,7 +224,7 @@ struct SearchTimeoutTests {
 
         // Trigger a pre-checkpoint timeout.
         do {
-            _ = try await store.search(query: "apples", topK: 5, deadline: .zero)
+            _ = try await store.search(query: "apples", topK: 5, deadline: .zero).hits
         } catch is SwitchcraftStoreError {
             // Expected timeout — continue to verify recovery.
         }
@@ -232,7 +238,7 @@ struct SearchTimeoutTests {
             query: "apples",
             topK: 5,
             deadline: .seconds(30)
-        )
+        ).hits
         #expect(!hits.isEmpty)
         #expect(hits[0].uuid == "doc-1")
     }

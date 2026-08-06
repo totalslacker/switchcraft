@@ -876,11 +876,19 @@ public actor SQLiteStorage: SwitchcraftStorage {
     /// happen in normal use, but possible if a caller bypasses the search
     /// pipeline), the original `SQLiteError` is rethrown unchanged rather
     /// than emitting a misleading `searchTimedOut(elapsed: .zero)`.
+    ///
+    /// This storage layer has no visibility into `SwitchcraftStore.search()`'s
+    /// accumulated per-stage timing (issue #148), so `partialTiming` is
+    /// reported empty here — this is the one error path where full
+    /// coverage genuinely isn't feasible, per that issue's requirement 6.
     private func translateIfInterrupt(_ error: Error) throws -> Never {
         if let sqliteError = error as? SQLiteError,
            sqliteError.code == sqliteInterruptCode,
            let ctx = currentDeadlineContext {
-            throw SwitchcraftStoreError.searchTimedOut(elapsed: ContinuousClock.now - ctx.searchStart)
+            throw SwitchcraftStoreError.searchTimedOut(
+                elapsed: ContinuousClock.now - ctx.searchStart,
+                partialTiming: SearchTiming()
+            )
         }
         throw error
     }

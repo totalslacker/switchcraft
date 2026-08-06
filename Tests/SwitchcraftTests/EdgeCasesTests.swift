@@ -45,7 +45,7 @@ struct EdgeCasesTests {
         let (store, _) = try await Self.makeStoreWithStorage()
         try await store.add(id: "doc-a", body: "alpha keyword")
 
-        let hits = try await store.search(query: "", topK: 10)
+        let hits = try await store.search(query: "", topK: 10).hits
         #expect(hits.isEmpty)
 
         try await store.shutdown()
@@ -57,7 +57,7 @@ struct EdgeCasesTests {
     func emptyIndexReturnsEmpty() async throws {
         let (store, _) = try await Self.makeStoreWithStorage()
 
-        let hits = try await store.search(query: "anything", topK: 10)
+        let hits = try await store.search(query: "anything", topK: 10).hits
         #expect(hits.isEmpty)
 
         try await store.shutdown()
@@ -73,7 +73,7 @@ struct EdgeCasesTests {
         // Result content is not asserted — FTS5 may treat single
         // characters as below-threshold, and the vector path may or
         // may not surface a match. The contract is no throw.
-        _ = try await store.search(query: "a", topK: 10)
+        _ = try await store.search(query: "a", topK: 10).hits
 
         try await store.shutdown()
     }
@@ -110,7 +110,7 @@ struct EdgeCasesTests {
 
         // Search for the unique trailing marker so the assertion is
         // unambiguous and not dependent on any one filler token.
-        let hits = try await store.search(query: "uniquemarker9999", topK: 10)
+        let hits = try await store.search(query: "uniquemarker9999", topK: 10).hits
         #expect(hits.contains(where: { $0.uuid == "long-doc" }))
 
         try await store.shutdown()
@@ -130,7 +130,7 @@ struct EdgeCasesTests {
         let body = "你好世界欢迎光临"
         try await store.add(id: "doc-cjk", body: body)
 
-        let hits = try await store.search(query: body, topK: 10)
+        let hits = try await store.search(query: body, topK: 10).hits
         #expect(hits.contains(where: { $0.uuid == "doc-cjk" }))
 
         try await store.shutdown()
@@ -148,8 +148,8 @@ struct EdgeCasesTests {
         // Self-search and a generic ASCII query: the contract is
         // no-throw. Emoji tokenisation under FTS5 is implementation-
         // dependent, so result presence is not asserted.
-        _ = try await store.search(query: body, topK: 10)
-        _ = try await store.search(query: "celebrate", topK: 10)
+        _ = try await store.search(query: body, topK: 10).hits
+        _ = try await store.search(query: "celebrate", topK: 10).hits
 
         try await store.shutdown()
     }
@@ -165,8 +165,8 @@ struct EdgeCasesTests {
         try await store.add(id: "doc-arabic", body: arabic)
         try await store.add(id: "doc-hebrew", body: hebrew)
 
-        _ = try await store.search(query: arabic, topK: 10)
-        _ = try await store.search(query: hebrew, topK: 10)
+        _ = try await store.search(query: arabic, topK: 10).hits
+        _ = try await store.search(query: hebrew, topK: 10).hits
 
         try await store.shutdown()
     }
@@ -197,7 +197,7 @@ struct EdgeCasesTests {
         try await store.add(id: "only", body: "lonely keyword in an otherwise empty index")
         try await store.remove(id: "only")
 
-        let hits = try await store.search(query: "lonely keyword", topK: 10)
+        let hits = try await store.search(query: "lonely keyword", topK: 10).hits
         #expect(hits.isEmpty)
 
         try await store.shutdown()

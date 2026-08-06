@@ -190,7 +190,7 @@ struct NoiseFloorPrecisionTests {
     @Test("Baseline: noise-floor degrades precision@5 without surface-form filter")
     func baselineNoiseDegradation() async throws {
         let store = try await buildLargeStore(queryMinSurfaceFormLength: 0)
-        let hits = try await store.search(query: "bartleby", topK: 5)
+        let hits = try await store.search(query: "bartleby", topK: 5).hits
 
         let p5 = precision(at: 5, hits: hits)
         try await store.shutdown()
@@ -214,7 +214,7 @@ struct NoiseFloorPrecisionTests {
     @Test("Fix: queryMinSurfaceFormLength=2 raises precision@5 ≥ 0.6")
     func filterImprovesPrecision() async throws {
         let store = try await buildLargeStore(queryMinSurfaceFormLength: 2)
-        let hits = try await store.search(query: "bartleby", topK: 5)
+        let hits = try await store.search(query: "bartleby", topK: 5).hits
 
         let p5 = precision(at: 5, hits: hits)
         try await store.shutdown()
@@ -256,7 +256,7 @@ struct NoiseFloorPrecisionTests {
         }
 
         try await store.index()
-        let hits = try await store.search(query: "bartleby", topK: 5)
+        let hits = try await store.search(query: "bartleby", topK: 5).hits
 
         let p1 = precision(at: 1, hits: hits)
         try await store.shutdown()

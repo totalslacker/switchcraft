@@ -115,7 +115,7 @@ struct HybridSearchTests {
             dims: 16,
             queryText: "   ",
             topK: 10
-        )
+        ).hits
         #expect(hits.isEmpty)
     }
 
@@ -132,7 +132,7 @@ struct HybridSearchTests {
             dims: 16,
             queryText: "uniquealpha",
             topK: 10
-        )
+        ).hits
         // Only one document contains "uniquealpha"; rank=1.
         #expect(hits.count == 1)
         #expect(hits[0].uuid == "alpha")
@@ -159,7 +159,7 @@ struct HybridSearchTests {
             dims: dims,
             queryText: "   \n  ",
             topK: 5
-        )
+        ).hits
         #expect(!hits.isEmpty)
         #expect(hits[0].uuid == target)
         #expect(hits[0].vectorRank == 1)
@@ -187,7 +187,7 @@ struct HybridSearchTests {
             dims: dims,
             queryText: "no-such-term-anywhere",
             topK: 5
-        )
+        ).hits
         // FTS returns nothing → only vector contributes; target is rank 1.
         #expect(hits[0].uuid == target)
         #expect(hits[0].ftsRank == nil)
@@ -218,7 +218,7 @@ struct HybridSearchTests {
             dims: dims,
             queryText: "needle",
             topK: 10
-        )
+        ).hits
         // "rare" must surface from FTS even though vector likely
         // ranks doc-0 first.
         #expect(hits.contains { $0.uuid == "rare" })
@@ -250,7 +250,7 @@ struct HybridSearchTests {
             dims: dims,
             queryText: "specialword",
             topK: 10
-        )
+        ).hits
 
         // "both" appears in vector AND fts → highest fused score.
         #expect(hits[0].uuid == "both")
@@ -276,7 +276,7 @@ struct HybridSearchTests {
             dims: 16,
             queryText: "common",
             topK: 3
-        )
+        ).hits
         #expect(hits.count == 3)
     }
 
@@ -297,7 +297,7 @@ struct HybridSearchTests {
             queryText: "common",
             topK: 10,
             filter: .uuidIn(Set(["keep", "keep-2"]))
-        )
+        ).hits
         let uuids: Set<String> = Set(hits.map { $0.uuid })
         #expect(uuids == ["keep", "keep-2"])
     }
@@ -324,7 +324,7 @@ struct HybridSearchTests {
             queryText: "shared",
             topK: 10,
             config: HybridConfig(rrfK: 60, perSourceBudget: 50)
-        )
+        ).hits
         #expect(hits.map { $0.uuid } == ["aaa", "bbb", "ccc"])
         // Reference scores: 1/(60+1), 1/(60+2), 1/(60+3).
         #expect(hits[0].score == 1 / Float(61))
@@ -345,7 +345,7 @@ struct HybridSearchTests {
             queryText: "term",
             topK: 10,
             config: HybridConfig(rrfK: 10, perSourceBudget: 50)
-        )
+        ).hits
         #expect(hits.count == 1)
         #expect(hits[0].score == 1 / Float(11))
     }
@@ -369,13 +369,13 @@ struct HybridSearchTests {
             dims: dims,
             queryText: "keyword",
             topK: 5
-        )
+        ).hits
         let second = try await engine.searchHybrid(
             queryEmbeddings: queryToken,
             dims: dims,
             queryText: "keyword",
             topK: 5
-        )
+        ).hits
         #expect(first == second)
     }
 }

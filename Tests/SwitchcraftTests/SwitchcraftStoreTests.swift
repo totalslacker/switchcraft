@@ -55,7 +55,7 @@ struct SwitchcraftStoreTests {
         try await store.add(id: "doc-b", body: "the banana is yellow and curved")
         try await store.add(id: "doc-c", body: "the cherry is dark and small")
 
-        let hits = try await store.search(query: "banana", topK: 1)
+        let hits = try await store.search(query: "banana", topK: 1).hits
         #expect(hits.count == 1)
         #expect(hits[0].uuid == "doc-b")
 
@@ -75,7 +75,7 @@ struct SwitchcraftStoreTests {
             query: "shared keyword",
             topK: 10,
             filter: .uuidIn(["doc-a", "doc-b"])
-        )
+        ).hits
         let uuids = Set(hits.map(\.uuid))
         #expect(uuids.isSubset(of: ["doc-a", "doc-b"]))
         #expect(!uuids.contains("doc-c"))
@@ -96,7 +96,7 @@ struct SwitchcraftStoreTests {
         try await store.remove(id: "does-not-exist")
 
         try await store.remove(id: "doc-a")
-        let hits = try await store.search(query: "keyword", topK: 10)
+        let hits = try await store.search(query: "keyword", topK: 10).hits
         #expect(!hits.contains(where: { $0.uuid == "doc-a" }))
         #expect(hits.contains(where: { $0.uuid == "doc-b" }))
 
@@ -115,12 +115,12 @@ struct SwitchcraftStoreTests {
         try await store.index()
         try await store.clear()
 
-        let hits = try await store.search(query: "keyword", topK: 10)
+        let hits = try await store.search(query: "keyword", topK: 10).hits
         #expect(hits.isEmpty)
 
         // Adding new content after clear works.
         try await store.add(id: "doc-z", body: "zeta keyword")
-        let postClear = try await store.search(query: "keyword", topK: 10)
+        let postClear = try await store.search(query: "keyword", topK: 10).hits
         #expect(postClear.contains(where: { $0.uuid == "doc-z" }))
 
         try await store.shutdown()
@@ -139,7 +139,7 @@ struct SwitchcraftStoreTests {
         try await store.add(id: "doc-x", body: "banana variant")
 
         // Second-body keyword finds doc-x via FTS.
-        let bananaHits = try await store.search(query: "banana", topK: 10)
+        let bananaHits = try await store.search(query: "banana", topK: 10).hits
         let bananaDocX = bananaHits.first(where: { $0.uuid == "doc-x" })
         #expect(bananaDocX != nil)
         #expect(bananaDocX?.ftsRank != nil)
@@ -149,7 +149,7 @@ struct SwitchcraftStoreTests {
         // it as a candidate via random MockEmbedder vectors; the
         // determinism we care about for replacement is that the FTS
         // index reflects the new body only.)
-        let appleHits = try await store.search(query: "apple", topK: 10)
+        let appleHits = try await store.search(query: "apple", topK: 10).hits
         let appleDocX = appleHits.first(where: { $0.uuid == "doc-x" })
         #expect(appleDocX?.ftsRank == nil)
         #expect(appleHits.contains(where: { $0.uuid == "doc-control" }))
@@ -189,7 +189,7 @@ struct SwitchcraftStoreTests {
         try await store.add(id: "doc-c", body: "gamma")
 
         // No explicit `index()` call.
-        let hits = try await store.search(query: "distinctivekeyword", topK: 10)
+        let hits = try await store.search(query: "distinctivekeyword", topK: 10).hits
         #expect(hits.contains(where: { $0.uuid == "doc-a" }))
 
         try await store.shutdown()
@@ -210,7 +210,7 @@ struct SwitchcraftStoreTests {
             try await store.add(id: "doc-b", body: "beta")
         }
         await #expect(throws: SwitchcraftStoreError.alreadyShutDown) {
-            _ = try await store.search(query: "alpha", topK: 1)
+            _ = try await store.search(query: "alpha", topK: 1).hits
         }
         await #expect(throws: SwitchcraftStoreError.alreadyShutDown) {
             try await store.remove(id: "doc-a")
@@ -246,7 +246,7 @@ struct SwitchcraftStoreTests {
             let hits = try await store.search(
                 query: "apple banana cherry",
                 topK: 10
-            )
+            ).hits
             try await store.shutdown()
             return hits
         }
@@ -277,7 +277,7 @@ struct SwitchcraftStoreTests {
             databasePath: path,
             embedder: MockEmbedder(dims: 32)
         )
-        let hits = try await reopened.search(query: "uniquemarker", topK: 10)
+        let hits = try await reopened.search(query: "uniquemarker", topK: 10).hits
         #expect(hits.contains(where: { $0.uuid == "persisted" }))
         try await reopened.shutdown()
     }
@@ -322,13 +322,13 @@ struct SwitchcraftStoreTests {
         defer { Task { try? await reopened.shutdown() } }
 
         // R6: search-after-restart must return hits from the prior session.
-        let hits1 = try await reopened.search(query: "apple fruit", topK: 5)
+        let hits1 = try await reopened.search(query: "apple fruit", topK: 5).hits
         #expect(hits1.count > 0, "search after restart returned no hits")
 
         // R7: add-then-search-after-restart must NOT throw ledgerOutOfSync.
         // Before the fix this throws; after the fix it succeeds.
         try await reopened.add(id: "doc-d", body: "grape fruit purple cluster")
-        let hits2 = try await reopened.search(query: "fruit", topK: 10)
+        let hits2 = try await reopened.search(query: "fruit", topK: 10).hits
         #expect(hits2.count > 0, "search after add-then-restart returned no hits")
     }
 
@@ -485,7 +485,7 @@ struct SwitchcraftStoreTests {
         let hits = try await store.search(
             query: "I picked some red apples from the orchard.",
             topK: 3
-        )
+        ).hits
         #expect(hits.first?.uuid == "fruit")
 
         try await store.shutdown()

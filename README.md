@@ -86,8 +86,8 @@ let store = try await SwitchcraftStore.sqlite(
 )
 try await store.add(id: "doc-a", body: "Apples and bananas are popular fruits.")
 try await store.add(id: "doc-b", body: "Heavy rainfall is expected this evening.")
-let hits = try await store.search(query: "red apples in the orchard", topK: 5)
-print(hits.map(\.uuid))
+let result = try await store.search(query: "red apples in the orchard", topK: 5)
+print(result.hits.map(\.uuid))
 try await store.shutdown()
 ```
 
