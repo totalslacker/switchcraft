@@ -613,8 +613,13 @@ public actor SearchEngine {
         filter: StorageFilter = .all,
         config: HybridConfig = HybridConfig(),
         deadlineContext: SearchDeadlineContext? = nil
-    ) async throws -> [HybridHit] {
-        guard topK > 0 else { return [] }
+    ) async throws -> HybridSearchResult {
+        guard topK > 0 else {
+            return HybridSearchResult(
+                hits: [],
+                timing: HybridSearchTiming(vectorDuration: .zero, bm25Duration: .zero, mergeDuration: .zero)
+            )
+        }
 
         // Pre-phase deadline check. Must run before any storage access.
         if let ctx = deadlineContext, ctx.isExpired {
@@ -632,11 +637,17 @@ public actor SearchEngine {
         let trimmedQuery = queryText.trimmingCharacters(in: .whitespacesAndNewlines)
         let hasVector = !queryEmbeddings.isEmpty
         let hasText = !trimmedQuery.isEmpty
-        if !hasVector && !hasText { return [] }
+        if !hasVector && !hasText {
+            return HybridSearchResult(
+                hits: [],
+                timing: HybridSearchTiming(vectorDuration: .zero, bm25Duration: .zero, mergeDuration: .zero)
+            )
+        }
 
         // 1. Vector candidates (skipped if no embeddings).
         // Check both task cancellation and wall-time deadline before the
         // vector search (BLAS matmuls can run long on large indices).
+        let vectorStageStart = ContinuousClock.now
         try Task.checkCancellation()
         if let ctx = deadlineContext, ctx.isExpired {
             throw Error.deadlineExceeded(elapsed: ctx.elapsed)
@@ -652,8 +663,10 @@ public actor SearchEngine {
         } else {
             vectorHits = []
         }
+        let vectorDuration = ContinuousClock.now - vectorStageStart
 
         // 2. FTS candidates (skipped if no text).
+        let bm25StageStart = ContinuousClock.now
         try Task.checkCancellation()
         if let ctx = deadlineContext, ctx.isExpired {
             throw Error.deadlineExceeded(elapsed: ctx.elapsed)
@@ -668,11 +681,13 @@ public actor SearchEngine {
         } else {
             ftsHits = []
         }
+        let bm25Duration = ContinuousClock.now - bm25StageStart
 
         // 3. Build per-uuid union with 1-indexed ranks and per-source raw
         //    scores. Dictionary iteration order is unspecified, but the
         //    final `(score DESC, uuid ASC)` sort below is a total order
         //    so the fused output is deterministic regardless.
+        let mergeStageStart = ContinuousClock.now
         try Task.checkCancellation()
         if let ctx = deadlineContext, ctx.isExpired {
             throw Error.deadlineExceeded(elapsed: ctx.elapsed)
@@ -699,7 +714,17 @@ public actor SearchEngine {
             union[hit.uuid] = prov
         }
 
-        if union.isEmpty { return [] }
+        if union.isEmpty {
+            let mergeDuration = ContinuousClock.now - mergeStageStart
+            return HybridSearchResult(
+                hits: [],
+                timing: HybridSearchTiming(
+                    vectorDuration: vectorDuration,
+                    bm25Duration: bm25Duration,
+                    mergeDuration: mergeDuration
+                )
+            )
+        }
 
         // 4. Final filter pass on the union. The same filter has already
         //    been pushed into both sub-calls; this is the correctness
@@ -740,10 +765,16 @@ public actor SearchEngine {
             if lhs.score != rhs.score { return lhs.score > rhs.score }
             return lhs.uuid < rhs.uuid
         }
+        let mergeDuration = ContinuousClock.now - mergeStageStart
+        let timing = HybridSearchTiming(
+            vectorDuration: vectorDuration,
+            bm25Duration: bm25Duration,
+            mergeDuration: mergeDuration
+        )
         if hits.count > topK {
-            return Array(hits.prefix(topK))
+            return HybridSearchResult(hits: Array(hits.prefix(topK)), timing: timing)
         }
-        return hits
+        return HybridSearchResult(hits: hits, timing: timing)
     }
 
     /// Score already-embedded passage token vectors directly against the

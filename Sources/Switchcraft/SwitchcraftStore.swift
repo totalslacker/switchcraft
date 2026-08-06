@@ -562,15 +562,18 @@ public actor SwitchcraftStore {
     ///     when non-nil. Pass `.seconds(0)` to enforce a pre-SQLite-only
     ///     check (useful in tests). When the budget is exhausted the call
     ///     throws `SwitchcraftStoreError.searchTimedOut(elapsed:)`.
-    /// - Returns: hits sorted by `(score DESC, uuid ASC)`.
+    /// - Returns: hits sorted by `(score DESC, uuid ASC)`, plus a
+    ///   per-stage timing breakdown for this call (issue #148).
     /// - Throws: `SwitchcraftStoreError.alreadyShutDown` /
     ///   `embeddingMismatch` / `searchTimedOut`; storage and embedder errors.
+    ///   `searchTimedOut` carries best-effort partial timing for whichever
+    ///   stages completed before the deadline fired.
     public func search(
         query: String,
         topK: Int = 10,
         filter: StorageFilter = .all,
         deadline: Duration? = nil
-    ) async throws -> [HybridHit] {
+    ) async throws -> SearchResult {
         try ensureRunning()
 
         let searchStart = ContinuousClock.now
@@ -580,17 +583,26 @@ public actor SwitchcraftStore {
             deadline: effectiveDeadline
         )
 
-        try await flushAndClearPending()
+        var timing = SearchTiming()
+
+        let (compactionEvent, flushDuration) = try await flushAndClearPending()
+        timing.flushDuration = flushDuration
+        if compactionEvent?.trigger == .cascade {
+            timing.cascadeCompactionOccurred = true
+            timing.cascadeCompactionDuration = flushDuration
+        }
 
         // Pre-SQLite checkpoint: flush may have consumed the budget.
         if deadlineCtx.isExpired {
-            throw SwitchcraftStoreError.searchTimedOut(elapsed: deadlineCtx.elapsed)
+            throw SwitchcraftStoreError.searchTimedOut(elapsed: deadlineCtx.elapsed, partialTiming: timing)
         }
 
+        let embedStart = ContinuousClock.now
         let queryEmbeddings = try await embedder.encodeQuery(
             query,
             minSurfaceFormLength: config.search.queryMinSurfaceFormLength
         )
+        timing.embedDuration = ContinuousClock.now - embedStart
         let dims = embedder.dims
         guard queryEmbeddings.count % dims == 0 else {
             throw SwitchcraftStoreError.embeddingMismatch(
@@ -600,7 +612,7 @@ public actor SwitchcraftStore {
 
         // Pre-SQLite checkpoint: encode may have consumed the budget.
         if deadlineCtx.isExpired {
-            throw SwitchcraftStoreError.searchTimedOut(elapsed: deadlineCtx.elapsed)
+            throw SwitchcraftStoreError.searchTimedOut(elapsed: deadlineCtx.elapsed, partialTiming: timing)
         }
 
         // Arm the progress handler with the remaining budget just before
@@ -609,7 +621,7 @@ public actor SwitchcraftStore {
         await storage.configureSearchDeadline(deadlineCtx)
 
         do {
-            let hits = try await searchEngine.searchHybrid(
+            let hybridResult = try await searchEngine.searchHybrid(
                 queryEmbeddings: queryEmbeddings,
                 dims: dims,
                 queryText: query,
@@ -619,11 +631,14 @@ public actor SwitchcraftStore {
                 deadlineContext: deadlineCtx
             )
             await storage.configureSearchDeadline(nil)
-            return hits
+            timing.vectorDuration = hybridResult.timing.vectorDuration
+            timing.bm25Duration = hybridResult.timing.bm25Duration
+            timing.mergeDuration = hybridResult.timing.mergeDuration
+            return SearchResult(hits: hybridResult.hits, timing: timing)
         } catch let e as SearchEngine.Error {
             await storage.configureSearchDeadline(nil)
             if case .deadlineExceeded(let elapsed) = e {
-                throw SwitchcraftStoreError.searchTimedOut(elapsed: elapsed)
+                throw SwitchcraftStoreError.searchTimedOut(elapsed: elapsed, partialTiming: timing)
             }
             throw e
         } catch {
@@ -738,12 +753,16 @@ public actor SwitchcraftStore {
         if isShutDown { throw SwitchcraftStoreError.alreadyShutDown }
     }
 
-    private func flushAndClearPending() async throws {
+    @discardableResult
+    private func flushAndClearPending() async throws -> (event: CompactionEvent?, duration: Duration) {
+        let start = ContinuousClock.now
         let event = try await indexer.flush()
+        let duration = ContinuousClock.now - start
         pendingChunkIDs.removeAll()
         if let event {
             await onCompactionEvent?(event)
         }
+        return (event, duration)
     }
 
     /// SHA-256 of the body's UTF-8 bytes, hex-encoded. Used as the chunk
