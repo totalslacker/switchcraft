@@ -18,12 +18,17 @@
 // measurably scale with residual size.
 //
 // Unlike `SearchLatencyBenchmarkTests`, this suite is NOT gated behind
-// `SWITCHCRAFT_SEARCH_LATENCY_BENCHMARK=1` — the fixture is small (a few
-// hundred buckets, a few MB of residual bytes total), cheap enough to run on
+// `SWITCHCRAFT_SEARCH_LATENCY_BENCHMARK=1` — the fixture is small (a couple
+// thousand buckets, a few MB of residual bytes total), cheap enough to run on
 // every `swift test`. Per the issue's own risk section, this is "the only
 // thing that will actually catch a regression of this specific waste going
 // forward"; gating it behind an opt-in env var most contributors never set
 // would defeat that purpose.
+//
+// bucketCount/trials/min-vs-median were revised during the issue's Validate
+// stage after reproducing a ~37% flake rate under full-suite contention —
+// see ADR 039 (wall-clock threshold assertions) and the inline comments on
+// `bucketCount`/`trials` below for the diagnosis and fix.
 
 import Foundation
 import Testing
@@ -35,7 +40,17 @@ struct BucketScanBytesReadTests {
 
     /// Buckets per generation. Equal across both generations — only the
     /// per-bucket residual size differs.
-    static let bucketCount = 300
+    ///
+    /// At 300 buckets the timed operations complete in ~100-600
+    /// microseconds — two orders of magnitude below the "tens of
+    /// milliseconds" scale ADR 039 already identified as too small for a
+    /// pure-ratio wall-clock threshold to survive Swift Testing's default
+    /// intra-process parallel scheduling under full-suite contention
+    /// (confirmed by Validate-stage reproduction: ~37% failure rate across
+    /// 8 full-suite runs). 2,000 buckets raises the absolute baseline into
+    /// the low-millisecond range, where ordinary scheduling jitter is a
+    /// much smaller fraction of the signal.
+    static let bucketCount = 2000
 
     /// Small generation: residual bytes per bucket.
     static let smallResidualBytes = 64
@@ -45,9 +60,14 @@ struct BucketScanBytesReadTests {
     /// measured live-index numbers show between `center` and `residuals`.
     static let largeResidualBytes = smallResidualBytes * 200
 
-    /// Timed trials per measurement, median-reduced to damp scheduler/OS
-    /// noise at these small (sub-millisecond to low-millisecond) scales.
-    static let trials = 7
+    /// Timed trials per measurement, minimum-reduced (not median) to damp
+    /// scheduler/OS noise: contention from other concurrently-scheduled
+    /// suites only ever *adds* stall time to a trial, it never subtracts —
+    /// so the minimum across trials is the best available estimate of the
+    /// unstalled cost, whereas a median can still land on a stalled sample
+    /// when a majority of trials are affected by sustained host load (as
+    /// observed during Validate-stage reproduction).
+    static let trials = 9
 
     @Test("scanBuckets bytes-read is flat across bucket residual size; full fetch scales (control)")
     func scanBucketsStaysFlatWhileFullFetchScales() async throws {
@@ -72,16 +92,16 @@ struct BucketScanBytesReadTests {
         _ = try await storage.buckets(forGeneration: smallGen)
         _ = try await storage.buckets(forGeneration: largeGen)
 
-        let scanSmall = try await Self.medianElapsed(trials: Self.trials) {
+        let scanSmall = try await Self.minElapsed(trials: Self.trials) {
             _ = try await storage.scanBuckets(forGeneration: smallGen)
         }
-        let scanLarge = try await Self.medianElapsed(trials: Self.trials) {
+        let scanLarge = try await Self.minElapsed(trials: Self.trials) {
             _ = try await storage.scanBuckets(forGeneration: largeGen)
         }
-        let fetchSmall = try await Self.medianElapsed(trials: Self.trials) {
+        let fetchSmall = try await Self.minElapsed(trials: Self.trials) {
             _ = try await storage.buckets(forGeneration: smallGen)
         }
-        let fetchLarge = try await Self.medianElapsed(trials: Self.trials) {
+        let fetchLarge = try await Self.minElapsed(trials: Self.trials) {
             _ = try await storage.buckets(forGeneration: largeGen)
         }
 
@@ -145,19 +165,17 @@ struct BucketScanBytesReadTests {
         return gen.id
     }
 
-    private static func medianElapsed(
+    private static func minElapsed(
         trials: Int, _ body: () async throws -> Void
     ) async rethrows -> Double {
         let clock = ContinuousClock()
-        var samples: [Double] = []
-        samples.reserveCapacity(trials)
+        var best = Double.greatestFiniteMagnitude
         for _ in 0..<trials {
             let start = clock.now
             try await body()
-            samples.append(seconds(clock.now - start))
+            best = Swift.min(best, seconds(clock.now - start))
         }
-        samples.sort()
-        return samples[samples.count / 2]
+        return best
     }
 
     private static func seconds(_ duration: ContinuousClock.Duration) -> Double {
