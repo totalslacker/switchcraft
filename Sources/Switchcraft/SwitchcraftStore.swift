@@ -16,7 +16,8 @@ import SwitchcraftCore
 ///     embedder: myEmbedder
 /// )
 /// try await store.add(id: "doc-1", body: "some text")
-/// let hits = try await store.search(query: "what is some text about?", topK: 10)
+/// let result = try await store.search(query: "what is some text about?", topK: 10)
+/// let hits = result.hits
 /// ```
 ///
 /// The store performs four jobs on every `add`: embed text via the
