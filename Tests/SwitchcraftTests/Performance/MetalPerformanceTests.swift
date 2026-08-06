@@ -117,7 +117,7 @@ struct MetalPerformanceTests {
         // Warm-up: shader-compile cost on first kernel touch is the
         // canonical Metal trap. This warm-up will absorb it for the
         // future kernel cases; here it just exercises the same shape.
-        _ = try await store.search(query: Self.probeQuery, topK: 10)
+        _ = try await store.search(query: Self.probeQuery, topK: 10).hits
 
         let iterations = 50
         var samplesNs: [UInt64] = []
@@ -126,7 +126,7 @@ struct MetalPerformanceTests {
         let clock = ContinuousClock()
         for _ in 0..<iterations {
             let start = clock.now
-            _ = try await store.search(query: Self.probeQuery, topK: 10)
+            _ = try await store.search(query: Self.probeQuery, topK: 10).hits
             let elapsed = clock.now - start
             samplesNs.append(Self.nanoseconds(elapsed))
         }

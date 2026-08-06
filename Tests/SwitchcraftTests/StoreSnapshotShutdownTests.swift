@@ -66,7 +66,7 @@ struct StoreSnapshotShutdownTests {
             #expect(await store.indexerUsedSnapshotFastPath == true)
 
             // Search still works and returns the expected document.
-            let hits = try await store.search(query: "quick brown fox", topK: 5)
+            let hits = try await store.search(query: "quick brown fox", topK: 5).hits
             #expect(hits.contains { $0.uuid == "doc-1" })
 
             try await store.shutdown()
@@ -99,7 +99,7 @@ struct StoreSnapshotShutdownTests {
                 databasePath: path, embedder: MockEmbedder(dims: 32), config: Self.storeConfig
             )
             #expect(await store.indexerUsedSnapshotFastPath == true)
-            _ = try await store.search(query: "document", topK: 3)  // read-only work
+            _ = try await store.search(query: "document", topK: 3).hits  // read-only work
             try await store.shutdown()
         }
 

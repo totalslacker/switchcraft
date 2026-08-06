@@ -290,7 +290,7 @@ struct FactsCorpusParityTests {
                 query: query.query,
                 topK: 1,
                 filter: .all
-            )
+            ).hits
             #expect(
                 hits.first?.uuid == expectedTop.docId,
                 """

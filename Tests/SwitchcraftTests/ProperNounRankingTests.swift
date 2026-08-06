@@ -219,7 +219,7 @@ struct ProperNounRankingTests {
         }
 
         try await store.index()
-        return try await store.search(query: "alfred", topK: 10)
+        return try await store.search(query: "alfred", topK: 10).hits
     }
 
     /// Build a fresh in-memory store, index the sparse-Bartleby document
@@ -244,7 +244,7 @@ struct ProperNounRankingTests {
         }
 
         try await store.index()
-        return try await store.search(query: query, topK: 10)
+        return try await store.search(query: query, topK: 10).hits
     }
 
     // MARK: - Tests
@@ -390,7 +390,7 @@ struct ProperNounRankingTests {
         try await store.index()
 
         // Rich-title document (Alfred) must still rank top 5 for "alfred".
-        let alfredHits = try await store.search(query: "alfred", topK: 10)
+        let alfredHits = try await store.search(query: "alfred", topK: 10).hits
         if let alfredHit = alfredHits.first(where: { $0.uuid == Self.alfredID }) {
             let vr = alfredHit.vectorRank ?? Int.max
             #expect(
@@ -402,7 +402,7 @@ struct ProperNounRankingTests {
         }
 
         // Sparse-title document (sparse-bartleby) must also rank top 5 for "bartleby".
-        let bartlebyHits = try await store.search(query: "bartleby", topK: 10)
+        let bartlebyHits = try await store.search(query: "bartleby", topK: 10).hits
         if let bartlebyHit = bartlebyHits.first(where: { $0.uuid == Self.sparseBartlebyID }) {
             let vr = bartlebyHit.vectorRank ?? Int.max
             #expect(

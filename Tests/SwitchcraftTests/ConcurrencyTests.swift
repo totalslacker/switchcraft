@@ -67,7 +67,7 @@ struct ConcurrencyTests {
             }
             for _ in 0..<searchCount {
                 group.addTask {
-                    _ = try await store.search(query: Self.sharedKeyword, topK: 5)
+                    _ = try await store.search(query: Self.sharedKeyword, topK: 5).hits
                 }
             }
             try await group.waitForAll()
@@ -76,7 +76,7 @@ struct ConcurrencyTests {
         let count = try await storage.documentCount()
         #expect(count == addCount)
 
-        let finalHits = try await store.search(query: Self.sharedKeyword, topK: 10)
+        let finalHits = try await store.search(query: Self.sharedKeyword, topK: 10).hits
         #expect(!finalHits.isEmpty)
 
         try await store.shutdown()
@@ -104,14 +104,14 @@ struct ConcurrencyTests {
             // Concurrent readers on storeB.
             for _ in 0..<readerCount {
                 group.addTask {
-                    _ = try await storeB.search(query: Self.sharedKeyword, topK: 5)
+                    _ = try await storeB.search(query: Self.sharedKeyword, topK: 5).hits
                 }
             }
             try await group.waitForAll()
         }
 
         // Final reads should see the fully-flushed corpus.
-        let finalHits = try await storeB.search(query: Self.sharedKeyword, topK: 10)
+        let finalHits = try await storeB.search(query: Self.sharedKeyword, topK: 10).hits
         #expect(!finalHits.isEmpty)
 
         let count = try await storage.documentCount()
@@ -153,7 +153,7 @@ struct ConcurrencyTests {
                 }
                 if searchIdx < searchCount {
                     group.addTask {
-                        _ = try await store.search(query: Self.sharedKeyword, topK: 5)
+                        _ = try await store.search(query: Self.sharedKeyword, topK: 5).hits
                     }
                     searchIdx += 1
                 }
@@ -164,7 +164,7 @@ struct ConcurrencyTests {
         let count = try await storage.documentCount()
         #expect(count == addCount)
 
-        let finalHits = try await store.search(query: Self.sharedKeyword, topK: 10)
+        let finalHits = try await store.search(query: Self.sharedKeyword, topK: 10).hits
         #expect(!finalHits.isEmpty)
 
         try await store.shutdown()
@@ -192,12 +192,12 @@ struct ConcurrencyTests {
         ) { group in
             for _ in 0..<(searchCount / 2) {
                 group.addTask {
-                    try await storeA.search(query: query, topK: 10)
+                    try await storeA.search(query: query, topK: 10).hits
                 }
             }
             for _ in 0..<(searchCount / 2) {
                 group.addTask {
-                    try await storeB.search(query: query, topK: 10)
+                    try await storeB.search(query: query, topK: 10).hits
                 }
             }
             var collected: [[HybridHit]] = []

@@ -63,7 +63,7 @@ struct OrphanTests {
         try await store.index()
 
         // The document must now appear in vector search.
-        let hits = try await store.search(query: body, topK: 10)
+        let hits = try await store.search(query: body, topK: 10).hits
         #expect(hits.contains(where: { $0.uuid == "orphan-doc" }),
                 "orphan-doc must be retrievable after orphan recovery + flush")
 
@@ -91,7 +91,7 @@ struct OrphanTests {
         try await store.index()
 
         // Both docs must be findable.
-        let hits = try await store.search(query: body, topK: 10)
+        let hits = try await store.search(query: body, topK: 10).hits
         let uuids = Set(hits.map(\.uuid))
         #expect(uuids.contains("doc-a"))
         #expect(uuids.contains("doc-b"))
