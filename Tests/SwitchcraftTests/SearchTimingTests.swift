@@ -15,7 +15,14 @@ import Testing
 @testable import Switchcraft
 @testable import SwitchcraftCore
 
-@Suite("SearchTiming")
+// `.serialized`: these tests assert on wall-clock duration relationships
+// (e.g. "the delayed stage's duration reflects the injected delay, the
+// others don't"). Running them in parallel with each other adds
+// intra-suite scheduling contention that can inflate a duration that
+// should stay small — matching the `.serialized` precedent already used
+// by every other timing-sensitive suite in this codebase (e.g.
+// `PerformanceTests`, `SQLiteStorageConcurrencyTests`, per ADR 012/023).
+@Suite("SearchTiming", .serialized)
 struct SearchTimingTests {
 
     // MARK: - Happy path: every stage is populated
@@ -155,7 +162,8 @@ struct SearchTimingTests {
         let r3 = try await store.search(query: "ii", topK: 5, deadline: .seconds(30))
         #expect(r3.timing.cascadeCompactionOccurred == true)
         let cascadeDuration = try #require(r3.timing.cascadeCompactionDuration)
-        #expect(cascadeDuration == r3.timing.flushDuration)
+        let flushDuration = try #require(r3.timing.flushDuration)
+        #expect(cascadeDuration == flushDuration)
     }
 
     @Test("cascadeCompactionOccurred is false for an ordinary (non-cascading) search")
