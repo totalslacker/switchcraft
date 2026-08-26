@@ -6,7 +6,7 @@ Accepted
 
 ## Context
 
-`totalslacker/switchcraft#151`, itself downstream of `totalslacker/WebBrain#344`
+`totalslacker/switchcraft#151`, itself downstream of a consumer performance report
 ("Switchcraft search consistently exceeds 5s Release deadline on typical
 queries"), found that `SearchEngine.searchOptimized` and `SearchEngine.searchLegacy`
 each began the centroid scan by calling `storage.buckets(forGeneration:)` for
