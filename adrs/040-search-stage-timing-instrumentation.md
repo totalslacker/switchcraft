@@ -6,11 +6,11 @@ Accepted
 
 ## Context
 
-`totalslacker/WebBrain#344` ("Switchcraft search consistently exceeds 5s
+A downstream consumer report ("Switchcraft search consistently exceeds 5s
 Release deadline on typical queries") found a live operator repro: search
 times out at the 5s deadline on typical queries while a sibling backend
 completes the same query in 2–3s, despite both paying the same CoreML
-embedder cost. WebBrain#344's Research stage inspected this package and
+embedder cost. That report's research stage inspected this package and
 found **no per-stage timing exists** inside `SwitchcraftStore.search()` or
 `SearchEngine.searchHybrid()` — so the parent investigation cannot tell
 whether the excess time is spent in the entry-point flush (which, per ADR

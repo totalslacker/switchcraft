@@ -18,7 +18,7 @@ Once the failure started, 100% of subsequent inferences failed regardless of
 input size. The host process had ~12 GB of free RAM — the exhaustion was
 specific to the ANE IOSurface buffer pool, not main memory.
 
-Key characteristics of the failure mode (from SafariUnfucker bulk-index run,
+Key characteristics of the failure mode (from a downstream-consumer bulk-index run,
 2026-05-05):
 - **First failure at minute ~48** (~1,000 successful encodes).
 - **Failure input-size distribution is broad** — not size-correlated. All input
@@ -154,7 +154,7 @@ returns a succeeding `CountingStubPredictor`.
 
 ### Production evidence invalidated key assumptions
 
-A SafariUnfucker bulk-index run against the post-#88 binary (issue #90 report) showed:
+A downstream-consumer bulk-index run against the post-#88 binary (issue #90 report) showed:
 
 - **388 successful inferences, then 6,157 consecutive failures** — 100% identical IOSurface
   error, zero `category: "warning"` / `recovered_iosurface_exhaustion` entries.
@@ -203,7 +203,7 @@ is out of scope for issue #90 and should be filed as a separate issue.
 
 ### Production evidence: Layer 3b CPU fallback has 0% recovery rate
 
-A SafariUnfucker bulk-index run (2026-05-07) processed 5,570 successful inferences
+A downstream-consumer bulk-index run (2026-05-07) processed 5,570 successful inferences
 and 1,038 failures:
 
 ```

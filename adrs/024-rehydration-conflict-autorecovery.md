@@ -210,7 +210,7 @@ as violating requirement #6 (storage state must be no worse than input on any er
 ## Consequences
 
 - **Consumers** no longer need to ship "wipe and rebuild" recovery UI for this class of
-  LSM inconsistency caused by interrupted writes. The downstream `totalslacker/SafariUnfucker#394`
+  LSM inconsistency caused by interrupted writes. The downstream consumer's
   stopgap (`isHealingStorage` wipe-rebuild UI) can be removed once this issue ships and
   the dependency is bumped.
 

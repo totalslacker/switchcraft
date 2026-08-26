@@ -12,7 +12,7 @@ actor's serial executor. While `PRAGMA journal_mode = WAL` was already set,
 WAL's ability to run concurrent reads alongside one writer was unused because
 all operations shared a single connection on a single actor queue.
 
-This caused a user-visible stall in SafariUnfucker: a search query (`MATCH`)
+This caused a user-visible stall in the downstream consumer: a search query (`MATCH`)
 held the actor executor for its entire duration; the indexer's next `add` call
 queued behind it and the counter froze until the search completed.
 

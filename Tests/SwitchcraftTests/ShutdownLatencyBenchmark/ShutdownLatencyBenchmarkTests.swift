@@ -10,7 +10,7 @@
 // larger, opt-in benchmark demonstrating that `SwitchcraftStore.shutdown()`
 // meets its <2s p95 target at a scale representative of the operator corpus
 // that motivated this issue: ~7,300 active chunks / ~11.1M embeddings,
-// dims=768 (the production scale quoted in ADR 034 / WebBrain#254).
+// dims=768 (the production scale quoted in ADR 034).
 //
 // # Fixture construction
 //

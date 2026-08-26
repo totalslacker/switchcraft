@@ -113,15 +113,15 @@ struct SQLiteStorageConcurrencyTests {
         #expect(writeEnd < readEnd, "Write should finish before slow read — may have queued behind the reader")
     }
 
-    // MARK: - Test [2]: SafariUnfucker stall regression
+    // MARK: - Test [2]: downstream-consumer stall regression
 
     /// Reproduces the original stall in miniature: a bulk-write loop of 50
     /// upserts must not be blocked by a concurrent slow FTS scan.
     ///
-    /// This is the SafariUnfucker scenario where ~1,178/6,511 chunks were
+    /// This is the downstream-consumer scenario where ~1,178/6,511 chunks were
     /// indexed and a search held the storage actor, freezing the indexer.
     @Test("Bulk write loop is not stalled by a concurrent slow FTS scan")
-    func safariUnfuckerRegressionTest() async throws {
+    func searchWriteStallRegressionTest() async throws {
         let (storage, url) = try await Self.makeTemporaryDB()
         defer {
             Task { try? await storage.close(); Self.cleanupDB(url: url) }
@@ -178,7 +178,7 @@ struct SQLiteStorageConcurrencyTests {
         let fixedSlackSeconds = 0.030
         let ceiling = max(tIsolated * 1.5, tIsolated + fixedSlackSeconds)
         let msg = "concurrent writes took \(tConcurrentWrites)s, isolated was \(tIsolated)s, ceiling=\(ceiling)s"
-        print("[SafariUnfucker] tIsolated=\(String(format: "%.4f", tIsolated))s " +
+        print("[StallRegression] tIsolated=\(String(format: "%.4f", tIsolated))s " +
               "tConcurrentWrites=\(String(format: "%.4f", tConcurrentWrites))s " +
               "ceiling=\(String(format: "%.4f", ceiling))s")
         #expect(tConcurrentWrites < ceiling, Comment(rawValue: msg))

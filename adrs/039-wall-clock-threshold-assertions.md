@@ -11,7 +11,7 @@ shared, oversubscribed dev host (`load averages: 56.85 46.51 39.65` /
 `hw.ncpu=20`, 16 concurrent logged-in users) each failed a *different*
 wall-clock-threshold assertion that passed reliably in isolation:
 
-- `SQLiteStorageConcurrencyTests.safariUnfuckerRegressionTest` —
+- `SQLiteStorageConcurrencyTests.searchWriteStallRegressionTest` —
   `tConcurrentWrites < tIsolated * 1.5`, no absolute floor. A ~10-20ms
   baseline (`tIsolated`) makes a few milliseconds of scheduling jitter a
   large *relative* overshoot (observed: `0.030s` vs ceiling `0.028s`;
@@ -24,7 +24,7 @@ adjustments — `livenessTest` in the same suite was already fixed for this
 in `#95`, but the fix wasn't applied to its neighbor). Investigation
 (issue #146 Research stage) additionally found:
 
-- `safariUnfuckerRegressionTest`'s `tIsolated` was computed via
+- `searchWriteStallRegressionTest`'s `tIsolated` was computed via
   `measureMedian(iterations: 1)` — a single sample mislabeled as a
   median, and a real, host-load-independent source of ceiling noise: the
   issue's own two data points show the ceiling itself swinging from
@@ -142,7 +142,7 @@ whole run, comparable to or worse than the original incident's
   host oversubscription beyond this specific measurement window, not a
   code regression. No threshold change made.
 
-### Fix 2 — `SQLiteStorageConcurrencyTests.safariUnfuckerRegressionTest`
+### Fix 2 — `SQLiteStorageConcurrencyTests.searchWriteStallRegressionTest`
 
 - `measureMedian`'s default `iterations` raised from `1` to `5` (an
   actual median now, not a mislabeled single sample) — used for
@@ -175,7 +175,7 @@ Both original failures pass comfortably under the new design.
 
 **Confirmation**: same 14 consecutive full-suite runs as Fix 1 (single
 combined measurement pass; both fixes were live simultaneously) —
-`safariUnfuckerRegressionTest` **14/14 passed**. Worst-case margin
+`searchWriteStallRegressionTest` **14/14 passed**. Worst-case margin
 (`ceiling - tConcurrentWrites`) across all 14 runs was `0.0231s` (run 1:
 ceiling `0.0402s` − `tConcurrentWrites` `0.0171s`); every other run's
 margin was `≥ 0.028s`. No case came close to the new ceiling.
@@ -221,10 +221,10 @@ usage.
   comment citing this ADR; no threshold change.
 - `SQLiteStorageConcurrencyTests`: `measureMedian` default iterations
   1→5; `ContinuousClock` timing in both `livenessTest` (already fixed,
-  `#95`) and now `safariUnfuckerRegressionTest`; absolute-floor term
+  `#95`) and now `searchWriteStallRegressionTest`; absolute-floor term
   added to the latter's ceiling.
 - Diagnostic `print()` statements added to both tests (`[PerfSmoke]`,
-  `[SafariUnfucker]`), matching the existing `[PerfTest]` precedent in
+  `[StallRegression]`), matching the existing `[PerfTest]` precedent in
   `IndexerConflictRecoveryTests` — visible in `swift test` output for
   future investigations without needing to re-instrument on demand.
 - No `SwitchcraftStorage` protocol change, no public API change, no
@@ -242,7 +242,7 @@ usage.
   Context — the prior misapplication of that figure is the bug this ADR
   fixes in `performanceSmoke`'s comment).
 - **`#95`** (WAL liveness `ContinuousClock` fix): this ADR extends the
-  same fix to `safariUnfuckerRegressionTest`, the one test in
+  same fix to `searchWriteStallRegressionTest`, the one test in
   `SQLiteStorageConcurrencyTests` that hadn't received it.
 - **`#97`** (`performanceSmoke` `vDSP_maxvi` fix): this ADR's
   re-measurement confirms `#97`'s fix and methodology (≥11 runs, median +
