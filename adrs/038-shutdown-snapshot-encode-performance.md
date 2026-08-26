@@ -6,14 +6,14 @@ Accepted
 
 ## Context
 
-`totalslacker/WebBrain#254` reported a 5–20+ second (occasionally unbounded,
-force-quit-required) delay on every WebBrain quit, entirely inside
+A downstream consumer reported a 5–20+ second (occasionally unbounded,
+force-quit-required) delay on every application quit, entirely inside
 `SwitchcraftStore.shutdown()`. Because `Indexer.persistSnapshot()` runs
 unconditionally on every shutdown — even a read-only/idle session — by
 design (ADR 034 §4: the idle-session gap it closes), every quit paid this
 cost regardless of session activity.
 
-`SwitchcraftStore.shutdown()` had no timing instrumentation, so WebBrain's
+`SwitchcraftStore.shutdown()` had no timing instrumentation, so the consumer's
 Research stage could narrow the problem to "somewhere inside `shutdown()`"
 but not to a specific sub-cost. Static analysis of
 `LedgerSnapshotCodec.encode(_:dims:)` found two independent, stackable
@@ -32,12 +32,12 @@ A third, distinct problem: `encode()`'s per-chunk loop had no `await`
 points. Running synchronously on the `Indexer` actor for a large ledger's
 entire encode duration risks starving the cooperative thread pool the rest
 of the host app's concurrency depends on — a known failure class in this
-codebase (WebBrain ADR 002 / issue #675), and a plausible explanation for
+codebase (the consumer's own shutdown-coordination ADR), and a plausible explanation for
 the "occasional hard hang requiring force-quit" distinct from a classic
 deadlock.
 
-Finally, SemanticHistory (WebBrain's sibling issue, filed alongside this
-one) needs to surface real shutdown progress to a user-facing UI rather
+Finally, the consumer's library layer (a sibling issue filed alongside
+this one) needs to surface real shutdown progress to a user-facing UI rather
 than an opaque work-item name, which `shutdown()` had no hook for.
 
 ## Decision

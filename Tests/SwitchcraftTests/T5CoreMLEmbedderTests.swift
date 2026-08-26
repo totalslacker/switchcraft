@@ -165,7 +165,7 @@ struct T5CoreMLEmbedderTests {
     /// Drive ≥10,000 encode calls through the real CoreML runtime to confirm
     /// the ANE IOSurface pool no longer exhausts.
     ///
-    /// Background: real-world bulk-index runs (SafariUnfucker, 2026-05-05)
+    /// Background: real-world bulk-index runs (downstream consumer, 2026-05-05)
     /// first failed at ~minute 48 / ~1,000 encodes with "Failed to allocate
     /// E5 buffer object." Every subsequent inference failed — no self-recovery.
     /// This test exceeds that failure window by 10× with margin, using varied

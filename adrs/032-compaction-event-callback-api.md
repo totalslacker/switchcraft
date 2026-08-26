@@ -7,7 +7,7 @@
 ## Context
 
 The `Indexer` already emits a `[Compact] started` log line that includes
-`inputBytes`, `trigger`, and `inputSegments`. The SafariUnfucker embedder needs
+`inputBytes`, `trigger`, and `inputSegments`. The downstream consumer's embedder needs
 those same fields to enrich a `[VMPRESS] threshold-hit` log entry without having
 to parse the `com.switchcraft.core` `os_log` subsystem. This ADR records the
 design decisions made to expose a `CompactionEvent` callback on `SwitchcraftStore`.
